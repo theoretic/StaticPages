@@ -1,0 +1,162 @@
+<?php
+/*
+Static pages module
+https://github.com/ryancramerdesign/Helloworld
+AT
+30.07.24
+*/
+
+namespace ProcessWire;
+
+class StaticPages extends WireData implements Module, ConfigurableModule {
+
+	public function init() {
+		$this->addHookAfter('Modules::saveConfig', $this, 'hookAfterSaveConfig');
+
+		if( !$this->isEnabled || $this->isEnabled == '' ) return;
+
+		$this->addHookAfter('Page::render', $this, 'hookCache');
+		$this->pages->addHookAfter('save', $this, 'hookWipe');
+		$this->pages->addHookAfter('delete', $this, 'hookWipe');
+	}
+
+	public function hookCache($event) {
+		return $this->cachePage($event);
+	}
+
+	public function hookWipe($event) {
+/*
+ob_start();
+echo 'page: ', var_dump( $event->arguments[0] );
+$buffer = ob_get_clean();
+$this->message($buffer);
+*/
+		return $this->wipeCaches();
+	}
+
+	public function hookAfterSaveConfig($event) {
+		//should run in backend only!
+		//Only continue if settings of this module are being saved.
+		if( $event->arguments[0] !== $this->className ) return;
+		if( $_POST['forceWipeOnModuleSave'] != 1 ) return;
+		return $this->wipeCaches();
+	}
+
+////
+
+	public function cachePage($event) {
+		//should run in frontend only!
+
+		$page = $event->object;
+
+		//skipping 404 page caching
+		if( $page->id == wire('config')->http404PageID ) return;
+
+		$html = $event->return;
+
+		// skip if template is deprecated
+		if( in_array($page->template->id, (array)$this->nonStaticTemplates) ) return;
+
+		//skip if get or post request
+		if( count(wire('input')->get) > 0 || count (wire('input')->post) > 0 ) return;
+
+		//caching url segments independently for non-404 pages
+		//if( $page->id != wire('config')->http404PageID )
+			$urlSegmentStr = wire('input')->urlSegmentStr;
+
+		$dir = "{$_SERVER['DOCUMENT_ROOT']}{$page->path}";
+		if( $urlSegmentStr !='' ) $dir.= "$urlSegmentStr/";
+		$path = $dir.$this->staticFile;
+		mkdir($dir, octdec($this->newDirPermissions), true);
+		file_put_contents($path,$html);
+	}
+
+	public function wipeCaches(){
+		//wipes every dir/index.html in non-deprecated dirs with no regard to template, page etc
+		//should run in backend
+
+		$start = microtime(true);
+
+		$deletedFiles = 0;
+		$deletedDirs = 0;
+		$deletedBytes = 0;
+
+		ob_start();
+
+		$nonStaticDirs = explode( "\n", $this->nonStaticDirs );
+
+//echo '$nonStaticDirs: ', var_dump($nonStaticDirs);//
+//echo '$_SERVER[DOCUMENT_ROOT]: ', var_dump($_SERVER['DOCUMENT_ROOT']);//
+
+		$rii = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator($_SERVER['DOCUMENT_ROOT']) );
+		foreach ($rii as $entry) {
+
+			//skipping dirs
+			if ( $entry == $_SERVER['DOCUMENT_ROOT'].'/..' ) continue; 
+			if ( $entry->isDir() ) continue;
+
+			$path = $entry->getPathname();
+			$pathInfo = pathinfo($path);
+			$dirPath = $pathInfo['dirname'];
+
+			//skipping files which should not be deleted
+			if( $pathInfo['basename'] != $this->staticFile ) continue;
+
+			//skipping $nonStaticDirs
+			$continueFlag = false;
+			foreach( $nonStaticDirs as $nonStaticDir ){
+				$sample = $_SERVER['DOCUMENT_ROOT'] . DIRECTORY_SEPARATOR . $nonStaticDir;
+				if( strpos($dirPath, $sample) === false ) continue;
+				$continueFlag = true;
+				break;
+			}
+			if( $continueFlag ) continue;
+
+//echo "deleting file $path...\n";//
+			$fileSize = filesize($path);
+			unlink($path);
+			$deletedFiles++;
+			$deletedBytes += $fileSize;
+
+			//trying to delete the dir if empty
+			$dirIsEmpty = !(new \FilesystemIterator($dirPath))->valid();
+			if( !$dirIsEmpty ) continue;
+//echo "deleting dir $dirPath...\n";//
+			rmdir($dirPath);//
+			$deletedDirs++;
+
+			//trying to delete empty dirs up to the DOCUMENT_ROOT level
+			$parts = explode( DIRECTORY_SEPARATOR, $dirPath );
+			foreach( $parts as $part ){
+				array_pop($parts);
+				$parentDirPath = implode( DIRECTORY_SEPARATOR, $parts );
+
+				if( strlen($parentDirPath) <= strlen($_SERVER['DOCUMENT_ROOT']) ) continue;
+				if( in_array( $parentDirPath, ['', '.', '..'] ) ) continue;
+
+				$dirIsEmpty = !(new \FilesystemIterator($parentDirPath))->valid();
+				if( !$dirIsEmpty ) continue;
+//echo "deleting dir $parentDirPath...\n";
+				rmdir($parentDirPath);//
+				$deletedDirs++;
+			}
+
+		}
+
+		$deletedBytes = $this->readableFilesize($deletedBytes);
+		$duration = round( microtime(true)-$start, 2 );
+echo "$deletedFiles static file(s) ($deletedBytes) and $deletedDirs dir(s) deleted in $duration s.";
+
+		$buffer = ob_get_clean();
+		$this->message($buffer);
+	}
+
+//privates
+
+	private function readableFilesize($bytes, $decimals = 2) {
+		$sz = 'BKMGTP';
+		$factor = floor((strlen($bytes) - 1) / 3);
+		return sprintf("%.{$decimals}f", $bytes / pow(1024, $factor)) . @$sz[$factor];
+	}
+
+}
