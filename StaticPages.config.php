@@ -3,7 +3,7 @@
 Static pages module config
 https://github.com/ryancramerdesign/Helloworld
 AT
-15.12.23
+05.05.26
 */
 
 namespace ProcessWire;
@@ -13,7 +13,8 @@ foreach( wire('templates') as $template ){
 	if( $template->name == 'admin' ) $nonStaticTemplatesValue[] = $template->id;
 }
 
-foreach (new \DirectoryIterator($_SERVER['DOCUMENT_ROOT']) as $fileInfo) {
+
+foreach (new \DirectoryIterator( \ProcessWire\wire('config')->paths->root ) as $fileInfo) {
 	if($fileInfo->isDot()) continue;
 	if($fileInfo->isFile()) continue;
 	$nonStaticDirsValue[] = $fileInfo->getFilename();
@@ -26,6 +27,17 @@ $nonStaticDirsValue = implode("\n", $nonStaticDirsValue);
 $config = [
 
 			[
+				'name'					=> 'nonStaticDirs',
+				'type'					=> 'textarea',
+				'label'					=> $this->_('Non-static directories'),
+				'description'			=> $this->_('one name per line'),
+				'notes'					=> $this->_('These directories will be protected from deletion when static files and dirs are deleted.'),
+				'required'				=> true,
+				'columnWidth'			=> 25,
+				'value'					=> $nonStaticDirsValue,
+			],
+
+			[
 				'name'					=> 'nonStaticTemplates',
 				'type'					=> 'AsmSelect',
 				'label'					=> $this->_('Non-static page templates'),
@@ -35,17 +47,6 @@ $config = [
 				'columnWidth'			=> 25,
 				'options'				=> $nonStaticTemplatesOptions,
 				'value'					=> $nonStaticTemplatesValue,
-			],
-
-			[
-				'name'					=> 'nonStaticDirs',
-				'type'					=> 'textarea',
-				'label'					=> $this->_('Non-static directories'),
-				'description'			=> $this->_('one name per line'),
-				'notes'					=> $this->_('These directories will be protected from deletion when static files and dirs are deleted.'),
-				'required'				=> true,
-				'columnWidth'			=> 25,
-				'value'					=> $nonStaticDirsValue,
 			],
 
 			[
@@ -71,13 +72,36 @@ $config = [
 			],
 
 			[
+				'name'					=> 'useShell',
+				'type'					=> 'checkbox',
+				'label'					=> $this->_('Use shell commands'),
+				//'description'			=> $this->_('UNIX string like 0755'),
+				'notes'					=> $this->_('Faster than php but can be unavailable on certain systems.'),
+				//'required'				=> true,
+				'columnWidth'			=> 25,
+				//'value'					=> 1,
+			],
+
+			[
+				'name'					=> 'rmDirPasses',
+				'type'					=> 'text',
+				'label'					=> $this->_('Dir removal passes'),
+				//'description'			=> $this->_('one name per line'),
+				'notes'					=> $this->_('When shell is used, recursive removal of empty dirs may require several passes if the directory structure is deeply nested. Normally, 10 passes is enough.'),
+				'required'				=> true,
+				'columnWidth'			=> 25,
+				'value'					=> 10,
+			],
+
+
+			[
 				'name'					=> 'forceWipeOnModuleSave',
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Force static pages deletion on module save'),
 				//'description'			=> $this->_('UNIX string like 0755'),
 				//'notes'					=> $this->_('Path relative to website root directory.'), 
 				//'required'				=> true,
-				'columnWidth'			=> 50,
+				'columnWidth'			=> 25,
 				//'value'					=> 1,
 			],
 
@@ -88,7 +112,7 @@ $config = [
 				//'description'			=> $this->_('UNIX string like 0755'),
 				//'notes'					=> $this->_('Path relative to website root directory.'), 
 				//'required'				=> true,
-				'columnWidth'			=> 50,
+				'columnWidth'			=> 25,
 				'value'					=> 1,
 			],
 ];
