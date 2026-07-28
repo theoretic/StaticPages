@@ -3,7 +3,7 @@
 Static pages module
 https://github.com/ryancramerdesign/Helloworld
 AT
-30.07.24
+28.07.26
 */
 
 namespace ProcessWire;
@@ -15,7 +15,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 		if( !$this->isEnabled || $this->isEnabled == '' ) return;
 
-		$this->addHookAfter('Page::render', $this, 'hookCache');
+		$this->addHookAfter('Page::render', $this, 'hookCache', ['priority' => (int) $this->priority]);
 		$this->pages->addHookAfter('save', $this, 'hookWipe');
 		$this->pages->addHookAfter('delete', $this, 'hookWipe');
 	}
@@ -25,6 +25,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	}
 
 	public function hookWipe($event) {
+
+		//skipping wipe is page is a repeater item
+		if ( $event->arguments[0] instanceof RepeaterPage ) return;
+
 /*
 ob_start();
 echo 'page: ', var_dump( $event->arguments[0] );
@@ -76,12 +80,106 @@ $this->message($buffer);
 		//should run in backend
 
 		$start = microtime(true);
+		ob_start();
+
+		if( $this->useShell ){
+			switch(true){
+				case stristr( PHP_OS, 'win' ):
+					$this->wipeCachesWindows();
+				break;
+
+				case stristr( PHP_OS, 'linux' ):
+				case stristr( PHP_OS, 'unix' ):
+				case stristr( PHP_OS, 'darwin' ):
+					$this->wipeCachesLinux();
+				break;
+
+				default:
+					$this->wipeCachesPHP();
+			}
+		}
+
+		else
+			$this->wipeCachesPHP();
+
+		$duration = round( microtime(true)-$start, 2 );
+
+echo "Static cache cleaned in $duration s.";
+
+		$buffer = ob_get_clean();
+		$this->message($buffer);
+	}
+
+//privates
+
+private function wipeCachesLinux(){
+
+//echo 'wipeCachesLinux()';//
+
+	$shellCommand = "find {$_SERVER['DOCUMENT_ROOT']} ";
+	$pruneCommands = [];
+
+	$nonStaticDirs = explode( "\n", $this->nonStaticDirs );
+
+	foreach( $nonStaticDirs as $nonStaticDir)
+		$pruneCommands[] = "-type d -name '$nonStaticDir' -prune ";
+
+	$shellCommand .= implode(' -o ', $pruneCommands);
+	$shellCommand .= "-o -type f -name '{$this->staticFile}' -exec rm {} + ";
+
+//echo '$shellCommand: ', var_dump($shellCommand);
+
+	`$shellCommand`;
+
+	//deleting empty dirs
+	for( $i=0; $i<$this->rmDirPasses; $i++ )
+		`find {$_SERVER['DOCUMENT_ROOT']} -type d -empty -exec rmdir {} +`;
+
+}
+
+private function wipeCachesWindows(){
+
+//echo 'wipeCachesWindows()';//
+
+	$nonStaticDirs = explode( "\n", $this->nonStaticDirs );
+
+	$shellCommand = "Get-ChildItem -Path {$_SERVER['DOCUMENT_ROOT']} -Filter '{$this->staticFile}'  -Recurse -File ";
+	$notLikeCommands = [];
+
+	foreach( $nonStaticDirs as $nonStaticDir)
+		$notLikeCommands[] = "\$_.DirectoryName -notlike '*\\" . $nonStaticDir . "*' ";
+
+	if( count($notLikeCommands) )
+		$shellCommand .= ' | Where-Object {' . implode(' -or ', $notLikeCommands) . '}';
+
+	$shellCommand .= " | Remove-Item -Force";
+
+	$shellCommand = "powershell \"$shellCommand\"";
+
+//echo '$shellCommand: ', var_dump($shellCommand);
+
+	$result = `$shellCommand`;
+
+//echo '$result: ', var_dump($result);
+
+	//deleting empty dirs
+	$shellCommand = "Get-ChildItem -Path {$_SERVER['DOCUMENT_ROOT']} -Recurse -Directory | Where-Object { \$_.GetFileSystemInfos().Count -eq 0 } | Remove-Item -Force -Verbose";
+	$shellCommand = "powershell \"$shellCommand\"";
+
+//echo '$shellCommand: ', var_dump($shellCommand);
+
+	for( $i=0; $i<$this->rmDirPasses; $i++ )
+		`$shellCommand`;
+
+}
+
+	public function wipeCachesPHP(){
+		//wipes every dir/index.html in non-deprecated dirs with no regard to template, page etc
+		//should run in backend
 
 		$deletedFiles = 0;
 		$deletedDirs = 0;
 		$deletedBytes = 0;
-
-		ob_start();
 
 		$nonStaticDirs = explode( "\n", $this->nonStaticDirs );
 
@@ -144,14 +242,10 @@ $this->message($buffer);
 		}
 
 		$deletedBytes = $this->readableFilesize($deletedBytes);
-		$duration = round( microtime(true)-$start, 2 );
-echo "$deletedFiles static file(s) ($deletedBytes) and $deletedDirs dir(s) deleted in $duration s.";
 
-		$buffer = ob_get_clean();
-		$this->message($buffer);
+echo "$deletedFiles static file(s) ($deletedBytes) and $deletedDirs dir(s) deleted. ";
+
 	}
-
-//privates
 
 	private function readableFilesize($bytes, $decimals = 2) {
 		$sz = 'BKMGTP';

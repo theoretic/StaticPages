@@ -1,20 +1,31 @@
 <?php
 /*
 Static pages module config
-https://github.com/ryancramerdesign/Helloworld
 AT
-05.05.26
+28.07.26
 */
 
 namespace ProcessWire;
+
+//looking for webroot
+
+$DOCUMENT_ROOT = $_SERVER['DOCUMENT_ROOT'];
+if(PHP_SAPI === 'cli'){
+	$dir = str_replace( '\\', '/', __DIR__ );
+	$parts = explode( '/', $dir );
+	while( $part = array_pop($parts) ){
+		$DOCUMENT_ROOT = implode('/',$parts);
+		if( !is_file( "$DOCUMENT_ROOT/index.php") ) continue;
+		break;
+	}
+}
 
 foreach( wire('templates') as $template ){
 	$nonStaticTemplatesOptions[$template->id] = $template->name;
 	if( $template->name == 'admin' ) $nonStaticTemplatesValue[] = $template->id;
 }
 
-
-foreach (new \DirectoryIterator( \ProcessWire\wire('config')->paths->root ) as $fileInfo) {
+foreach (new \DirectoryIterator($DOCUMENT_ROOT) as $fileInfo) {
 	if($fileInfo->isDot()) continue;
 	if($fileInfo->isFile()) continue;
 	$nonStaticDirsValue[] = $fileInfo->getFilename();
@@ -27,13 +38,24 @@ $nonStaticDirsValue = implode("\n", $nonStaticDirsValue);
 $config = [
 
 			[
+				'name'					=> 'priority',
+				'type'					=> 'text',
+				'label'					=> $this->_('Priority'),
+				//'description'			=> $this->_('one name per line'),
+				'notes'					=> $this->_('Should be higher than other modules have to transform their output.'),
+				'required'				=> true,
+				'columnWidth'			=> 33,
+				'value'					=> 1000,
+			],
+
+			[
 				'name'					=> 'nonStaticDirs',
 				'type'					=> 'textarea',
 				'label'					=> $this->_('Non-static directories'),
 				'description'			=> $this->_('one name per line'),
 				'notes'					=> $this->_('These directories will be protected from deletion when static files and dirs are deleted.'),
 				'required'				=> true,
-				'columnWidth'			=> 25,
+				'columnWidth'			=> 33,
 				'value'					=> $nonStaticDirsValue,
 			],
 
@@ -44,7 +66,7 @@ $config = [
 				//'description'			=> $this->_('one name per line'),
 				'notes'					=> $this->_('Pages having these templates will have no static representation.'), 
 				'required'				=> true,
-				'columnWidth'			=> 25,
+				'columnWidth'			=> 33,
 				'options'				=> $nonStaticTemplatesOptions,
 				'value'					=> $nonStaticTemplatesValue,
 			],
@@ -56,7 +78,7 @@ $config = [
 				'description'			=> $this->_('UNIX string like 0755'),
 				//'notes'					=> $this->_('Path relative to website root directory.'), 
 				'required'				=> true,
-				'columnWidth'			=> 25,
+				'columnWidth'			=> 33,
 				'value'					=> '0755',
 			],
 
@@ -67,7 +89,7 @@ $config = [
 				//'description'			=> $this->_('normally index.html'),
 				//'notes'					=> $this->_('Path relative to website root directory.'), 
 				'required'				=> true,
-				'columnWidth'			=> 25,
+				'columnWidth'			=> 33,
 				'value'					=> 'index.html',
 			],
 
@@ -76,9 +98,9 @@ $config = [
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Use shell commands'),
 				//'description'			=> $this->_('UNIX string like 0755'),
-				'notes'					=> $this->_('Faster than php but can be unavailable on certain systems.'),
+				'notes'					=> $this->_('Faster than php but can be unavailable on certain systems.'), 
 				//'required'				=> true,
-				'columnWidth'			=> 25,
+				'columnWidth'			=> 33,
 				//'value'					=> 1,
 			],
 
@@ -89,10 +111,9 @@ $config = [
 				//'description'			=> $this->_('one name per line'),
 				'notes'					=> $this->_('When shell is used, recursive removal of empty dirs may require several passes if the directory structure is deeply nested. Normally, 10 passes is enough.'),
 				'required'				=> true,
-				'columnWidth'			=> 25,
+				'columnWidth'			=> 33,
 				'value'					=> 10,
 			],
-
 
 			[
 				'name'					=> 'forceWipeOnModuleSave',
@@ -101,7 +122,7 @@ $config = [
 				//'description'			=> $this->_('UNIX string like 0755'),
 				//'notes'					=> $this->_('Path relative to website root directory.'), 
 				//'required'				=> true,
-				'columnWidth'			=> 25,
+				'columnWidth'			=> 33,
 				//'value'					=> 1,
 			],
 
@@ -112,7 +133,7 @@ $config = [
 				//'description'			=> $this->_('UNIX string like 0755'),
 				//'notes'					=> $this->_('Path relative to website root directory.'), 
 				//'required'				=> true,
-				'columnWidth'			=> 25,
+				'columnWidth'			=> 33,
 				'value'					=> 1,
 			],
 ];
