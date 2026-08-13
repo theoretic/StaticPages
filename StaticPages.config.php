@@ -7,18 +7,12 @@ AT
 
 namespace ProcessWire;
 
-//looking for webroot
+//webroot from PW config: works under CLI and subdirectory installs
+$DOCUMENT_ROOT = rtrim( wire('config')->paths->root, '/\\' );
 
-$DOCUMENT_ROOT = $_SERVER['DOCUMENT_ROOT'];
-if(PHP_SAPI === 'cli'){
-	$dir = str_replace( '\\', '/', __DIR__ );
-	$parts = explode( '/', $dir );
-	while( $part = array_pop($parts) ){
-		$DOCUMENT_ROOT = implode('/',$parts);
-		if( !is_file( "$DOCUMENT_ROOT/index.php") ) continue;
-		break;
-	}
-}
+$nonStaticTemplatesOptions = [];
+$nonStaticTemplatesValue = [];
+$nonStaticDirsValue = [];
 
 foreach( wire('templates') as $template ){
 	$nonStaticTemplatesOptions[$template->id] = $template->name;
@@ -98,7 +92,7 @@ $config = [
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Use shell commands'),
 				//'description'			=> $this->_('UNIX string like 0755'),
-				'notes'					=> $this->_('Faster than php but can be unavailable on certain systems.'), 
+				'notes'					=> $this->_('Applies only to the fallback full-disk scan (no manifest or forced wipe). Faster than php but can be unavailable on certain systems.'),
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				//'value'					=> 1,
@@ -120,7 +114,7 @@ $config = [
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Force static pages deletion on module save'),
 				//'description'			=> $this->_('UNIX string like 0755'),
-				//'notes'					=> $this->_('Path relative to website root directory.'), 
+				'notes'					=> $this->_('Performs a full disk scan, also removing static files the manifest does not know about.'),
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				//'value'					=> 1,

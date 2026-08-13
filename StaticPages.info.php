@@ -10,7 +10,7 @@ namespace ProcessWire;
 
 $info = [
 	'title'					=> 'StaticPages',
-	'version'				=> 021,
+	'version'				=> '0.3.0',
 	'summary'				=> 'Saves output to static html files and deletes html files on each page save.',
 	'author'				=> 'AT / atis.pro',
 	'href'					=> 'http://atis.pro',

@@ -13,7 +13,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	public function init() {
 		$this->addHookAfter('Modules::saveConfig', $this, 'hookAfterSaveConfig');
 
-		if( !$this->isEnabled || $this->isEnabled == '' ) return;
+		if( !$this->isEnabled ) return;
 
 		$this->addHookAfter('Page::render', $this, 'hookCache', ['priority' => (int) $this->priority]);
 		$this->pages->addHookAfter('save', $this, 'hookWipe');
@@ -26,24 +26,21 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	public function hookWipe($event) {
 
-		//skipping wipe is page is a repeater item
+		//skipping wipe if page is a repeater item
 		if ( $event->arguments[0] instanceof RepeaterPage ) return;
 
-/*
-ob_start();
-echo 'page: ', var_dump( $event->arguments[0] );
-$buffer = ob_get_clean();
-$this->message($buffer);
-*/
 		return $this->wipeCaches();
 	}
 
 	public function hookAfterSaveConfig($event) {
 		//should run in backend only!
 		//Only continue if settings of this module are being saved.
-		if( $event->arguments[0] !== $this->className ) return;
-		if( $_POST['forceWipeOnModuleSave'] != 1 ) return;
-		return $this->wipeCaches();
+		$class = $event->arguments(0);
+		if( is_object($class) ) $class = $class->className();
+		if( $class !== $this->className() ) return;
+		if( !$this->wire('input')->post('forceWipeOnModuleSave') ) return;
+		//full disk scan: also catches files the manifest does not know about
+		return $this->wipeCaches(true);
 	}
 
 ////
@@ -53,10 +50,18 @@ $this->message($buffer);
 
 		$page = $event->object;
 
+		//skipping partial renders: the hook fires for every $somePage->render() call,
+		//only the page actually being viewed may be cached under the current URL
+		if( $page !== $this->wire('page') ) return;
+
 		//skipping 404 page caching
 		if( $page->id == wire('config')->http404PageID ) return;
 
+		//skipping logged-in users, their markup may contain private data
+		if( $this->wire('user')->isLoggedin() ) return;
+
 		$html = $event->return;
+		if( !strlen( (string) $html ) ) return;
 
 		// skip if template is deprecated
 		if( in_array($page->template->id, (array)$this->nonStaticTemplates) ) return;
@@ -64,33 +69,48 @@ $this->message($buffer);
 		//skip if get or post request
 		if( count(wire('input')->get) > 0 || count (wire('input')->post) > 0 ) return;
 
-		//caching url segments independently for non-404 pages
-		//if( $page->id != wire('config')->http404PageID )
-			$urlSegmentStr = wire('input')->urlSegmentStr;
+		//skipping paginated pages: pageNum is not part of urlSegmentStr, page 1 would be overwritten
+		if( (int) wire('input')->pageNum > 1 ) return;
 
-		$dir = "{$_SERVER['DOCUMENT_ROOT']}{$page->path}";
+		//caching url segments independently
+		$urlSegmentStr = wire('input')->urlSegmentStr;
+
+		$dir = $this->rootPath() . $page->path;
 		if( $urlSegmentStr !='' ) $dir.= "$urlSegmentStr/";
 		$path = $dir.$this->staticFile;
-		mkdir($dir, octdec($this->newDirPermissions), true);
-		file_put_contents($path,$html);
+
+		$mode = octdec($this->newDirPermissions);
+		if( !$mode ) $mode = 0755;
+
+		if( !is_dir($dir) && !mkdir($dir, $mode, true) && !is_dir($dir) ) return;
+		if( file_put_contents($path, $html, LOCK_EX) === false ) return;
+		$this->logStaticFile($path);
 	}
 
-	public function wipeCaches(){
-		//wipes every dir/index.html in non-deprecated dirs with no regard to template, page etc
+	public function wipeCaches( $forceScan = false ){
+		//deletes the files listed in the manifest, or falls back to a full scan
+		//of the site root when no manifest exists (or $forceScan is set)
 		//should run in backend
 
 		$start = microtime(true);
 		ob_start();
 
-		if( $this->useShell ){
-			switch(true){
-				case stristr( PHP_OS, 'win' ):
+		$manifestPath = $this->manifestPath();
+
+		if( !$forceScan && is_file($manifestPath) ){
+			$this->wipeCachesManifest();
+		}
+
+		else if( $this->useShell ){
+			switch( PHP_OS_FAMILY ){
+				case 'Windows':
 					$this->wipeCachesWindows();
 				break;
 
-				case stristr( PHP_OS, 'linux' ):
-				case stristr( PHP_OS, 'unix' ):
-				case stristr( PHP_OS, 'darwin' ):
+				case 'Linux':
+				case 'Darwin':
+				case 'BSD':
+				case 'Solaris':
 					$this->wipeCachesLinux();
 				break;
 
@@ -102,6 +122,10 @@ $this->message($buffer);
 		else
 			$this->wipeCachesPHP();
 
+		//any wipe leaves the manifest stale, dropping it;
+		//entries appended by concurrent renders are lost until the next fallback scan
+		if( is_file($manifestPath) ) unlink($manifestPath);
+
 		$duration = round( microtime(true)-$start, 2 );
 
 echo "Static cache cleaned in $duration s.";
@@ -112,66 +136,170 @@ echo "Static cache cleaned in $duration s.";
 
 //privates
 
-private function wipeCachesLinux(){
+	private function rootPath(){
+		//filesystem path to the site root, no trailing slash
+		return rtrim( $this->wire('config')->paths->root, '/\\' );
+	}
 
-//echo 'wipeCachesLinux()';//
+	private function manifestPath(){
+		return $this->wire('config')->paths->cache . 'StaticPages.manifest';
+	}
 
-	$shellCommand = "find {$_SERVER['DOCUMENT_ROOT']} ";
-	$pruneCommands = [];
+	private function logStaticFile($path){
+		//root-relative path, one entry per line
+		$relative = substr( $path, strlen($this->rootPath()) );
+		file_put_contents( $this->manifestPath(), $relative . "\n", FILE_APPEND | LOCK_EX );
+	}
 
-	$nonStaticDirs = explode( "\n", $this->nonStaticDirs );
+	private function wipeCachesManifest(){
+		//deletes only the files this module wrote, no site root scanning
 
-	foreach( $nonStaticDirs as $nonStaticDir)
-		$pruneCommands[] = "-type d -name '$nonStaticDir' -prune ";
+		$deletedFiles = 0;
+		$deletedDirs = 0;
+		$deletedBytes = 0;
 
-	$shellCommand .= implode(' -o ', $pruneCommands);
-	$shellCommand .= "-o -type f -name '{$this->staticFile}' -exec rm {} + ";
+		$root = $this->rootPath();
+		$rootNorm = $this->normalizePath($root);
+		$nonStaticDirs = $this->nonStaticDirsArray();
 
-//echo '$shellCommand: ', var_dump($shellCommand);
+		$manifest = file( $this->manifestPath(), FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
+		if( $manifest === false ) $manifest = [];
+		$manifest = array_unique($manifest);
 
-	`$shellCommand`;
+		foreach( $manifest as $relative ){
 
-	//deleting empty dirs
-	for( $i=0; $i<$this->rmDirPasses; $i++ )
-		`find {$_SERVER['DOCUMENT_ROOT']} -type d -empty -exec rmdir {} +`;
+			//the manifest could have been tampered with, validating every entry before deletion
+			if( strpos($relative, '..') !== false ) continue;
+			$path = $root . $relative;
+			if( basename($path) !== $this->staticFile ) continue;
+			if( !is_file($path) ) continue;
+			$dirPath = dirname($path);
+			if( $this->isProtectedPath($dirPath, $nonStaticDirs) ) continue;
 
-}
+			$fileSize = filesize($path);
+			if( !unlink($path) ) continue;
+			$deletedFiles++;
+			$deletedBytes += $fileSize;
 
-private function wipeCachesWindows(){
+			$deletedDirs += $this->pruneEmptyDirs($dirPath, $rootNorm);
+		}
 
-//echo 'wipeCachesWindows()';//
+		$deletedBytes = $this->readableFilesize($deletedBytes);
 
-	$nonStaticDirs = explode( "\n", $this->nonStaticDirs );
+echo "$deletedFiles static file(s) ($deletedBytes) and $deletedDirs dir(s) deleted. ";
 
-	$shellCommand = "Get-ChildItem -Path {$_SERVER['DOCUMENT_ROOT']} -Filter '{$this->staticFile}'  -Recurse -File ";
-	$notLikeCommands = [];
+	}
 
-	foreach( $nonStaticDirs as $nonStaticDir)
-		$notLikeCommands[] = "\$_.DirectoryName -notlike '*\\" . $nonStaticDir . "*' ";
+	private function pruneEmptyDirs($dirPath, $rootNorm){
+		//removes $dirPath if empty, then its empty ancestors up to the site root level
 
-	if( count($notLikeCommands) )
-		$shellCommand .= ' | Where-Object {' . implode(' -or ', $notLikeCommands) . '}';
+		$deletedDirs = 0;
 
-	$shellCommand .= " | Remove-Item -Force";
+		if( !is_dir($dirPath) ) return 0;
+		$dirIsEmpty = !(new \FilesystemIterator($dirPath))->valid();
+		if( !$dirIsEmpty ) return 0;
+		rmdir($dirPath);
+		$deletedDirs++;
 
-	$shellCommand = "powershell \"$shellCommand\"";
+		$parts = explode( DIRECTORY_SEPARATOR, $this->normalizePath($dirPath) );
+		foreach( $parts as $part ){
+			array_pop($parts);
+			$parentDirPath = implode( DIRECTORY_SEPARATOR, $parts );
 
-//echo '$shellCommand: ', var_dump($shellCommand);
+			if( strlen($parentDirPath) <= strlen($rootNorm) ) continue;
+			if( in_array( $parentDirPath, ['', '.', '..'] ) ) continue;
+			if( !is_dir($parentDirPath) ) continue;
 
-	$result = `$shellCommand`;
+			$dirIsEmpty = !(new \FilesystemIterator($parentDirPath))->valid();
+			if( !$dirIsEmpty ) continue;
+			rmdir($parentDirPath);
+			$deletedDirs++;
+		}
 
-//echo '$result: ', var_dump($result);
+		return $deletedDirs;
+	}
 
-	//deleting empty dirs
-	$shellCommand = "Get-ChildItem -Path {$_SERVER['DOCUMENT_ROOT']} -Recurse -Directory | Where-Object { \$_.GetFileSystemInfos().Count -eq 0 } | Remove-Item -Force -Verbose";
-	$shellCommand = "powershell \"$shellCommand\"";
+	private function nonStaticDirsArray(){
+		//textarea values arrive with \r\n line ends; a stray \r or an empty line
+		//would silently disable the wipe guards
+		$dirs = preg_split( '/\R/', (string) $this->nonStaticDirs );
+		$dirs = array_map( 'trim', $dirs );
+		return array_values( array_filter($dirs, 'strlen') );
+	}
 
-//echo '$shellCommand: ', var_dump($shellCommand);
+	private function normalizePath($path){
+		return str_replace( ['\\', '/'], DIRECTORY_SEPARATOR, $path );
+	}
 
-	for( $i=0; $i<$this->rmDirPasses; $i++ )
+	private function isProtectedPath($dirPath, array $nonStaticDirs){
+		$dirPath = $this->normalizePath($dirPath);
+		$root = $this->normalizePath( $this->rootPath() );
+		foreach( $nonStaticDirs as $nonStaticDir ){
+			$sample = $root . DIRECTORY_SEPARATOR . $nonStaticDir;
+			if( $dirPath === $sample ) return true;
+			if( strpos( $dirPath, $sample . DIRECTORY_SEPARATOR ) === 0 ) return true;
+		}
+		return false;
+	}
+
+	private function psEscape($value){
+		//for interpolation into single-quoted powershell strings
+		return str_replace( "'", "''", (string) $value );
+	}
+
+	private function wipeCachesLinux(){
+
+		$root = escapeshellarg( $this->rootPath() );
+		$staticFile = escapeshellarg( $this->staticFile );
+
+		$prune = '';
+		foreach( $this->nonStaticDirsArray() as $nonStaticDir )
+			$prune .= "-type d -name " . escapeshellarg($nonStaticDir) . " -prune -o ";
+
+		`find $root {$prune}-type f -name $staticFile -exec rm {} +`;
+
+		//deleting empty dirs, protected dirs and their contents stay intact
+		for( $i=0; $i<$this->rmDirPasses; $i++ )
+			`find $root {$prune}-type d -empty -exec rmdir {} +`;
+
+	}
+
+	private function wipeCachesWindows(){
+
+		$root = $this->psEscape( $this->rootPath() );
+		$staticFile = $this->psEscape( $this->staticFile );
+
+		//a path is protected when it is the protected dir itself or lies inside it;
+		//conditions must be joined with -and, -or would let everything through
+		$fileConds = [];
+		$dirConds = [];
+		foreach( $this->nonStaticDirsArray() as $nonStaticDir ){
+			$dir = $this->psEscape($nonStaticDir);
+			$fileConds[] = "\$_.DirectoryName -notlike '*\\$dir' -and \$_.DirectoryName -notlike '*\\$dir\\*'";
+			$dirConds[] = "\$_.FullName -notlike '*\\$dir' -and \$_.FullName -notlike '*\\$dir\\*'";
+		}
+
+		$shellCommand = "Get-ChildItem -Path '$root' -Filter '$staticFile' -Recurse -File ";
+		if( count($fileConds) )
+			$shellCommand .= '| Where-Object {' . implode(' -and ', $fileConds) . '} ';
+		$shellCommand .= "| Remove-Item -Force";
+
+		$shellCommand = "powershell \"$shellCommand\"";
+
 		`$shellCommand`;
 
-}
+		//deleting empty dirs, protected dirs and their contents stay intact
+		$emptyCond = '$_.GetFileSystemInfos().Count -eq 0';
+		if( count($dirConds) )
+			$emptyCond .= ' -and ' . implode(' -and ', $dirConds);
+
+		$shellCommand = "Get-ChildItem -Path '$root' -Recurse -Directory | Where-Object { $emptyCond } | Remove-Item -Force";
+		$shellCommand = "powershell \"$shellCommand\"";
+
+		for( $i=0; $i<$this->rmDirPasses; $i++ )
+			`$shellCommand`;
+
+	}
 
 	public function wipeCachesPHP(){
 		//wipes every dir/index.html in non-deprecated dirs with no regard to template, page etc
@@ -181,16 +309,17 @@ private function wipeCachesWindows(){
 		$deletedDirs = 0;
 		$deletedBytes = 0;
 
-		$nonStaticDirs = explode( "\n", $this->nonStaticDirs );
+		$root = $this->normalizePath( $this->rootPath() );
+		$nonStaticDirs = $this->nonStaticDirsArray();
 
-//echo '$nonStaticDirs: ', var_dump($nonStaticDirs);//
-//echo '$_SERVER[DOCUMENT_ROOT]: ', var_dump($_SERVER['DOCUMENT_ROOT']);//
-
-		$rii = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator($_SERVER['DOCUMENT_ROOT']) );
+		$rii = new \RecursiveIteratorIterator(
+			new \RecursiveDirectoryIterator( $this->rootPath(), \FilesystemIterator::SKIP_DOTS ),
+			\RecursiveIteratorIterator::LEAVES_ONLY,
+			\RecursiveIteratorIterator::CATCH_GET_CHILD
+		);
 		foreach ($rii as $entry) {
 
-			//skipping dirs
-			if ( $entry == $_SERVER['DOCUMENT_ROOT'].'/..' ) continue; 
+			//skipping dirs (an empty dir is a leaf and still shows up here)
 			if ( $entry->isDir() ) continue;
 
 			$path = $entry->getPathname();
@@ -201,43 +330,14 @@ private function wipeCachesWindows(){
 			if( $pathInfo['basename'] != $this->staticFile ) continue;
 
 			//skipping $nonStaticDirs
-			$continueFlag = false;
-			foreach( $nonStaticDirs as $nonStaticDir ){
-				$sample = $_SERVER['DOCUMENT_ROOT'] . DIRECTORY_SEPARATOR . $nonStaticDir;
-				if( strpos($dirPath, $sample) === false ) continue;
-				$continueFlag = true;
-				break;
-			}
-			if( $continueFlag ) continue;
+			if( $this->isProtectedPath($dirPath, $nonStaticDirs) ) continue;
 
-//echo "deleting file $path...\n";//
 			$fileSize = filesize($path);
-			unlink($path);
+			if( !unlink($path) ) continue;
 			$deletedFiles++;
 			$deletedBytes += $fileSize;
 
-			//trying to delete the dir if empty
-			$dirIsEmpty = !(new \FilesystemIterator($dirPath))->valid();
-			if( !$dirIsEmpty ) continue;
-//echo "deleting dir $dirPath...\n";//
-			rmdir($dirPath);//
-			$deletedDirs++;
-
-			//trying to delete empty dirs up to the DOCUMENT_ROOT level
-			$parts = explode( DIRECTORY_SEPARATOR, $dirPath );
-			foreach( $parts as $part ){
-				array_pop($parts);
-				$parentDirPath = implode( DIRECTORY_SEPARATOR, $parts );
-
-				if( strlen($parentDirPath) <= strlen($_SERVER['DOCUMENT_ROOT']) ) continue;
-				if( in_array( $parentDirPath, ['', '.', '..'] ) ) continue;
-
-				$dirIsEmpty = !(new \FilesystemIterator($parentDirPath))->valid();
-				if( !$dirIsEmpty ) continue;
-//echo "deleting dir $parentDirPath...\n";
-				rmdir($parentDirPath);//
-				$deletedDirs++;
-			}
+			$deletedDirs += $this->pruneEmptyDirs($dirPath, $root);
 
 		}
 
