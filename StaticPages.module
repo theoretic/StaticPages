@@ -3,7 +3,7 @@
 Static pages module
 https://github.com/ryancramerdesign/Helloworld
 AT
-28.07.26
+26.08.26
 */
 
 namespace ProcessWire;
@@ -83,8 +83,48 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( !$mode ) $mode = 0755;
 
 		if( !is_dir($dir) && !mkdir($dir, $mode, true) && !is_dir($dir) ) return;
-		if( file_put_contents($path, $html, LOCK_EX) === false ) return;
+		if( file_put_contents($path, $this->stripCsrf($html), LOCK_EX) === false ) return;
 		$this->logStaticFile($path);
+	}
+
+	public function stripCsrf($html) {
+		/*
+		A CSRF token belongs to one session. A static file is served off disk to
+		everyone, with no PHP and no session, so a token frozen into it is dead for
+		every visitor after the one whose render filled the cache -- and every POST
+		carrying it was answered with a fatal until api/index.php stopped calling
+		SessionCSRF::validate().
+
+		Emptying the holders rather than dropping them: the markers have to survive
+		for @atispro/core 00-csrf.js to write the live pair into them once
+		z-app-init.js adopts what GET /api/data answers.
+
+		Attribute quoting is not guaranteed -- the markup passes through a minifier
+		that drops quotes around simple values -- so both forms are matched. Quote
+		characters are spelled \x22 and \x27 to keep them out of the PHP string.
+		*/
+
+		//<meta name=csrf-token content=...> and its -name twin
+		$html = preg_replace(
+			'/(<meta\s+name=([\x22\x27]?)csrf-token(?:-name)?\2\s+content=)(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^\s>]*)/i',
+			'$1""',
+			$html
+			);
+
+		//<input type=hidden rel=csrf name=... value=...>
+		$html = preg_replace_callback(
+			'/<input\b[^>]*\brel=([\x22\x27]?)csrf\1[^>]*>/i',
+			function($tag){
+				return preg_replace(
+					'/\b(value|name)=(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^\s>\/]*)/i',
+					'$1=""',
+					$tag[0]
+					);
+				},
+			$html
+			);
+
+		return $html;
 	}
 
 	public function wipeCaches( $forceScan = false ){

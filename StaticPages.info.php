@@ -3,14 +3,14 @@
 Static pages module info
 https://github.com/ryancramerdesign/Helloworld
 AT
-30.09.25
+26.08.26
 */
 
 namespace ProcessWire;
 
 $info = [
 	'title'					=> 'StaticPages',
-	'version'				=> '0.3.0',
+	'version'				=> '0.3.1',
 	'summary'				=> 'Saves output to static html files and deletes html files on each page save.',
 	'author'				=> 'AT / atis.pro',
 	'href'					=> 'http://atis.pro',
