@@ -154,6 +154,16 @@ $config = [
 			],
 
 			[
+				'name'					=> 'logSkips',
+				'type'					=> 'checkbox',
+				'label'					=> $this->_('Log skipped pages'),
+				'notes'					=> $this->_('Writes a line to the static-pages log every time a page was rendered but not cached, naming the reason. Nothing explains otherwise why an installed and enabled module produces no files at all: the commonest reason by far is that you are browsing the site logged in, which is never cached. Leave off on a busy front end, it costs one log line per request.'),
+				//'required'				=> true,
+				'columnWidth'			=> 33,
+				//'value'					=> 1,
+			],
+
+			[
 				'name'					=> 'isEnabled',
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Enable this module'),
