@@ -121,6 +121,39 @@ $config = [
 			],
 
 			[
+				'name'					=> 'wipeOnConfigSaveModules',
+				'type'					=> 'textarea',
+				'label'					=> $this->_('Wipe on config save of these modules'),
+				'description'			=> $this->_('one module class name per line'),
+				'notes'					=> $this->_('Modules keeping site wide settings in their own config data save no page, so nothing is wiped when their settings change. Saving the config of a module listed here deletes the static files (manifest based). Name the class holding the data, not the Process class: SettingsFactory, not ProcessSettingsFactory. Names are case insensitive and the module needs not be installed. Do not list modules writing counters or timestamps to their config, every such write would wipe.'),
+				//'required'				=> true,
+				'columnWidth'			=> 33,
+				'value'					=> 'SettingsFactory',
+			],
+
+			[
+				'name'					=> 'wipeOnSaveField',
+				'type'					=> 'checkbox',
+				'label'					=> $this->_('Wipe on single field save'),
+				'notes'					=> $this->_('Inline admin edits and setAndSave() never reach a page save. Uncheck when some module writes counters or timestamps that way on frontend requests.'),
+				//'required'				=> true,
+				'columnWidth'			=> 33,
+				'value'					=> 1,
+			],
+
+			[
+				'name'					=> 'trackedPaths',
+				'type'					=> 'textarea',
+				'label'					=> $this->_('Track changes in these paths'),
+				'description'			=> $this->_('one path pattern per line, relative to the website root'),
+				'notes'					=> $this->_('Editing a template or an asset file fires no ProcessWire event, so the static files would silently stay stale. On admin page requests the files matching these patterns are checked by name, modification time and size, and the static files are deleted when anything changed. File contents are never read, so an edit changing neither the size nor the modification time goes unnoticed. "*" matches inside one path segment, "**" matches any number of segments including none, "?" matches one character. Matching is case insensitive. Absolute paths, drive letters and ".." are ignored. Anything under site/assets/cache, /logs, /sessions and /tmp is never tracked: ProcessWire and this module write there on ordinary requests and tracking it would wipe forever. Keep the patterns narrow, a line like "**/*" walks the whole website. Leave empty to switch tracking off.'),
+				//'required'				=> true,
+				'columnWidth'			=> 33,
+				//kept on the module class so the two can not drift apart
+				'value'					=> StaticPages::trackedPathsDefault,
+			],
+
+			[
 				'name'					=> 'isEnabled',
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Enable this module'),

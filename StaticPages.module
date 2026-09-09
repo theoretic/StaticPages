@@ -10,6 +10,22 @@ namespace ProcessWire;
 
 class StaticPages extends WireData implements Module, ConfigurableModule {
 
+	//a real property, not a config key: WireData's magic __get/__set has no business here
+	private $didWipe = false;
+
+	//the default set of tracked path patterns, kept here so the module and
+	//StaticPages.config.php can not drift apart
+	const trackedPathsDefault = "site/templates/**/*.php\nsite/assets/css/*.css\nsite/assets/js/**/*.js";
+
+	//seconds between two walks of the tracked paths. The admin fires a lot of ajax
+	//(page tree, autocomplete, inline edits) and each of those requests would otherwise
+	//stat every tracked file again. 0 checks on every admin request
+	const trackingInterval = 10;
+
+	//RecursiveDirectoryIterator will not descend into a symlinked dir unless
+	//FOLLOW_SYMLINKS is passed, this cap catches what a platform fails to report as a link
+	const trackingMaxDepth = 20;
+
 	public function init() {
 		$this->addHookAfter('Modules::saveConfig', $this, 'hookAfterSaveConfig');
 
@@ -18,6 +34,28 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$this->addHookAfter('Page::render', $this, 'hookCache', ['priority' => (int) $this->priority]);
 		$this->pages->addHookAfter('save', $this, 'hookWipe');
 		$this->pages->addHookAfter('delete', $this, 'hookWipe');
+
+		//a single field save never reaches Pages::save, inline admin edits and setAndSave() would leave stale files
+		if( $this->configValue('wipeOnSaveField', 1) ) $this->pages->addHookAfter('saveField', $this, 'hookWipe');
+	}
+
+	public function ready() {
+		//autoload modules are handed ready() at ProcessWire::statusReady, reached right after
+		//the requested page is in the API and one line after $config->admin was resolved,
+		//all of it before Page::render runs
+
+		if( !$this->isEnabled ) return;
+		if( !$this->isAdminRequest() ) return;
+
+		//ModulesLoader::readyModule() catches Exception but not Error: an uncaught TypeError
+		//in here would take down the whole admin, config screen included, leaving no way left
+		//to correct the setting that caused it
+		try {
+			$this->checkTrackedPaths();
+		}
+		catch( \Throwable $e ){
+			$this->error( 'StaticPages path tracking: ' . $e->getMessage() );
+		}
 	}
 
 	public function hookCache($event) {
@@ -29,18 +67,32 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//skipping wipe if page is a repeater item
 		if ( $event->arguments[0] instanceof RepeaterPage ) return;
 
-		return $this->wipeCaches();
+		return $this->wipeOnce();
 	}
 
 	public function hookAfterSaveConfig($event) {
 		//should run in backend only!
-		//Only continue if settings of this module are being saved.
-		$class = $event->arguments(0);
-		if( is_object($class) ) $class = $class->className();
-		if( $class !== $this->className() ) return;
-		if( !$this->wire('input')->post('forceWipeOnModuleSave') ) return;
-		//full disk scan: also catches files the manifest does not know about
-		return $this->wipeCaches(true);
+		$class = $this->configSaveClassName( $event->arguments(0) );
+
+		//settings of this module are being saved: an explicit, one shot operator action,
+		//deliberately not gated on isEnabled so a disabled module can still be told to clean up
+		if( $class === $this->className() ){
+			if( !$this->wire('input')->post('forceWipeOnModuleSave') ) return;
+			//full disk scan: also catches files the manifest does not know about
+			return $this->wipeCaches(true);
+		}
+
+		//settings of another module are being saved: modules keeping site wide settings in
+		//their config data (SettingsFactory and the like) save no Page, so Pages::save never
+		//fires and the markup those settings feed into stays cached and stale
+		if( !$this->isEnabled ) return;
+		if( !in_array( strtolower($class), $this->wipeOnConfigSaveModulesArray(), true ) ) return;
+
+		//sharing the dedupe flag with hookWipe and the tracked path check: a config save and
+		//a page save in the same request must not cost two wipes, the second a full disk scan.
+		//Manifest wipe: a routine event has to cost the same as a page save;
+		//with no manifest on disk wipeCaches() falls back to the full scan by itself
+		return $this->wipeOnce();
 	}
 
 ////
@@ -85,6 +137,9 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( !is_dir($dir) && !mkdir($dir, $mode, true) && !is_dir($dir) ) return;
 		if( file_put_contents($path, $this->stripCsrf($html), LOCK_EX) === false ) return;
 		$this->logStaticFile($path);
+
+		//something new is on disk again, the next save has to wipe it
+		$this->didWipe = false;
 	}
 
 	public function stripCsrf($html) {
@@ -174,7 +229,69 @@ echo "Static cache cleaned in $duration s.";
 		$this->message($buffer);
 	}
 
+	public function checkTrackedPaths( $force = false ){
+		//hashes name, modification time and size of every file matching the tracked patterns
+		//and wipes the static files when a hash differs from the one stored last time.
+		//No file content is ever read.
+		//Public so a deploy script can close the gap admin only checking leaves:
+		//$modules->get('StaticPages')->checkTrackedPaths(true);
+
+		$patterns = $this->trackedPathsArray();
+		if( !count($patterns) ) return;
+
+		$hashDir = $this->trackedHashDir();
+		if( $hashDir === '' ) return;
+
+		if( !$force && !$this->trackingIntervalPassed($hashDir) ) return;
+
+		//lines the operator removed or edited would leave their hash file behind forever
+		$this->pruneHashFiles($patterns, $hashDir);
+
+		$changed = [];
+
+		foreach( $patterns as $pattern ){
+
+			$hash = $this->hashPattern($pattern);
+			$hashFile = $hashDir . md5($pattern) . '.hash';
+			$stored = $this->readHashFile($hashFile);
+
+			//first run, module upgrade, freshly added line, or a hash file that got lost or
+			//damaged: seed it and wipe nothing. Every install would otherwise wipe once for no
+			//reason, and a broken hash file would wipe on every single admin request
+			if( $stored === null ){
+				$this->writeHashFile($hashFile, $pattern, $hash);
+				continue;
+			}
+
+			if( $stored === $hash ) continue;
+
+			$this->writeHashFile($hashFile, $pattern, $hash);
+			$changed[] = $pattern;
+		}
+
+		if( !count($changed) ) return;
+
+		$this->message( sprintf( $this->_('Tracked path changed: %s'), implode(', ', $changed) ) );
+
+		//every new hash is on disk before the wipe starts: should the wipe itself touch a
+		//tracked file, the next check compares against the new state and stops there instead
+		//of wiping again forever
+		return $this->wipeOnce();
+	}
+
 //privates
+
+	private function wipeOnce(){
+		//a wipe unlinks the manifest, so every further wipe in the same request falls back
+		//to the full disk scan: a bulk save loop would pay for one scan per iteration.
+		//The flag is cleared again by cachePage() on every file written, so it means
+		//"nothing new has been cached since the last wipe", not "once per request"
+
+		if( $this->didWipe ) return;
+		$this->didWipe = true;
+
+		return $this->wipeCaches();
+	}
 
 	private function rootPath(){
 		//filesystem path to the site root, no trailing slash
@@ -259,12 +376,374 @@ echo "$deletedFiles static file(s) ($deletedBytes) and $deletedDirs dir(s) delet
 		return $deletedDirs;
 	}
 
-	private function nonStaticDirsArray(){
+	private function linesToArray($value){
 		//textarea values arrive with \r\n line ends; a stray \r or an empty line
 		//would silently disable the wipe guards
-		$dirs = preg_split( '/\R/', (string) $this->nonStaticDirs );
-		$dirs = array_map( 'trim', $dirs );
-		return array_values( array_filter($dirs, 'strlen') );
+		$lines = preg_split( '/\R/', (string) $value );
+		$lines = array_map( 'trim', $lines );
+		return array_values( array_filter($lines, 'strlen') );
+	}
+
+	private function nonStaticDirsArray(){
+		return $this->linesToArray( $this->nonStaticDirs );
+	}
+
+	private function configValue($key, $default){
+		//a key added by a module update stays absent from the stored config data until the
+		//operator saves the module config once: the default declared in StaticPages.config.php
+		//seeds the inputfield only. An operator clearing a field stores '' or 0, neither of
+		//which is null, so switching a defaulted-on setting off still works
+		$value = $this->get($key);
+		return $value === null ? $default : $value;
+	}
+
+	private function configSaveClassName($class){
+		//Modules::saveConfig is reached with a class name, a Module instance or a module id
+		if( is_object($class) ) return $class->className();
+		if( ctype_digit( (string) $class ) ) return (string) $this->wire('modules')->getModuleClass( (int) $class );
+		return (string) $class;
+	}
+
+	private function wipeOnConfigSaveModulesArray(){
+		//returns lowercased plain class names, ready for comparison
+
+		$value = $this->configValue('wipeOnConfigSaveModules', 'SettingsFactory');
+
+		$classes = [];
+		foreach( $this->linesToArray($value) as $className ){
+			//tolerating a namespace prefix, names are matched the way className() reports them
+			$className = ltrim( $className, '\\' );
+			$pos = strrpos( $className, '\\' );
+			if( $pos !== false ) $className = substr( $className, $pos+1 );
+			$classes[] = strtolower($className);
+		}
+
+		return $classes;
+	}
+
+	private function isAdminRequest(){
+		//$config->admin is resolved by ProcessWire::setStatus() on the line before module
+		//ready() is triggered, so it costs nothing here: no page lookup, no template lookup,
+		//no query. It is true only for a logged in user on a $config->adminTemplates page,
+		//which keeps the front end and the admin login screen out, and it honours a site
+		//that renamed or added admin templates. It arrived in 3.0.142 and reads 0 rather
+		//than a boolean before that, hence the fallback
+
+		$config = $this->wire('config');
+		if( is_bool($config->admin) ) return $config->admin;
+
+		$page = $this->wire('page');
+		if( !$page || !$page->id ) return false;
+		if( !$this->wire('user')->isLoggedin() ) return false;
+
+		$adminTemplates = $config->adminTemplates;
+		if( !is_array($adminTemplates) || !count($adminTemplates) ) $adminTemplates = ['admin'];
+
+		return in_array( $page->template->name, $adminTemplates, true );
+	}
+
+	private function trackedHashDir(){
+		//one hash file per tracked line, next to the manifest. Recreated on every call: the
+		//shell wipes remove empty dirs and a deploy script may clear the whole PW cache dir.
+		//Returns '' when it can not be created
+
+		$dir = $this->wire('config')->paths->cache . 'StaticPages/';
+
+		if( is_dir($dir) ) return $dir;
+		if( !$this->wire('files')->mkdir($dir, true) ) return '';
+
+		return $dir;
+	}
+
+	private function trackingIntervalPassed($hashDir){
+		//one stat instead of a walk over every tracked file: the admin fires a lot of ajax
+		//(page tree, autocomplete, inline edits) and every one of those requests would
+		//otherwise stat every tracked file again.
+		//Stamping before the walk and not after is deliberate, two requests arriving
+		//together must not both pay for it, which makes this the concurrency guard as well
+
+		if( self::trackingInterval < 1 ) return true;
+
+		$stamp = $hashDir . 'check.stamp';
+
+		if( is_file($stamp) && time() - (int) @filemtime($stamp) < self::trackingInterval ) return false;
+
+		@touch($stamp);
+
+		return true;
+	}
+
+	private function trackedPathsArray(){
+		//validated, normalised, deduplicated spec lines
+
+		$patterns = [];
+
+		foreach( $this->linesToArray( $this->configValue('trackedPaths', self::trackedPathsDefault) ) as $line ){
+
+			//operators on Windows type backslashes, the spec language uses forward slashes.
+			//No escape syntax is supported, so the conversion is unambiguous
+			$line = str_replace( '\\', '/', $line );
+			$line = preg_replace( '#/+#', '/', $line );
+
+			//a leading slash is a likely typo rather than an attempt at an absolute path,
+			//dropping it is friendlier than dropping the line
+			$line = ltrim( $line, '/' );
+			if( $line === '' ) continue;
+
+			//nothing outside the web root. Not a security boundary, whoever edits the module
+			//config already runs php and nothing here reads file contents. It keeps a line
+			//like ../.. from sending the walk up the whole disk and hanging every admin
+			//request until php times out
+			if( strpos($line, "\0") !== false ) continue;
+			if( preg_match('#^[A-Za-z]:#', $line) ) continue;
+			if( in_array( '..', explode('/', $line), true ) ) continue;
+
+			//a line naming a directory means everything below it: a trailing slash says so
+			//outright, otherwise the disk is asked
+			if( substr($line, -1) === '/' )
+				$line = rtrim($line, '/') . '/**/*';
+
+			else if( strpbrk($line, '*?') === false && is_dir( $this->normalizePath( $this->rootPath() . '/' . $line ) ) )
+				$line .= '/**/*';
+
+			$patterns[] = $line;
+		}
+
+		return array_values( array_unique($patterns) );
+	}
+
+	private function globToRegex($pattern){
+		//translates one spec line into a regex anchored over a root relative, forward slash
+		//path. ** spans path segments and may collapse to nothing, * and ? never cross a slash
+
+		$out = '';
+		$len = strlen($pattern);
+
+		for( $i = 0; $i < $len; $i++ ){
+
+			$char = $pattern[$i];
+
+			if( $char === '*' ){
+
+				//a second star: ** spans segments
+				if( $i+1 < $len && $pattern[$i+1] === '*' ){
+					$i++;
+
+					//**/ has to match zero segments too, site/templates/**/*.php is meant
+					//to find site/templates/home.php as well
+					if( $i+1 < $len && $pattern[$i+1] === '/' ){
+						$i++;
+						$out .= '(?:.*/)?';
+					}
+
+					//a trailing or bare ** matches anything, slashes included
+					else
+						$out .= '.*';
+
+					continue;
+				}
+
+				//one star stays inside one segment
+				$out .= '[^/]*';
+				continue;
+			}
+
+			if( $char === '?' ){
+				$out .= '[^/]';
+				continue;
+			}
+
+			$out .= preg_quote( $char, '#' );
+		}
+
+		//case insensitive on purpose: the module is configured on a case insensitive Windows
+		//or macOS filesystem and deployed to a case sensitive Linux one, and the failure mode
+		//of a case mismatch is a pattern that silently matches nothing and never wipes
+		return '#^' . $out . '$#i';
+	}
+
+	private function patternBaseDir($pattern){
+		//longest leading run of segments holding no wildcard. The last segment is the file
+		//name part and never contributes a directory to start the walk from
+
+		$segments = explode('/', $pattern);
+		array_pop($segments);
+
+		$base = [];
+		foreach( $segments as $segment ){
+			if( $segment === '' ) continue;
+			if( strpbrk($segment, '*?') !== false ) break;
+			$base[] = $segment;
+		}
+
+		return implode('/', $base);
+	}
+
+	private function trackedPathWalk($baseDir, $pattern, $base){
+		//flat when only the last segment of the pattern holds a wildcard, recursive
+		//otherwise: site/assets/css/*.css must not walk the subdirectories of css/
+
+		$paths = [];
+
+		$segments = explode('/', $pattern);
+		array_pop($segments);
+
+		$recursive = false;
+		foreach( $segments as $segment ){
+			if( strpbrk($segment, '*?') === false ) continue;
+			$recursive = true;
+			break;
+		}
+
+		//an unreadable dir throws UnexpectedValueException on construction: hashing what
+		//was reachable beats aborting the whole check
+		try {
+
+			if( !$recursive ){
+				foreach( new \FilesystemIterator( $baseDir, \FilesystemIterator::SKIP_DOTS ) as $entry ){
+					if( $entry->isDir() ) continue;
+					$paths[] = $entry->getPathname();
+				}
+				return $paths;
+			}
+
+			$rii = new \RecursiveIteratorIterator(
+				new \RecursiveDirectoryIterator( $baseDir, \FilesystemIterator::SKIP_DOTS ),
+				\RecursiveIteratorIterator::LEAVES_ONLY,
+				\RecursiveIteratorIterator::CATCH_GET_CHILD
+			);
+
+			//a pattern with no ** can not reach deeper than the segments it declares
+			if( strpos($pattern, '**') === false ){
+				$baseCount = strlen($base) ? count( explode('/', $base) ) : 0;
+				$rii->setMaxDepth( max( 0, count( explode('/', $pattern) ) - $baseCount - 1 ) );
+			}
+			else
+				$rii->setMaxDepth(self::trackingMaxDepth);
+
+			foreach( $rii as $entry ){
+				//an empty dir is a leaf and still turns up here
+				if( $entry->isDir() ) continue;
+				$paths[] = $entry->getPathname();
+			}
+		}
+
+		catch( \Exception $e ){}
+
+		return $paths;
+	}
+
+	private function isExcludedFromTracking($path){
+		//ProcessWire and this module write into these dirs themselves. The manifest,
+		//WireCache.maint, the FileCompiler output, the temp, session and log files all
+		//change on ordinary requests, and a pattern covering them would detect a change,
+		//wipe, change the state again by wiping, and never settle
+
+		//a generated static file is not a source file either
+		if( basename($path) === $this->staticFile ) return true;
+
+		$path = $this->normalizePath($path);
+		$paths = $this->wire('config')->paths;
+
+		foreach( ['cache', 'logs', 'sessions', 'tmp'] as $key ){
+			$dir = (string) $paths->$key;
+			if( !strlen($dir) ) continue;
+			$dir = rtrim( $this->normalizePath($dir), DIRECTORY_SEPARATOR ) . DIRECTORY_SEPARATOR;
+			if( strpos($path, $dir) === 0 ) return true;
+		}
+
+		return false;
+	}
+
+	private function hashPattern($pattern){
+		//md5 over "relative path|mtime|size" of every matching file, sorted so the order the
+		//filesystem hands entries back in can not change the result. Paths are joined with
+		//forward slashes so the same tree hashes identically on Windows and on Linux
+
+		$regex = $this->globToRegex($pattern);
+		$base = $this->patternBaseDir($pattern);
+
+		$root = rtrim( $this->normalizePath( $this->rootPath() ), DIRECTORY_SEPARATOR );
+		$baseDir = strlen($base) ? $root . DIRECTORY_SEPARATOR . $this->normalizePath($base) : $root;
+
+		//a base dir that is not there yet still gets a hash: the empty set has one, and
+		//creating the dir later is then a change like any other
+		if( !is_dir($baseDir) ) return md5('');
+
+		$entries = [];
+
+		foreach( $this->trackedPathWalk($baseDir, $pattern, $base) as $path ){
+
+			if( $this->isExcludedFromTracking($path) ) continue;
+
+			$relative = ltrim( str_replace( '\\', '/', substr($path, strlen($root)) ), '/' );
+			if( !preg_match($regex, $relative) ) continue;
+
+			//stat only, file contents are never read. filemtime rather than
+			//SplFileInfo::getMTime() because getMTime() throws when the stat fails while
+			//this returns false, and php's stat cache makes it free either way. False means
+			//the file went away between the readdir and the stat, it is not part of the set
+			$mtime = @filemtime($path);
+			if( $mtime === false ) continue;
+
+			$size = @filesize($path);
+			if( $size === false ) $size = 0;
+
+			$entries[] = "$relative|$mtime|$size";
+		}
+
+		sort( $entries, SORT_STRING );
+
+		return md5( implode("\n", $entries) );
+	}
+
+	private function readHashFile($hashFile){
+		//null means there is nothing usable stored yet and the caller seeds instead of
+		//wiping. A missing, unreadable or truncated file has to read as null for the same
+		//reason: a wipe is never the safe answer to a broken hash file, it would repeat on
+		//every single admin request
+
+		if( !is_file($hashFile) ) return null;
+
+		$lines = @file( $hashFile, FILE_IGNORE_NEW_LINES );
+		if( $lines === false || !count($lines) ) return null;
+
+		$hash = trim( $lines[0] );
+		if( !preg_match('/^[0-9a-f]{32}$/', $hash) ) return null;
+
+		return $hash;
+	}
+
+	private function writeHashFile($hashFile, $pattern, $hash){
+		//the spec line and the time go into the file next to the hash: the file name is an
+		//md5 and says nothing, and these files have to be readable by whoever is debugging
+		//why a wipe did or did not happen
+
+		$content = $hash . "\n" . $pattern . "\n" . date('Y-m-d H:i:s') . "\n";
+
+		return file_put_contents( $hashFile, $content, LOCK_EX ) !== false;
+	}
+
+	private function pruneHashFiles(array $patterns, $hashDir){
+		//an edited or removed line leaves its hash file behind: never read again, and a
+		//stale spec line on disk misleads whoever is debugging the next wipe
+
+		$keep = [];
+		foreach( $patterns as $pattern ) $keep[ md5($pattern) . '.hash' ] = true;
+
+		try {
+			$iterator = new \FilesystemIterator( $hashDir, \FilesystemIterator::SKIP_DOTS );
+		}
+		catch( \Exception $e ){ return; }
+
+		foreach( $iterator as $entry ){
+			//never recursing, never touching check.stamp or whatever a later version adds
+			if( $entry->isDir() ) continue;
+			$name = $entry->getFilename();
+			if( substr($name, -5) !== '.hash' ) continue;
+			if( isset($keep[$name]) ) continue;
+			@unlink( $entry->getPathname() );
+		}
 	}
 
 	private function normalizePath($path){
