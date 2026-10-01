@@ -19,10 +19,17 @@ foreach( wire('templates') as $template ){
 	if( $template->name == 'admin' ) $nonStaticTemplatesValue[] = $template->id;
 }
 
-foreach (new \DirectoryIterator($DOCUMENT_ROOT) as $fileInfo) {
-	if($fileInfo->isDot()) continue;
-	if($fileInfo->isFile()) continue;
-	$nonStaticDirsValue[] = $fileInfo->getFilename();
+//the dir list is only a default value: a missing or unreadable webroot must not break config or modules refresh
+if( $DOCUMENT_ROOT !== '' && is_dir($DOCUMENT_ROOT) && is_readable($DOCUMENT_ROOT) ){
+	try {
+		foreach (new \DirectoryIterator($DOCUMENT_ROOT) as $fileInfo) {
+			if($fileInfo->isDot()) continue;
+			if($fileInfo->isFile()) continue;
+			$nonStaticDirsValue[] = $fileInfo->getFilename();
+		}
+	} catch( \Throwable $e ){
+		$nonStaticDirsValue = [];
+	}
 }
 
 $nonStaticDirsValue = implode("\n", $nonStaticDirsValue);
