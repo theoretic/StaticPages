@@ -958,9 +958,14 @@ echo "$deletedFiles static file(s) ($deletedBytes) and $deletedDirs dir(s) delet
 		$staticFile = escapeshellarg( $this->staticFile );
 		$staticTmp = escapeshellarg( $this->tmpFileGlob() );
 
+		//-path, not -name: the list names dirs of the site root, -name also skipped a page
+		//dir of that name anywhere below (/parachutes/site/). find reads -path as a glob,
+		//so glob characters in the root and the name are escaped
 		$prune = '';
-		foreach( $this->nonStaticDirsArray() as $nonStaticDir )
-			$prune .= "-type d -name " . escapeshellarg($nonStaticDir) . " -prune -o ";
+		foreach( $this->nonStaticDirsArray() as $nonStaticDir ){
+			$sample = addcslashes( $this->rootPath() . '/' . $nonStaticDir, '\\*?[]' );
+			$prune .= "-path " . escapeshellarg($sample) . " -prune -o ";
+		}
 
 		`find $root {$prune}-type f -name $staticFile -exec rm {} +`;
 
@@ -981,13 +986,16 @@ echo "$deletedFiles static file(s) ($deletedBytes) and $deletedDirs dir(s) delet
 		$staticFile = $this->psEscape( $this->staticFile );
 
 		//a path is protected when it is the protected dir itself or lies inside it;
-		//conditions must be joined with -and, -or would let everything through
+		//conditions must be joined with -and, -or would let everything through.
+		//Compared from the site root on: the '*\dir' wildcards also skipped a page dir of
+		//that name anywhere below (/parachutes/site/). Get-ChildItem answers with
+		//backslashes, the root from PW config has forward slashes
 		$fileConds = [];
 		$dirConds = [];
 		foreach( $this->nonStaticDirsArray() as $nonStaticDir ){
-			$dir = $this->psEscape($nonStaticDir);
-			$fileConds[] = "\$_.DirectoryName -notlike '*\\$dir' -and \$_.DirectoryName -notlike '*\\$dir\\*'";
-			$dirConds[] = "\$_.FullName -notlike '*\\$dir' -and \$_.FullName -notlike '*\\$dir\\*'";
+			$sample = $this->psEscape( str_replace( '/', '\\', $this->rootPath() . '/' . $nonStaticDir ) );
+			$fileConds[] = "\$_.DirectoryName -ne '$sample' -and -not \$_.DirectoryName.StartsWith('$sample\\', 'OrdinalIgnoreCase')";
+			$dirConds[] = "\$_.FullName -ne '$sample' -and -not \$_.FullName.StartsWith('$sample\\', 'OrdinalIgnoreCase')";
 		}
 
 		//the temporary name is swept with the static file itself: one left behind by a

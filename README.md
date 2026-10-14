@@ -124,7 +124,8 @@ RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]
 
 ## Non-static directories
 
-Wipes never touch the site root dirs listed in *Non-static directories*. Until the setting is saved,
+Wipes never touch the site root dirs listed in *Non-static directories* (root dirs only: a page dir
+of the same name further down, such as `/parachutes/site/`, is wiped as usual). Until the setting is saved,
 the list defaults to every root dir except those that only hold static copies of first level pages
 (in every language, `/en/` included); a page dir that also holds other files (an `/api/` page next to
 `api/` endpoints) stays protected. Saving the setting stores the list as shown, and the save warns
