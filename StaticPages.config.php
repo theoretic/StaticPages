@@ -7,30 +7,17 @@ AT
 
 namespace ProcessWire;
 
-//webroot from PW config: works under CLI and subdirectory installs
-$DOCUMENT_ROOT = rtrim( wire('config')->paths->root, '/\\' );
-
 $nonStaticTemplatesOptions = [];
 $nonStaticTemplatesValue = [];
-$nonStaticDirsValue = [];
 
 foreach( wire('templates') as $template ){
 	$nonStaticTemplatesOptions[$template->id] = $template->name;
 	if( $template->name == 'admin' ) $nonStaticTemplatesValue[] = $template->id;
 }
 
-//the dir list is only a default value: a missing or unreadable webroot must not break config or modules refresh
-if( $DOCUMENT_ROOT !== '' && is_dir($DOCUMENT_ROOT) && is_readable($DOCUMENT_ROOT) ){
-	try {
-		foreach (new \DirectoryIterator($DOCUMENT_ROOT) as $fileInfo) {
-			if($fileInfo->isDot()) continue;
-			if($fileInfo->isFile()) continue;
-			$nonStaticDirsValue[] = $fileInfo->getFilename();
-		}
-	} catch( \Throwable $e ){
-		$nonStaticDirsValue = [];
-	}
-}
+//the site root's dirs minus the page dirs (StaticPages::defaultNonStaticDirs()); an empty
+//list where the root is missing or unreadable, so config and modules refresh still work
+$nonStaticDirsValue = wire('modules')->get('StaticPages')->defaultNonStaticDirs();
 
 $nonStaticDirsValue = implode("\n", $nonStaticDirsValue);
 

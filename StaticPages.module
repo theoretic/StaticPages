@@ -77,6 +77,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//settings of this module are being saved: an explicit, one shot operator action,
 		//deliberately not gated on isEnabled so a disabled module can still be told to clean up
 		if( $class === $this->className() ){
+			$this->warnPageDirsProtected( $event->arguments(1) );
 			if( !$this->wire('input')->post('forceWipeOnModuleSave') ) return;
 			//full disk scan: also catches files the manifest does not know about
 			return $this->wipeCaches(true);
@@ -479,7 +480,98 @@ echo "$deletedFiles static file(s) ($deletedBytes) and $deletedDirs dir(s) delet
 	}
 
 	private function nonStaticDirsArray(){
-		return $this->linesToArray( $this->nonStaticDirs );
+		//never saved: the same default the config screen offers, so the full scan never
+		//runs unguarded through site/, wire/ and the like
+		$value = $this->nonStaticDirs;
+		if( $value === null ) return $this->defaultNonStaticDirs();
+		return $this->linesToArray($value);
+	}
+
+	public function defaultNonStaticDirs(){
+		//the site root's own dirs (site, wire, api...) minus the dirs that only hold static
+		//copies of pages. Every root dir used to be listed, and once static copies existed
+		//that took in the page dirs too (/about/, /en/): their copies were then never wiped
+		//and went stale
+		$root = $this->rootPath();
+		if( $root === '' || !is_dir($root) || !is_readable($root) ) return [];
+
+		$pageDirs = $this->rootPageDirs();
+		$dirs = [];
+		try {
+			foreach( new \DirectoryIterator($root) as $fileInfo ){
+				if( $fileInfo->isDot() || !$fileInfo->isDir() ) continue;
+				$name = $fileInfo->getFilename();
+				if( $this->isStaticCopyDir($name, $pageDirs) ) continue;
+				$dirs[] = $name;
+			}
+		}
+		catch( \Throwable $e ){
+			return [];
+		}
+		sort($dirs);
+		return $dirs;
+	}
+
+	private function rootPageDirs(){
+		//names of the first level page dirs, in every language: the children of the home
+		//page, and the home page itself where a language has a name for it (/en/)
+		$names = [];
+		try {
+			$home = $this->wire('pages')->get('/');
+			if( !$home->id ) return $names;
+			$languages = $this->wire('modules')->isInstalled('LanguageSupportPageNames') ? $this->wire('languages') : null;
+			$pages = $home->children('include=all');
+			foreach( $languages ?: [null] as $language ){
+				if( $language ){
+					$homeName = $home->localName($language);
+					if( strlen($homeName) && $homeName !== Pages::defaultRootName ) $names[$homeName] = true;
+				}
+				foreach( $pages as $page ){
+					$name = $language ? $page->localName($language) : $page->name;
+					if( strlen($name) ) $names[$name] = true;
+				}
+			}
+		}
+		catch( \Throwable $e ){}
+		return $names;
+	}
+
+	private function isStaticCopyDir($name, array $pageDirs){
+		//a root dir named like a page is that page's static copy dir, unless it holds
+		//anything besides static copies: a page named like a code dir (an /api/ page next
+		//to the api/ endpoints) must leave that dir protected
+		if( !isset($pageDirs[$name]) ) return false;
+		$dir = $this->rootPath() . DIRECTORY_SEPARATOR . $name;
+		if( is_link($dir) ) return false;
+		try {
+			$rii = new \RecursiveIteratorIterator(
+				new \RecursiveDirectoryIterator( $dir, \FilesystemIterator::SKIP_DOTS ),
+				\RecursiveIteratorIterator::LEAVES_ONLY
+			);
+			foreach( $rii as $entry ){
+				if( $entry->isDir() ) continue; //an empty dir is a leaf
+				$basename = $entry->getFilename();
+				if( $basename === $this->staticFile || fnmatch( $this->tmpFileGlob(), $basename ) ) continue;
+				return false;
+			}
+		}
+		catch( \Throwable $e ){
+			return false;
+		}
+		return true;
+	}
+
+	private function warnPageDirsProtected($data){
+		//a list saved before the default was fixed (or typed by hand) can still name page dirs
+		if( !is_array($data) || !isset($data['nonStaticDirs']) ) return;
+		$rootPageDirs = $this->rootPageDirs();
+		$listed = $this->linesToArray( $data['nonStaticDirs'] );
+		$pageDirs = array_values( array_filter( $listed, fn($dir) => $this->isStaticCopyDir($dir, $rootPageDirs) ) );
+		if( !count($pageDirs) ) return;
+		$this->warning( sprintf(
+			$this->_('Non-static directories lists page directories: %s. Static copies inside them are never wiped and go stale; remove them from the list.'),
+			implode(', ', $pageDirs)
+			) );
 	}
 
 	private function configValue($key, $default){

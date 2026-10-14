@@ -122,6 +122,17 @@ RewriteCond %{HTTP_HOST} ^(www\.)?example\.com$ [NC]
 RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]
 ```
 
+## Non-static directories
+
+Wipes never touch the site root dirs listed in *Non-static directories*. Until the setting is saved,
+the list defaults to every root dir except those that only hold static copies of first level pages
+(in every language, `/en/` included); a page dir that also holds other files (an `/api/` page next to
+`api/` endpoints) stays protected. Saving the setting stores the list as shown, and the save warns
+when it names a dir that only holds static copies: those copies would never be wiped.
+
+Before 0.6.3 the default listed every root dir, so on a site that already had static copies it took
+in their page dirs too. If an older install saved such a list, remove the page dirs from it.
+
 ## Limits of path tracking
 
 - The check runs on admin requests only. A fully cached URL never reaches PHP, so there is no front end request left to hang it on. A developer who edits files and never opens the admin will not see the cache wiped.
