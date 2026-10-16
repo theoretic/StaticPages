@@ -16,8 +16,11 @@ foreach( wire('templates') as $template ){
 }
 
 //the site root's dirs minus the page dirs (StaticPages::defaultNonStaticDirs()); an empty
-//list where the root is missing or unreadable, so config and modules refresh still work
-$nonStaticDirsValue = wire('modules')->get('StaticPages')->defaultNonStaticDirs();
+//list where the root is missing or unreadable, so config and modules refresh still work.
+//A modules refresh includes this file while it rebuilds the module info cache: asking for the
+//module then would start that rebuild again from inside it, endlessly (memory exhausted where
+//the module dir is a junction the module scan does not see). The list only matters on the form
+$nonStaticDirsValue = wire('modules')->refreshing ? [] : wire('modules')->get('StaticPages')->defaultNonStaticDirs();
 
 $nonStaticDirsValue = implode("\n", $nonStaticDirsValue);
 
