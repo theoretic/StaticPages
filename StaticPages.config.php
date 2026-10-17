@@ -89,21 +89,10 @@ $config = [
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Use shell commands'),
 				//'description'			=> $this->_('UNIX string like 0755'),
-				'notes'					=> $this->_('Applies only to the fallback full-disk scan (no manifest or forced wipe). Faster than php but can be unavailable on certain systems.'),
+				'notes'					=> $this->_('Applies only to the full disk scan: a forced wipe, or a site with neither index tables nor manifest. Saves never scan, they remove the files the dependency index names. One find (Linux, macOS, BSD) or one PowerShell process (Windows) instead of the php walk; falls back to php when it can not run.'),
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				//'value'					=> 1,
-			],
-
-			[
-				'name'					=> 'rmDirPasses',
-				'type'					=> 'text',
-				'label'					=> $this->_('Dir removal passes'),
-				//'description'			=> $this->_('one name per line'),
-				'notes'					=> $this->_('When shell is used, recursive removal of empty dirs may require several passes if the directory structure is deeply nested. Normally, 10 passes is enough.'),
-				'required'				=> true,
-				'columnWidth'			=> 33,
-				'value'					=> 10,
 			],
 
 			[
@@ -111,7 +100,7 @@ $config = [
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Force static pages deletion on module save'),
 				//'description'			=> $this->_('UNIX string like 0755'),
-				'notes'					=> $this->_('Performs a full disk scan, also removing static files the manifest does not know about.'),
+				'notes'					=> $this->_('Performs a full disk scan, also removing static files the index does not know about.'),
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				//'value'					=> 1,
@@ -122,7 +111,7 @@ $config = [
 				'type'					=> 'textarea',
 				'label'					=> $this->_('Wipe on config save of these modules'),
 				'description'			=> $this->_('one module class name per line'),
-				'notes'					=> $this->_('Modules keeping site wide settings in their own config data save no page, so nothing is wiped when their settings change. Saving the config of a module listed here deletes the static files (manifest based). Name the class holding the data, not the Process class: SettingsFactory, not ProcessSettingsFactory. Names are case insensitive and the module needs not be installed. Do not list modules writing counters or timestamps to their config, every such write would wipe.'),
+				'notes'					=> $this->_('Modules keeping site wide settings in their own config data save no page, so nothing is wiped when their settings change. Saving the config of a module listed here deletes every static file the index knows of, once the response is out. Name the class holding the data, not the Process class: SettingsFactory, not ProcessSettingsFactory. Names are case insensitive and the module needs not be installed. Do not list modules writing counters or timestamps to their config, every such write would wipe.'),
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				'value'					=> 'SettingsFactory',
@@ -136,6 +125,26 @@ $config = [
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				'value'					=> 1,
+			],
+
+			[
+				'name'					=> 'wipeAllTemplates',
+				'type'					=> 'AsmSelect',
+				'label'					=> $this->_('Wipe everything on save of these templates'),
+				'notes'					=> $this->_('A save normally removes only the static files whose render loaded the saved page or ran a find it may enter. List templates whose pages feed markup by a way that record can not see: $pages->findRaw(), a WireCache or MarkupCache fragment, raw SQL. Language pages always wipe everything.'),
+				'columnWidth'			=> 33,
+				'options'				=> $nonStaticTemplatesOptions,
+				'value'					=> [],
+			],
+
+			[
+				'name'					=> 'wipeAllFields',
+				'type'					=> 'textarea',
+				'label'					=> $this->_('Wipe everything on change of these fields'),
+				'description'			=> $this->_('one field name per line'),
+				'notes'					=> $this->_('The same, for a field rather than a template: a change of a listed field on any page removes every static file. Names are case insensitive.'),
+				'columnWidth'			=> 33,
+				'value'					=> '',
 			],
 
 			[

@@ -8,12 +8,75 @@ Normally Processwire renders any page any time it's requested. StaticPages modul
 
 Module reacts to the following events:
 
-- Page render: a new static html file is created.
-- Page save: all previously generated html files will be deleted.
-- Page delete: all previously generated html files will be deleted.
-- Single field save: all previously generated html files will be deleted. Inline admin edits and `$page->setAndSave()` never reach a page save. Can be switched off in the module settings.
+- Page render: a new static html file is created, and the pages its render depended on are recorded with it.
+- Page save, delete, sort, trash or restore: the static files that depended on that page are deleted, and only those. See *What a save deletes* below.
+- Single field save: the same. Inline admin edits and `$page->setAndSave()` never reach a page save. Can be switched off in the module settings.
 - Config save of a listed module: all previously generated html files will be deleted. Modules like SettingsFactory keep site-wide settings in their own module config data and save no page, so a page save event never happens even though the settings end up in the markup. List such modules in the *Wipe on config save of these modules* setting, one class name per line.
 - Tracked file change: all previously generated html files will be deleted. Editing a template or an asset file fires no ProcessWire event at all, so nothing would tell the module its static files went stale. The patterns listed in the *Track changes in these paths* setting are checked on admin requests by file name, modification time and size; file contents are never read. `*` matches inside one path segment, `**` matches any number of segments including none.
+
+A save does not delete anything itself. It queues what went stale, and the files are deleted
+once the response has been sent: under php-fpm and LiteSpeed the connection is closed first,
+so the editor never waits; under other SAPIs the output is flushed first. A queue left behind
+by a killed process is finished by the next admin request. Each drain writes one line to the
+`static-pages` log: what it was asked for, how many files and dirs it deleted, how long it took.
+
+## What a save deletes
+
+While the front end renders a page, the module records what the render depended on: every page
+it loaded, and every `find()` it ran, by the template, parent or ancestor that find was limited
+to. The record lives in three database tables next to the static file.
+
+A save of a page then deletes:
+
+- every static file whose render loaded the page. That covers the page itself, its listings,
+  menus, breadcrumbs, related-pages blocks and page-reference fields pointing at it;
+- every static file whose render ran a find the page may have entered or left: one limited to
+  its template, its parent or one of its ancestors, or a find with no such limit. A new post,
+  a published draft or a post edited into `featured=1` appears in listings that never loaded it.
+  Before and after a move or a template change;
+- for a rename or a move, the files of every descendant too, their urls changed.
+
+An unpublished page that stays unpublished is shown nowhere, so editing a draft deletes nothing.
+A save that changes nothing deletes nothing.
+
+Everything is deleted when:
+
+- a language page is saved, a page of a template listed in *Wipe everything on save of these
+  templates* is saved, or a field listed in *Wipe everything on change of these fields* changes;
+- a page with children is trashed or restored: ProcessWire sets the children's status in SQL,
+  with no save and no hook;
+- a renamed or moved page has more than 5000 descendants;
+- a listed module's config is saved, or a tracked file changed.
+
+What the record can not see, so list the template or the field when it applies:
+
+- `$pages->findRaw()` and `$pages->getRaw()`, which never load pages;
+- markup cached by WireCache, MarkupCache and the like, rendered by an earlier request;
+- raw SQL;
+- status changes through `$pages->addStatus()` and friends, which save no page.
+
+A render that read the database before a save and finishes after it is not cached: a
+generation stamp in `site/assets/cache/StaticPages/` changes with every queued save.
+
+Where the tables can not be created (no CREATE privilege) the module says so in the
+`static-pages` log once an hour and falls back to the old behaviour: a manifest file, and every
+save deleting every static file, synchronously.
+
+The tables are named `static_pages_files`, `static_pages_tags` and `static_pages_queue`. Their
+layout version is kept in their table comments (`StaticPages schema 1`), not in the module
+config, so it always matches the tables actually there. Before its first write in a request
+the module creates missing tables and migrates older ones, one request at a time, and logs the
+migration. Tables left by a newer module version are not written to: after a downgrade the
+module falls back as above until it is upgraded again. Uninstalling the module drops them.
+
+## Upgrading from 0.6
+
+Nothing to do, on every site sharing the module dir as well. The tables are created on the
+first render or save after the upgrade, and tables from 0.7.0 get their version stamped. Files
+listed in the old manifest are imported with unknown dependencies and deleted by the first save
+of any page. A static file the manifest did not know about either is only found by a full disk
+scan: save the module settings once with *Force static pages deletion on module save* checked.
+The *Dir removal passes* setting is gone, every scan now takes one pass.
 
 A file is written to a temporary name in its own directory and moved into place with
 `rename()`, which is atomic within a filesystem. A request arriving while another one is
@@ -143,9 +206,19 @@ in their page dirs too. If an older install saved such a list, remove the page d
 - A hash file that is missing or unreadable is treated as a first run: it is seeded, nothing is wiped. So a deploy that clears `site/assets/cache/` and changes templates in the same step will not wipe. Deploy scripts should ask for it directly:
 
 ```php
-$modules->get('StaticPages')->checkTrackedPaths(true);  //check now, ignoring the throttle
-$modules->get('StaticPages')->wipeCaches(true);         //or just wipe, full disk scan
+$modules->get('StaticPages')->checkTrackedPaths(true);  //check now, ignoring the throttle; deletes at script end
+$modules->get('StaticPages')->wipeCaches();             //or just wipe every indexed file, right now
+$modules->get('StaticPages')->wipeCaches(true);         //the same with a full disk scan
+$modules->get('StaticPages')->drain();                  //process the queue right now
 ```
+
+## Full disk scans
+
+A scan only runs when asked for (*Force static pages deletion on module save*, `wipeCaches(true)`)
+or when there is neither index nor manifest. It walks the site root dirs not listed in
+*Non-static directories*, and never enters the listed ones. With *Use shell commands* it is one
+`find` on Linux, macOS and BSD, or one PowerShell process on Windows; otherwise a PHP walk. On
+Windows the PHP walk is the faster of the two, PowerShell takes a few tenths of a second to start.
 
 ## Warning
 
