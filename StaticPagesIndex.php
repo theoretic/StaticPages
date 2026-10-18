@@ -271,7 +271,7 @@ class StaticPagesIndex extends Wire {
 
 		$template = $page->template;
 		if( !$template instanceof Template ) return true;
-		if( $template->name === 'language' ) return true;
+		if( $this->isLanguage($page, $template) ) return true;
 
 		$templates = array_map( 'intval', (array) $this->sp->wipeAllTemplates );
 		if( in_array( (int) $template->id, $templates, true ) ) return true;
@@ -280,6 +280,17 @@ class StaticPagesIndex extends Wire {
 		if( !count($fields) ) return false;
 		$changed = array_map( fn($change) => strtolower( (string) $change ), $changes );
 		return count( array_intersect($fields, $changed) ) > 0;
+	}
+
+	public function isLanguage(Page $page, Template $template){
+		//by class and by the template the languages API was built on, not by a template named
+		//'language': a site template of that name is not a language, and LanguageSupport
+		//keeps its template in the Languages object
+		if( $page instanceof Language ) return true;
+		$languages = $this->wire()->languages;
+		if( !$languages instanceof Languages ) return false;
+		$languageTemplate = $languages->getTemplate();
+		return $languageTemplate instanceof Template && (int) $languageTemplate->id === (int) $template->id;
 	}
 
 ////  the index
