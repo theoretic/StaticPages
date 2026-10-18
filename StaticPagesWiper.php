@@ -11,12 +11,20 @@ namespace ProcessWire;
 Three ways to find what to delete: the dependency index (every save and every drain), the
 manifest (sites without index tables) and a scan of the site root (forced wipes, and sites
 with neither). The scan runs in PHP, or as one find or one PowerShell process.
+
+Whatever finds a path, nothing is deleted unless realpath() puts it below the site root, its
+name is the configured static file name (or the temporary name publish() writes), and it is
+outside every dir listed in Non-static directories. The scan only walks root dirs that are
+static copies of pages, worked out when it runs: see scanTargets().
 */
 
 class StaticPagesWiper extends Wire {
 
 	/** @var StaticPages */
 	protected $sp;
+
+	//root dirs the last scanTargets() left alone although no list names them
+	protected $leftAlone = array();
 
 	public function __construct(StaticPages $sp) {
 		parent::__construct();
@@ -41,6 +49,9 @@ class StaticPagesWiper extends Wire {
 
 		$result = array('files' => 0, 'bytes' => 0, 'dirs' => 0);
 
+		$staticFile = $this->sp->staticFileName();
+		if( $staticFile === '' ) return $result;
+
 		$root = $this->sp->rootPath();
 		$nonStaticDirs = $this->sp->nonStaticDirsArray();
 		$dirs = array();
@@ -51,12 +62,14 @@ class StaticPagesWiper extends Wire {
 			$relative = (string) $relative;
 
 			//the index could have been tampered with, validating every entry before deletion
-			if( strpos($relative, '..') !== false ) continue;
+			if( $relative === '' || strpos($relative, '..') !== false || strpos($relative, "\0") !== false ) continue;
 			$path = $root . $relative;
-			if( basename($path) !== $this->sp->staticFile ) continue;
+			if( basename($path) !== $staticFile ) continue;
 			if( !is_file($path) ) continue;
 			$dirPath = dirname($path);
 			if( $this->isProtectedPath($dirPath, $nonStaticDirs) ) continue;
+			//a link leading out of the site, or a path the checks above did not see through
+			if( !$this->insideRoot($path) ) continue;
 
 			$size = (int) @filesize($path);
 			if( !@unlink($path) ){
@@ -128,6 +141,7 @@ class StaticPagesWiper extends Wire {
 		foreach( $list as $dir ){
 			if( !is_dir($dir) || is_link($dir) ) continue;
 			if( (new \FilesystemIterator($dir))->valid() ) continue;
+			if( !$this->insideRoot($dir) ) continue;
 			if( @rmdir($dir) ) $deletedDirs++;
 		}
 
@@ -135,32 +149,38 @@ class StaticPagesWiper extends Wire {
 	}
 
 	public function pruneEmptyDirs($dirPath, $rootNorm){
-		//removes $dirPath if empty, then its empty ancestors up to the site root level
+		//removes $dirPath if empty, then its empty ancestors, never the site root nor anything
+		//above it: the walk stops at the first dir that is not empty, not a dir, a link, or not
+		//below the root once realpath() had its say
 
+		$rootNorm = rtrim( $this->sp->normalizePath($rootNorm), DIRECTORY_SEPARATOR );
+		$dir = rtrim( $this->sp->normalizePath($dirPath), DIRECTORY_SEPARATOR );
 		$deletedDirs = 0;
 
-		if( !is_dir($dirPath) ) return 0;
-		$dirIsEmpty = !(new \FilesystemIterator($dirPath))->valid();
-		if( !$dirIsEmpty ) return 0;
-		rmdir($dirPath);
-		$deletedDirs++;
-
-		$parts = explode( DIRECTORY_SEPARATOR, $this->sp->normalizePath($dirPath) );
-		foreach( $parts as $part ){
-			array_pop($parts);
-			$parentDirPath = implode( DIRECTORY_SEPARATOR, $parts );
-
-			if( strlen($parentDirPath) <= strlen($rootNorm) ) continue;
-			if( in_array( $parentDirPath, array('', '.', '..') ) ) continue;
-			if( !is_dir($parentDirPath) ) continue;
-
-			$dirIsEmpty = !(new \FilesystemIterator($parentDirPath))->valid();
-			if( !$dirIsEmpty ) continue;
-			rmdir($parentDirPath);
+		for( $i = 0; $i < 100 && strlen($dir) > strlen($rootNorm); $i++ ){
+			if( !is_dir($dir) || is_link($dir) ) break;
+			if( (new \FilesystemIterator($dir))->valid() ) break;
+			if( !$this->insideRoot($dir) ) break;
+			if( !@rmdir($dir) ) break;
 			$deletedDirs++;
+			$parent = dirname($dir);
+			if( $parent === $dir ) break;
+			$dir = $parent;
 		}
 
 		return $deletedDirs;
+	}
+
+	public function insideRoot($path){
+		//realpath() resolves links, junctions and dots: whatever a path says, it has to end up
+		//strictly below the site root to be deleted
+		$rootReal = realpath( $this->sp->rootPath() );
+		$real = realpath($path);
+		if( $rootReal === false || $real === false ) return false;
+		$prefix = rtrim( $rootReal, '/\\' ) . DIRECTORY_SEPARATOR;
+		if( strlen($real) <= strlen($prefix) ) return false;
+		if( DIRECTORY_SEPARATOR === '\\' ) return strncasecmp( $real, $prefix, strlen($prefix) ) === 0;
+		return strncmp( $real, $prefix, strlen($prefix) ) === 0;
 	}
 
 ////  protected dirs
@@ -219,17 +239,22 @@ class StaticPagesWiper extends Wire {
 		//anything besides static copies: a page named like a code dir (an /api/ page next
 		//to the api/ endpoints) must leave that dir protected
 		if( !isset($pageDirs[$name]) ) return false;
+		$staticFile = $this->sp->staticFileName();
+		if( $staticFile === '' ) return false;
 		$dir = $this->sp->rootPath() . DIRECTORY_SEPARATOR . $name;
-		if( is_link($dir) ) return false;
+		if( is_link($dir) || !is_dir($dir) ) return false;
+		$tmpGlob = $this->sp->publisher()->tmpFileGlob();
 		try {
 			$rii = new \RecursiveIteratorIterator(
 				new \RecursiveDirectoryIterator( $dir, \FilesystemIterator::SKIP_DOTS ),
-				\RecursiveIteratorIterator::LEAVES_ONLY
+				\RecursiveIteratorIterator::SELF_FIRST
 			);
 			foreach( $rii as $entry ){
-				if( $entry->isDir() ) continue; //an empty dir is a leaf
+				//a link inside is something nobody would put into a static copy
+				if( $entry->isLink() ) return false;
+				if( $entry->isDir() ) continue;
 				$basename = $entry->getFilename();
-				if( $basename === $this->sp->staticFile || fnmatch( $this->sp->publisher()->tmpFileGlob(), $basename ) ) continue;
+				if( $basename === $staticFile || fnmatch( $tmpGlob, $basename ) ) continue;
 				return false;
 			}
 		}
@@ -253,10 +278,19 @@ class StaticPagesWiper extends Wire {
 	}
 
 	public function isProtectedPath($dirPath, array $nonStaticDirs){
-		$dirPath = $this->sp->normalizePath($dirPath);
-		$root = $this->sp->normalizePath( $this->sp->rootPath() );
+		//$dirPath is a listed dir or below one. Case insensitive on Windows, where the
+		//filesystem is, and slashes either way in the list
+		$windows = DIRECTORY_SEPARATOR === '\\';
+		$dirPath = rtrim( $this->sp->normalizePath($dirPath), DIRECTORY_SEPARATOR );
+		$root = rtrim( $this->sp->normalizePath( $this->sp->rootPath() ), DIRECTORY_SEPARATOR );
+		if( $windows ){
+			$dirPath = strtolower($dirPath);
+			$root = strtolower($root);
+		}
 		foreach( $nonStaticDirs as $nonStaticDir ){
-			$sample = $root . DIRECTORY_SEPARATOR . $nonStaticDir;
+			$nonStaticDir = trim( $this->sp->normalizePath( (string) $nonStaticDir ), DIRECTORY_SEPARATOR . " \t" );
+			if( $nonStaticDir === '' ) continue;
+			$sample = $root . DIRECTORY_SEPARATOR . ( $windows ? strtolower($nonStaticDir) : $nonStaticDir );
 			if( $dirPath === $sample ) return true;
 			if( strpos( $dirPath, $sample . DIRECTORY_SEPARATOR ) === 0 ) return true;
 		}
@@ -270,6 +304,12 @@ class StaticPagesWiper extends Wire {
 		//wipes, and installs with neither index nor manifest. Returns the counts, or null from a
 		//shell, which counts nothing
 
+		$staticFile = $this->sp->staticFileName();
+		if( $staticFile === '' ){
+			$this->sp->logDrain( 'full scan refused: Static file name is not a plain file name' );
+			return array('files' => 0, 'bytes' => 0, 'dirs' => 0);
+		}
+
 		//rows first: a render recording while the scan runs keeps a row for a file the scan then
 		//removes, which is harmless, and never the reverse
 		if( $this->sp->index()->ensureTables() ) $this->sp->index()->clearRows();
@@ -279,6 +319,8 @@ class StaticPagesWiper extends Wire {
 		if( is_file($manifest) ) @file_put_contents( $manifest, '', LOCK_EX );
 
 		$targets = $this->scanTargets();
+		if( count($this->leftAlone) )
+			$this->sp->logDrain( 'full scan left alone root dirs no list names, they are no static copies of pages: ' . implode(', ', $this->leftAlone) );
 
 		//a protected entry naming a dir below the root level: only the php walk looks at every
 		//dir on its way down, the shells are handed whole root dirs
@@ -305,9 +347,16 @@ class StaticPagesWiper extends Wire {
 	}
 
 	public function scanTargets(){
-		//the root dirs a scan walks: all but the protected ones and the links. Protected dirs are
-		//never entered, where every scan used to walk all of site/assets/files only to skip each
-		//file in it, and the shells did it once per pass
+		//the root dirs a scan walks. Worked out now rather than taken from Non-static
+		//directories alone: that list is a snapshot of the root from the last config save, and a
+		//dir added since (vendor/, a hand made landing page) was in no list and lost every
+		//index.html and every empty dir it had. A root dir is walked only when no list names
+		//it, it is no link, and it is a static copy of a first level page: named like one, in
+		//any language, and holding nothing but static files. Everything else is left alone.
+		//Protected dirs are never entered, where every scan used to walk all of
+		//site/assets/files only to skip each file in it
+
+		$this->leftAlone = array();
 
 		$root = $this->sp->rootPath();
 		$windows = DIRECTORY_SEPARATOR === '\\';
@@ -321,6 +370,7 @@ class StaticPagesWiper extends Wire {
 		$rootReal = realpath($root);
 		if( $rootReal === false ) return array();
 
+		$pageDirs = $this->rootPageDirs();
 		$targets = array();
 
 		try {
@@ -338,6 +388,11 @@ class StaticPagesWiper extends Wire {
 				$real = realpath($path);
 				if( $real === false || strcasecmp( $real, $rootReal . DIRECTORY_SEPARATOR . $name ) !== 0 ) continue;
 
+				if( !$this->isStaticCopyDir($name, $pageDirs) ){
+					$this->leftAlone[] = $name;
+					continue;
+				}
+
 				$targets[] = $path;
 			}
 		}
@@ -346,7 +401,12 @@ class StaticPagesWiper extends Wire {
 		}
 
 		sort($targets);
+		sort($this->leftAlone);
 		return $targets;
+	}
+
+	public function leftAlone(){
+		return $this->leftAlone;
 	}
 
 	public function wipeScanPHP(array $targets){
@@ -356,18 +416,20 @@ class StaticPagesWiper extends Wire {
 
 		$root = $this->sp->rootPath();
 		$nonStaticDirs = $this->sp->nonStaticDirsArray();
+		$staticFile = $this->sp->staticFileName();
 		$tmpGlob = $this->sp->publisher()->tmpFileGlob();
 		$dirs = array();
 
-		$delete = function($path) use (&$result, $tmpGlob){
+		$delete = function($path) use (&$result, $tmpGlob, $staticFile){
 			$name = basename($path);
 			//a temporary file left behind by a killed publish keeps its directory non-empty,
 			//and an orphan directory holding no index.html is the 403
 			if( fnmatch( $tmpGlob, $name ) ){
-				@unlink($path);
+				if( $this->insideRoot($path) ) @unlink($path);
 				return;
 			}
-			if( $name !== $this->sp->staticFile ) return;
+			if( $name !== $staticFile ) return;
+			if( !$this->insideRoot($path) ) return;
 			$size = (int) @filesize($path);
 			if( !@unlink($path) ) return;
 			$result['files']++;
@@ -417,9 +479,10 @@ class StaticPagesWiper extends Wire {
 		//its contents, so a dir emptied by the -delete of its files is empty by the time -empty
 		//looks at it, where the empty dir removal used to take a pass per nesting level.
 		//-delete can not be combined with -prune: the protected dirs are left out by never
-		//being named as a starting point
+		//being named as a starting point. The names are plain file names, staticFileName()
+		//sees to that: -name takes a pattern
 
-		$match = '\\( -name ' . escapeshellarg( $this->sp->staticFile ) . ' -o -name ' . escapeshellarg( $this->sp->publisher()->tmpFileGlob() ) . ' \\)';
+		$match = '\\( -name ' . escapeshellarg( $this->sp->staticFileName() ) . ' -o -name ' . escapeshellarg( $this->sp->publisher()->tmpFileGlob() ) . ' \\)';
 
 		$root = escapeshellarg( $this->sp->rootPath() );
 		shell_exec( "find $root -mindepth 1 -maxdepth 1 -type f $match -delete 2>/dev/null" );
@@ -444,7 +507,7 @@ class StaticPagesWiper extends Wire {
 		//one statement per line: powershell reading a script from stdin runs it line by line
 		$lines = array(
 			"\$ErrorActionPreference = 'SilentlyContinue'",
-			'$name = ' . $text( $this->sp->staticFile ),
+			'$name = ' . $text( $this->sp->staticFileName() ),
 			'$tmp = ' . $text( $this->sp->publisher()->tmpFileGlob() ),
 			'function Wipe-Files([string]$dir){ try { $files = [IO.Directory]::GetFiles($dir) } catch { return }; foreach($file in $files){ $n = [IO.Path]::GetFileName($file); if($n -eq $name -or $n -like $tmp){ try { [IO.File]::Delete($file) } catch {} } } }',
 			'function Wipe-Tree([string]$dir){ try { $subs = [IO.Directory]::GetDirectories($dir) } catch { return }; foreach($sub in $subs){ if(-not ([IO.File]::GetAttributes($sub) -band [IO.FileAttributes]::ReparsePoint)){ Wipe-Tree $sub } }; Wipe-Files $dir; try { if([IO.Directory]::GetFileSystemEntries($dir).Length -eq 0){ [IO.Directory]::Delete($dir) } } catch {} }',

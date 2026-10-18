@@ -258,7 +258,7 @@ class StaticPagesTracker extends Wire {
 		//wipe, change the state again by wiping, and never settle
 
 		//a generated static file is not a source file either
-		if( basename($path) === $this->sp->staticFile ) return true;
+		if( basename($path) === $this->sp->staticFileName() ) return true;
 
 		$path = $this->sp->normalizePath($path);
 		$paths = $this->wire()->config->paths;

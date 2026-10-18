@@ -363,9 +363,28 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			return;
 		}
 
+		//a name the wipes could not match safely is a name nothing is written under either
+		$staticFile = $this->staticFileName();
+		if( $staticFile === '' ){
+			$this->logSkip( $page, 'Static file name is not a plain file name' );
+			return;
+		}
+
+		//a page path or url segment never climbs out of the site root
+		$segments = explode( '/', $page->path . $urlSegmentStr );
+		if( in_array( '..', $segments, true ) || in_array( '.', $segments, true ) ) return;
+
 		$dir = $this->rootPath() . $page->path;
 		if( $urlSegmentStr !='' ) $dir.= "$urlSegmentStr/";
-		$path = $dir.$this->staticFile;
+		$path = $dir.$staticFile;
+
+		//a file in a dir listed in Non-static directories is never deleted by any wipe: it
+		//would be served stale for good. Only a saved list is asked, working out the default
+		//costs a walk of the site root
+		if( $this->nonStaticDirs !== null && $this->wiper()->isProtectedPath( rtrim($dir, '/\\'), $this->nonStaticDirsArray() ) ){
+			$this->logSkip( $page, 'its dir is listed in Non-static directories, no wipe would ever delete the file' );
+			return;
+		}
 
 		$mode = octdec($this->newDirPermissions);
 		if( !$mode ) $mode = 0755;
@@ -530,7 +549,30 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//runs unguarded through site/, wire/ and the like
 		$value = $this->nonStaticDirs;
 		if( $value === null ) return $this->wiper()->defaultNonStaticDirs();
-		return $this->linesToArray($value);
+
+		$dirs = array();
+		foreach( $this->linesToArray($value) as $line ){
+			//a leading or trailing slash names the same dir, and used to protect nothing
+			$line = trim( $line, "/\\ \t" );
+			if( $line === '' ) continue;
+			$dirs[] = $line;
+			//"site vendor wire" on one line (an odnaco install) meant three dirs: a dir name
+			//holding blanks protected nothing at all. Both readings are protected now
+			if( preg_match('/\s/', $line) )
+				foreach( preg_split('/\s+/', $line) as $word ) if( $word !== '' ) $dirs[] = $word;
+		}
+		return array_values( array_unique($dirs) );
+	}
+
+	/** #pw-internal */
+	public function staticFileName(){
+		//the configured name, or '' when it is not a plain file name. The name reaches find
+		//-name and PowerShell -like as a pattern and the disk as a path: '*', '*.html' or
+		//'../x' would turn a wipe into something else entirely. '' stops caching and every
+		//wipe matching by name. Never saved: index.html, as the config screen offers
+		$name = trim( (string) $this->configValue('staticFile', 'index.html') );
+		if( !preg_match('/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/', $name) ) return '';
+		return $name;
 	}
 
 	/** #pw-internal */

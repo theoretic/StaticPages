@@ -103,7 +103,7 @@ class StaticPagesPublisher extends Wire {
 
 	public function tmpFileGlob(){
 		//the shape publish() writes, as a glob: '.index.html.*.tmp'
-		return '.' . $this->sp->staticFile . '.*.tmp';
+		return '.' . $this->sp->staticFileName() . '.*.tmp';
 	}
 
 	public function responseCode(){
