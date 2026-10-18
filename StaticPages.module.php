@@ -428,7 +428,6 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//scan after all where neither exists
 
 		$start = microtime(true);
-		ob_start();
 
 		$this->queue()->bumpGen();
 
@@ -449,10 +448,9 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 		$duration = round( microtime(true)-$start, 2 );
 
-echo $this->wiper()->describeWipe($result) . " Static cache cleaned in $duration s.";
-
-		$buffer = ob_get_clean();
-		$this->message($buffer);
+		//the notice is built directly: an output buffer around the wipe took in whatever else
+		//was echoed meanwhile and handed it out as part of the notice
+		$this->message( $this->wiper()->describeWipe($result) . " Static cache cleaned in $duration s." );
 	}
 
 	public function drain(){
@@ -584,6 +582,7 @@ echo $this->wiper()->describeWipe($result) . " Static cache cleaned in $duration
 		if( !$page || !$page->id ) return false;
 		if( !$this->wire()->user->isLoggedin() ) return false;
 
+		//compared by name on purpose: $config->adminTemplates is a list of template names
 		$adminTemplates = $config->adminTemplates;
 		if( !is_array($adminTemplates) || !count($adminTemplates) ) $adminTemplates = array('admin');
 
