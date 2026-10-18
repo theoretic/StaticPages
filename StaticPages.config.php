@@ -10,7 +10,7 @@ namespace ProcessWire;
 $nonStaticTemplatesOptions = array();
 $nonStaticTemplatesValue = array();
 
-foreach( wire('templates') as $template ){
+foreach( $this->wire()->templates as $template ){
 	$nonStaticTemplatesOptions[$template->id] = $template->name;
 	if( $template->name == 'admin' ) $nonStaticTemplatesValue[] = $template->id;
 }
@@ -20,7 +20,7 @@ foreach( wire('templates') as $template ){
 //A modules refresh includes this file while it rebuilds the module info cache: asking for the
 //module then would start that rebuild again from inside it, endlessly (memory exhausted where
 //the module dir is a junction the module scan does not see). The list only matters on the form
-$nonStaticDirsValue = wire('modules')->refreshing ? array() : wire('modules')->get('StaticPages')->defaultNonStaticDirs();
+$nonStaticDirsValue = $this->wire()->modules->refreshing ? array() : $this->wire()->modules->get('StaticPages')->defaultNonStaticDirs();
 
 $nonStaticDirsValue = implode("\n", $nonStaticDirsValue);
 

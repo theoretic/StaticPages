@@ -261,7 +261,7 @@ class StaticPagesTracker extends Wire {
 		if( basename($path) === $this->sp->staticFile ) return true;
 
 		$path = $this->sp->normalizePath($path);
-		$paths = $this->wire('config')->paths;
+		$paths = $this->wire()->config->paths;
 
 		foreach( array('cache', 'logs', 'sessions', 'tmp') as $key ){
 			$dir = (string) $paths->$key;

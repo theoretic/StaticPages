@@ -91,20 +91,20 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//A CLI script would only grow the set
 		$this->index()->collect( PHP_SAPI !== 'cli' );
 		$this->addHookAfter('Page::loaded', $this, 'hookLoaded');
-		$this->pages->addHookAfter('found', $this, 'hookFound');
+		$this->wire()->pages->addHookAfter('found', $this, 'hookFound');
 
 		$this->addHookAfter('Page::render', $this, 'hookCache', array('priority' => (int) $this->priority));
 
 		//after the fact, with the changed field names: a save changing nothing removes nothing
-		$this->pages->addHookAfter('saved', $this, 'hookSaved');
-		$this->pages->addHookAfter('deleted', $this, 'hookDeleted');
-		$this->pages->addHookAfter('sorted', $this, 'hookSorted');
+		$this->wire()->pages->addHookAfter('saved', $this, 'hookSaved');
+		$this->wire()->pages->addHookAfter('deleted', $this, 'hookDeleted');
+		$this->wire()->pages->addHookAfter('sorted', $this, 'hookSorted');
 		//descendants have their trash status set in SQL, no save and no hook reaches them
-		$this->pages->addHookAfter('trashed', $this, 'hookTrashed');
-		$this->pages->addHookAfter('restored', $this, 'hookTrashed');
+		$this->wire()->pages->addHookAfter('trashed', $this, 'hookTrashed');
+		$this->wire()->pages->addHookAfter('restored', $this, 'hookTrashed');
 
 		//a single field save never reaches Pages::saved, inline admin edits and setAndSave() would leave stale files
-		if( $this->configValue('wipeOnSaveField', 1) ) $this->pages->addHookAfter('savedField', $this, 'hookSavedField');
+		if( $this->configValue('wipeOnSaveField', 1) ) $this->wire()->pages->addHookAfter('savedField', $this, 'hookSavedField');
 
 		//saves only queue what went stale, the files are removed once the response is out
 		register_shutdown_function(array($this, 'shutdown'));
@@ -276,7 +276,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//deliberately not gated on isEnabled so a disabled module can still be told to clean up
 		if( $class === $this->className() ){
 			$this->wiper()->warnPageDirsProtected( $event->arguments(1) );
-			if( !$this->wire('input')->post('forceWipeOnModuleSave') ) return;
+			if( !$this->wire()->input->post('forceWipeOnModuleSave') ) return;
 			//full disk scan: also catches files the manifest does not know about
 			return $this->wipeCaches(true);
 		}
@@ -301,10 +301,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 		//skipping partial renders: the hook fires for every $somePage->render() call,
 		//only the page actually being viewed may be cached under the current URL
-		if( $page !== $this->wire('page') ) return;
+		if( $page !== $this->wire()->page ) return;
 
 		//skipping 404 page caching
-		if( $page->id == wire('config')->http404PageID ) return;
+		if( $page->id == $this->wire()->config->http404PageID ) return;
 
 		//a static file is served with 200 for as long as it exists. A template that set
 		//4xx or 5xx on this response would have that page frozen and handed out as OK
@@ -312,10 +312,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( $this->publisher()->responseCode() !== 200 ) return;
 
 		//skipping logged-in users, their markup may contain private data
-		if( $this->wire('user')->isLoggedin() ){
+		if( $this->wire()->user->isLoggedin() ){
 			//the most confusing of all the skips: an operator browsing the site while
 			//logged in sees an installed, enabled module producing nothing and saying nothing
-			$this->logSkip( $page, 'user is logged in as ' . $this->wire('user')->name );
+			$this->logSkip( $page, 'user is logged in as ' . $this->wire()->user->name );
 			return;
 		}
 
@@ -335,16 +335,16 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		}
 
 		//an ajax response is a fragment rendered for one caller, never the page itself
-		if( $this->wire('config')->ajax ) return;
+		if( $this->wire()->config->ajax ) return;
 
 		//skip if get or post request
-		if( count(wire('input')->get) > 0 || count (wire('input')->post) > 0 ) return;
+		if( count($this->wire()->input->get) > 0 || count ($this->wire()->input->post) > 0 ) return;
 
 		//skipping paginated pages: pageNum is not part of urlSegmentStr, page 1 would be overwritten
-		if( (int) wire('input')->pageNum > 1 ) return;
+		if( (int) $this->wire()->input->pageNum > 1 ) return;
 
 		//caching url segments independently
-		$urlSegmentStr = wire('input')->urlSegmentStr;
+		$urlSegmentStr = $this->wire()->input->urlSegmentStr;
 
 		//the markup is prepared before anything at all is created on disk. stripCsrf()
 		//runs preg_replace, which answers null when PCRE gives up (a backtrack limit on
@@ -487,34 +487,34 @@ echo $this->wiper()->describeWipe($result) . " Static cache cleaned in $duration
 	private function isCacheableRequest(){
 		//the request side of cachePage()'s checks, as far as ready() can tell already
 		if( $this->adminRequest ) return false;
-		if( $this->wire('user')->isLoggedin() ) return false;
-		if( $this->wire('config')->ajax ) return false;
-		$input = $this->wire('input');
+		if( $this->wire()->user->isLoggedin() ) return false;
+		if( $this->wire()->config->ajax ) return false;
+		$input = $this->wire()->input;
 		if( count($input->get) > 0 || count($input->post) > 0 ) return false;
 		return true;
 	}
 
 	/** #pw-internal */
 	public function logDrain($message){
-		$this->wire('log')->save( 'static-pages', $message );
+		$this->wire()->log->save( 'static-pages', $message );
 	}
 
 	/** #pw-internal */
 	public function logSkip($page, $reason){
 		//off by default: a busy front end would write one line per request
 		if( !$this->configValue('logSkips', 0) ) return;
-		$this->wire('log')->save( 'static-pages', "skip {$page->path}: $reason" );
+		$this->wire()->log->save( 'static-pages', "skip {$page->path}: $reason" );
 	}
 
 	/** #pw-internal */
 	public function rootPath(){
 		//filesystem path to the site root, no trailing slash
-		return rtrim( $this->wire('config')->paths->root, '/\\' );
+		return rtrim( $this->wire()->config->paths->root, '/\\' );
 	}
 
 	/** #pw-internal */
 	public function manifestPath(){
-		return $this->wire('config')->paths->cache . 'StaticPages.manifest';
+		return $this->wire()->config->paths->cache . 'StaticPages.manifest';
 	}
 
 	/** #pw-internal */
@@ -548,7 +548,7 @@ echo $this->wiper()->describeWipe($result) . " Static cache cleaned in $duration
 	private function configSaveClassName($class){
 		//Modules::saveConfig is reached with a class name, a Module instance or a module id
 		if( is_object($class) ) return $class->className();
-		if( ctype_digit( (string) $class ) ) return (string) $this->wire('modules')->getModuleClass( (int) $class );
+		if( ctype_digit( (string) $class ) ) return (string) $this->wire()->modules->getModuleClass( (int) $class );
 		return (string) $class;
 	}
 
@@ -577,12 +577,12 @@ echo $this->wiper()->describeWipe($result) . " Static cache cleaned in $duration
 		//that renamed or added admin templates. It arrived in 3.0.142 and reads 0 rather
 		//than a boolean before that, hence the fallback
 
-		$config = $this->wire('config');
+		$config = $this->wire()->config;
 		if( is_bool($config->admin) ) return $config->admin;
 
-		$page = $this->wire('page');
+		$page = $this->wire()->page;
 		if( !$page || !$page->id ) return false;
-		if( !$this->wire('user')->isLoggedin() ) return false;
+		if( !$this->wire()->user->isLoggedin() ) return false;
 
 		$adminTemplates = $config->adminTemplates;
 		if( !is_array($adminTemplates) || !count($adminTemplates) ) $adminTemplates = array('admin');
@@ -596,10 +596,10 @@ echo $this->wiper()->describeWipe($result) . " Static cache cleaned in $duration
 		//shell wipes remove empty dirs and a deploy script may clear the whole PW cache dir.
 		//Returns '' when it can not be created
 
-		$dir = $this->wire('config')->paths->cache . 'StaticPages/';
+		$dir = $this->wire()->config->paths->cache . 'StaticPages/';
 
 		if( is_dir($dir) ) return $dir;
-		if( !$this->wire('files')->mkdir($dir, true) ) return '';
+		if( !$this->wire()->files->mkdir($dir, true) ) return '';
 
 		return $dir;
 	}

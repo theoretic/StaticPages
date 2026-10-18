@@ -51,7 +51,7 @@ class StaticPagesQueue extends Wire {
 
 		if( !$this->sp->index()->ensureTables() ) return;
 
-		$database = $this->wire('database');
+		$database = $this->wire()->database;
 		$lock = $this->sp->index()->lockName('drain');
 
 		if( !$this->sp->index()->getLock($lock, StaticPages::lockWait) ){
@@ -172,7 +172,7 @@ class StaticPagesQueue extends Wire {
 		}
 
 		try {
-			$query = $this->wire('database')->prepare('INSERT INTO `' . StaticPages::tableQueue . '` (mode, tags, created) VALUES (:mode, :tags, :created)');
+			$query = $this->wire()->database->prepare('INSERT INTO `' . StaticPages::tableQueue . '` (mode, tags, created) VALUES (:mode, :tags, :created)');
 			$query->bindValue(':mode', (int) $mode, \PDO::PARAM_INT);
 			$query->bindValue(':tags', implode("\n", $tags));
 			$query->bindValue(':created', time(), \PDO::PARAM_INT);
@@ -192,7 +192,7 @@ class StaticPagesQueue extends Wire {
 	public function hasOrphans(){
 		//no table yet means nothing queued, and this must not create one on every admin request
 		try {
-			$query = $this->wire('database')->prepare('SELECT 1 FROM `' . StaticPages::tableQueue . '` WHERE created < :time LIMIT 1');
+			$query = $this->wire()->database->prepare('SELECT 1 FROM `' . StaticPages::tableQueue . '` WHERE created < :time LIMIT 1');
 			$query->bindValue(':time', time() - StaticPages::orphanAge, \PDO::PARAM_INT);
 			$query->execute();
 			$found = (bool) $query->fetchColumn();
@@ -232,7 +232,7 @@ class StaticPagesQueue extends Wire {
 	}
 
 	public function genPath(){
-		return $this->wire('config')->paths->cache . 'StaticPages/gen';
+		return $this->wire()->config->paths->cache . 'StaticPages/gen';
 	}
 
 	public function readGen(){

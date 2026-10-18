@@ -195,9 +195,9 @@ class StaticPagesWiper extends Wire {
 		//page, and the home page itself where a language has a name for it (/en/)
 		$names = array();
 		try {
-			$home = $this->wire('pages')->get('/');
+			$home = $this->wire()->pages->get('/');
 			if( !$home->id ) return $names;
-			$languages = $this->wire('modules')->isInstalled('LanguageSupportPageNames') ? $this->wire('languages') : null;
+			$languages = $this->wire()->modules->isInstalled('LanguageSupportPageNames') ? $this->wire()->languages : null;
 			$pages = $home->children('include=all');
 			foreach( $languages ?: array(null) as $language ){
 				if( $language ){

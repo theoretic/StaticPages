@@ -154,7 +154,7 @@ class StaticPagesIndex extends Wire {
 
 	public function resolveTemplateId($value){
 		$value = trim( (string) $value );
-		$template = $this->wire('templates')->get( ctype_digit($value) ? (int) $value : $value );
+		$template = $this->wire()->templates->get( ctype_digit($value) ? (int) $value : $value );
 		return $template instanceof Template ? (int) $template->id : 0;
 	}
 
@@ -163,7 +163,7 @@ class StaticPagesIndex extends Wire {
 		$value = trim( (string) $value );
 		if( ctype_digit($value) ) return (int) $value;
 		if( $value === '' || $value[0] !== '/' ) return 0;
-		return (int) $this->wire('pages')->getByPath( $value, array('getID' => true, 'useLanguages' => true, 'allowPartial' => false) );
+		return (int) $this->wire()->pages->getByPath( $value, array('getID' => true, 'useLanguages' => true, 'allowPartial' => false) );
 	}
 
 	public function renderTags(Page $page){
@@ -172,7 +172,7 @@ class StaticPagesIndex extends Wire {
 		$tags = $this->deps;
 
 		//pages loaded before collecting started, by modules initialised before this one
-		foreach( array_keys( (array) $this->wire('pages')->getCache() ) as $id ) $tags['p:' . (int) $id] = true;
+		foreach( array_keys( (array) $this->wire()->pages->getCache() ) as $id ) $tags['p:' . (int) $id] = true;
 
 		//the page and its ancestors: a breadcrumb needs no find, and a rename or a move of an
 		//ancestor changes this url
@@ -256,7 +256,7 @@ class StaticPagesIndex extends Wire {
 		//null when there are too many to list: everything goes then
 		$this->resolving = true;
 		try {
-			$ids = $this->wire('pages')->findIDs( "has_parent={$page->id}, include=all, limit=" . ( StaticPages::maxDescendants + 1 ) );
+			$ids = $this->wire()->pages->findIDs( "has_parent={$page->id}, include=all, limit=" . ( StaticPages::maxDescendants + 1 ) );
 		}
 		finally {
 			$this->resolving = false;
@@ -298,7 +298,7 @@ class StaticPagesIndex extends Wire {
 
 		//a failure is tried again an hour later, not on every render in between, each of them
 		//adding a log line and failing queries
-		$failed = $this->wire('config')->paths->cache . 'StaticPages/tables.failed';
+		$failed = $this->wire()->config->paths->cache . 'StaticPages/tables.failed';
 		if( is_file($failed) && time() - (int) @filemtime($failed) < 3600 ) return false;
 
 		try {
@@ -335,8 +335,8 @@ class StaticPagesIndex extends Wire {
 		//the current layout, for a site that has none yet. Tables already there are left alone,
 		//upgradeSchema() takes care of those
 
-		$database = $this->wire('database');
-		$charset = $this->wire('config')->dbCharset === 'utf8mb4' ? 'utf8mb4' : 'utf8';
+		$database = $this->wire()->database;
+		$charset = $this->wire()->config->dbCharset === 'utf8mb4' ? 'utf8mb4' : 'utf8';
 		$options = "ENGINE=InnoDB DEFAULT CHARSET=$charset COMMENT='" . $this->schemaComment() . "'";
 
 		$database->exec(
@@ -378,7 +378,7 @@ class StaticPagesIndex extends Wire {
 		//a migration cut short may have left some behind. 0 for a table without one, 0.7.0
 		//wrote none
 
-		$query = $this->wire('database')->prepare(
+		$query = $this->wire()->database->prepare(
 			'SELECT TABLE_NAME, TABLE_COMMENT FROM information_schema.TABLES ' .
 			'WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (:files, :tags, :queue)'
 			);
@@ -416,7 +416,7 @@ class StaticPagesIndex extends Wire {
 
 			//last, once every step went through: a migration cut short is repeated in full
 			foreach( array(StaticPages::tableFiles, StaticPages::tableTags, StaticPages::tableQueue) as $table )
-				$this->wire('database')->exec( "ALTER TABLE `$table` COMMENT = '" . $this->schemaComment() . "'" );
+				$this->wire()->database->exec( "ALTER TABLE `$table` COMMENT = '" . $this->schemaComment() . "'" );
 
 			$this->sp->logDrain( "index tables migrated from schema $from to " . StaticPages::schemaVersion );
 
@@ -462,7 +462,7 @@ class StaticPagesIndex extends Wire {
 	}
 
 	public function recordStaticFile($relative, $pageId, array $tags){
-		$database = $this->wire('database');
+		$database = $this->wire()->database;
 		$hash = md5($relative);
 
 		try {
@@ -506,7 +506,7 @@ class StaticPagesIndex extends Wire {
 		//hash => root relative path. $tags null: every indexed file. Otherwise the files
 		//carrying one of $tags, and the '*' ones
 
-		$database = $this->wire('database');
+		$database = $this->wire()->database;
 		$files = array();
 
 		if( $tags === null ){
@@ -537,7 +537,7 @@ class StaticPagesIndex extends Wire {
 			foreach( array_chunk( array_values($hashes), StaticPages::chunkSize ) as $chunk ){
 				$in = implode( ', ', array_fill( 0, count($chunk), 'UNHEX(?)' ) );
 				foreach( array(StaticPages::tableTags, StaticPages::tableFiles) as $table ){
-					$query = $this->wire('database')->prepare("DELETE FROM `$table` WHERE path_hash IN ($in)");
+					$query = $this->wire()->database->prepare("DELETE FROM `$table` WHERE path_hash IN ($in)");
 					foreach( $chunk as $n => $hash ) $query->bindValue( $n + 1, (string) $hash );
 					$query->execute();
 				}
@@ -555,12 +555,12 @@ class StaticPagesIndex extends Wire {
 	public function lockName($purpose){
 		//GET_LOCK names are server wide and at most 64 characters: one per database, so two
 		//sites sharing a server do not wait for each other
-		$config = $this->wire('config');
+		$config = $this->wire()->config;
 		return "StaticPages.$purpose." . md5( $config->dbHost . '|' . $config->dbPort . '|' . $config->dbName );
 	}
 
 	public function getLock($name, $wait){
-		$query = $this->wire('database')->prepare('SELECT GET_LOCK(:name, :wait)');
+		$query = $this->wire()->database->prepare('SELECT GET_LOCK(:name, :wait)');
 		$query->bindValue(':name', $name);
 		$query->bindValue(':wait', (int) $wait, \PDO::PARAM_INT);
 		$query->execute();
@@ -570,7 +570,7 @@ class StaticPagesIndex extends Wire {
 	}
 
 	public function releaseLock($name){
-		$query = $this->wire('database')->prepare('SELECT RELEASE_LOCK(:name)');
+		$query = $this->wire()->database->prepare('SELECT RELEASE_LOCK(:name)');
 		$query->bindValue(':name', $name);
 		$query->execute();
 		$query->closeCursor();
@@ -583,13 +583,13 @@ class StaticPagesIndex extends Wire {
 
 	public function clearRows(){
 		//every file row and every tag row, the queue stays: a full scan is about to remove the files
-		$database = $this->wire('database');
+		$database = $this->wire()->database;
 		$database->exec( 'DELETE FROM `' . StaticPages::tableTags . '`' );
 		$database->exec( 'DELETE FROM `' . StaticPages::tableFiles . '`' );
 	}
 
 	public function dropTables(){
-		$database = $this->wire('database');
+		$database = $this->wire()->database;
 		foreach( array(StaticPages::tableFiles, StaticPages::tableTags, StaticPages::tableQueue) as $table )
 			$database->exec("DROP TABLE IF EXISTS `$table`");
 	}
