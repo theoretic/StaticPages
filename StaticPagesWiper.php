@@ -338,8 +338,8 @@ class StaticPagesWiper extends Wire {
 				case 'Darwin':
 				case 'BSD':
 				case 'Solaris':
-					$this->wipeScanUnix($targets);
-					return null;
+					if( $this->wipeScanUnix($targets) ) return null;
+				break;
 			}
 		}
 
@@ -480,17 +480,34 @@ class StaticPagesWiper extends Wire {
 		//looks at it, where the empty dir removal used to take a pass per nesting level.
 		//-delete can not be combined with -prune: the protected dirs are left out by never
 		//being named as a starting point. The names are plain file names, staticFileName()
-		//sees to that: -name takes a pattern
+		//sees to that: -name takes a pattern. Every argument goes through escapeshellarg().
+		//False when the shell did not run (shell_exec in disable_functions, no shell to start):
+		//the php walk takes over, where this used to die on an undefined function or report
+		//a scan that never happened
+
+		if( !function_exists('shell_exec') || !function_exists('escapeshellarg') ) return false;
+
+		$output = @shell_exec( $this->unixScanCommand($targets) );
+
+		return is_string($output) && strpos( $output, 'StaticPages-scan-done' ) !== false;
+	}
+
+	public function unixScanCommand(array $targets){
+		//the shell line wipeScanUnix() runs, ending in a marker that tells it the shell ran
 
 		$match = '\\( -name ' . escapeshellarg( $this->sp->staticFileName() ) . ' -o -name ' . escapeshellarg( $this->sp->publisher()->tmpFileGlob() ) . ' \\)';
 
 		$root = escapeshellarg( $this->sp->rootPath() );
-		shell_exec( "find $root -mindepth 1 -maxdepth 1 -type f $match -delete 2>/dev/null" );
+		$commands = array( "find $root -mindepth 1 -maxdepth 1 -type f $match -delete 2>/dev/null" );
 
-		if( !count($targets) ) return;
+		if( count($targets) ){
+			$dirs = implode( ' ', array_map( 'escapeshellarg', $targets ) );
+			$commands[] = "find $dirs -depth \\( -type f $match -delete \\) -o \\( -type d -empty -delete \\) 2>/dev/null";
+		}
 
-		$dirs = implode( ' ', array_map( 'escapeshellarg', $targets ) );
-		shell_exec( "find $dirs -depth \\( -type f $match -delete \\) -o \\( -type d -empty -delete \\) 2>/dev/null" );
+		$commands[] = 'echo StaticPages-scan-done';
+
+		return implode( '; ', $commands );
 	}
 
 	public function wipeScanWindows(array $targets){
