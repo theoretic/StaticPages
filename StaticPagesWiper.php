@@ -470,9 +470,12 @@ class StaticPagesWiper extends Wire {
 	}
 
 	public function readableFilesize($bytes, $decimals = 2) {
+		//floor() answers a float, and a float string offset is deprecated: the @ that hid the
+		//notice is gone, the factor is an int and capped at the last unit
 		$sz = 'BKMGTP';
-		$factor = floor((strlen($bytes) - 1) / 3);
-		return sprintf("%.{$decimals}f", $bytes / pow(1024, $factor)) . @$sz[$factor];
+		$bytes = max( 0, (int) $bytes );
+		$factor = min( (int) floor( ( strlen( (string) $bytes ) - 1 ) / 3 ), strlen($sz) - 1 );
+		return sprintf("%.{$decimals}f", $bytes / pow(1024, $factor)) . $sz[$factor];
 	}
 
 }
