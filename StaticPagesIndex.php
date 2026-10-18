@@ -40,6 +40,16 @@ class StaticPagesIndex extends Wire {
 	//null until first needed, then true or false for the rest of the request
 	protected $tablesReady = null;
 
+	//the finds of this request, array(Selectors, count) each, turned into tags only when a
+	//file is recorded: see pagesFound() and findTags()
+	protected $finds = array();
+
+	//page paths a selector carried, resolved once per request: path => id
+	protected $pathIds = array();
+
+	//more finds than this in one render: the file depends on 'any' instead
+	const maxFinds = 2000;
+
 	public function __construct(StaticPages $sp) {
 		parent::__construct();
 		$this->sp = $sp;
@@ -51,7 +61,10 @@ class StaticPagesIndex extends Wire {
 		//switched on from init() for every request that may be cached, off from ready() for
 		//those that are not: what was collected so far is dropped
 		$this->collecting = (bool) $on;
-		if( !$this->collecting ) $this->deps = array();
+		if( !$this->collecting ){
+			$this->deps = array();
+			$this->finds = array();
+		}
 	}
 
 	public function pageLoaded(Page $page){
@@ -68,17 +81,37 @@ class StaticPagesIndex extends Wire {
 		//pages already in memory are handed back without being loaded again
 		foreach( $items as $item ) $this->deps["p:{$item->id}"] = true;
 
+		//the selector is kept, not resolved: resolving a path costs a query, and this runs on
+		//every guest find of every request, most of which end up not cached at all (a 404, a
+		//skip, a page already on disk for everybody else). findTags() resolves them, once per
+		//request, when a file is actually recorded
+		if( isset($this->deps['any']) ) return;
+		if( count($this->finds) >= self::maxFinds ){
+			$this->deps['any'] = true;
+			$this->finds = array();
+			return;
+		}
+		$this->finds[] = array( $items->getSelectors(), $items->count() );
+	}
+
+	public function findTags(){
+		//the tags of every find kept by pagesFound(), tag => true
+		$tags = array();
 		$this->resolving = true;
 		try {
-			foreach( $this->selectorTags( $items->getSelectors(), $items->count() ) as $tag )
-				$this->deps[$tag] = true;
-		}
-		catch( \Throwable $e ){
-			$this->deps['any'] = true;
+			foreach( $this->finds as $find ){
+				try {
+					foreach( $this->selectorTags( $find[0], $find[1] ) as $tag ) $tags[$tag] = true;
+				}
+				catch( \Throwable $e ){
+					$tags['any'] = true;
+				}
+			}
 		}
 		finally {
 			$this->resolving = false;
 		}
+		return $tags;
 	}
 
 	public function selectorTags($selectors, $count){
@@ -163,13 +196,16 @@ class StaticPagesIndex extends Wire {
 		$value = trim( (string) $value );
 		if( ctype_digit($value) ) return (int) $value;
 		if( $value === '' || $value[0] !== '/' ) return 0;
-		return (int) $this->wire()->pages->getByPath( $value, array('getID' => true, 'useLanguages' => true, 'allowPartial' => false) );
+		//a listing asks for the same parent path in every find: one query per path and request
+		if( !isset($this->pathIds[$value]) )
+			$this->pathIds[$value] = (int) $this->wire()->pages->getByPath( $value, array('getID' => true, 'useLanguages' => true, 'allowPartial' => false) );
+		return $this->pathIds[$value];
 	}
 
 	public function renderTags(Page $page){
 		//everything the request collected, for the file cachePage() just wrote
 
-		$tags = $this->deps;
+		$tags = $this->deps + $this->findTags();
 
 		//pages loaded before collecting started, by modules initialised before this one
 		foreach( array_keys( (array) $this->wire()->pages->getCache() ) as $id ) $tags['p:' . (int) $id] = true;
