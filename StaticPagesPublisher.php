@@ -112,6 +112,65 @@ class StaticPagesPublisher extends Wire {
 		return $code === false ? 200 : (int) $code;
 	}
 
+	public function cookieSkip(array $cookies = null){
+		//the name of a request cookie listed in Never cache with these cookies, or ''. Output
+		//that depends on a cookie (a currency, a consent banner, a region) would be frozen
+		//into the file everybody gets. "*" matches any run of characters, "?" one
+		$patterns = $this->sp->linesToArray( $this->sp->configValue('noCacheCookies', '') );
+		if( !count($patterns) ) return '';
+		if( $cookies === null ) $cookies = $this->wire()->input->cookie->getArray();
+		foreach( array_keys($cookies) as $name ){
+			$name = (string) $name;
+			foreach( $patterns as $pattern ) if( fnmatch( $pattern, $name ) ) return $name;
+		}
+		return '';
+	}
+
+	public function headerSkip(array $headers = null){
+		//why the response is not one file for everybody, judged by the headers PHP is about
+		//to send, or ''. A cookie set for this visitor means output made for this visitor;
+		//ProcessWire's own session cookies are set on a first visit and say nothing about the
+		//markup. A Vary on anything but Accept-Encoding says the answer depends on a request
+		//header (Accept-Language, Cookie), which one static file can not. headers_list() is
+		//always empty under CLI
+		if( $headers === null ) $headers = headers_list();
+		if( !count($headers) ) return '';
+
+		$config = $this->wire()->config;
+		$sessionName = (string) $config->sessionName;
+		$sessionNameSecure = (string) $config->sessionNameSecure;
+		if( $sessionNameSecure === '' ) $sessionNameSecure = $sessionName . 's';
+		$own = array();
+		foreach( array($sessionName, $sessionNameSecure) as $name ){
+			if( $name === '' || $name === 's' ) continue;
+			$own[$name] = true;
+			$own[$name . Session::challengeSuffix] = true;
+		}
+
+		foreach( $headers as $header ){
+			$pos = strpos( (string) $header, ':' );
+			if( $pos === false ) continue;
+			$name = strtolower( trim( substr($header, 0, $pos) ) );
+			$value = trim( substr($header, $pos + 1) );
+
+			if( $name === 'set-cookie' ){
+				$cookie = trim( strpos($value, '=') !== false ? substr( $value, 0, strpos($value, '=') ) : $value );
+				if( isset($own[$cookie]) ) continue;
+				return "the response sets the cookie $cookie";
+			}
+
+			if( $name === 'vary' ){
+				foreach( explode(',', $value) as $vary ){
+					$vary = strtolower( trim($vary) );
+					if( $vary === '' || $vary === 'accept-encoding' ) continue;
+					return "the response varies by $vary";
+				}
+			}
+		}
+
+		return '';
+	}
+
 	public function logStaticFile($path){
 		//root-relative path, one entry per line
 		$relative = substr( $path, strlen($this->sp->rootPath()) );

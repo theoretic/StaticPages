@@ -344,6 +344,19 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			return;
 		}
 
+		//guest output may still be made for this one guest: a cookie the operator listed, a
+		//cookie the response sets, a Vary on a request header
+		$cookie = $this->publisher()->cookieSkip();
+		if( $cookie !== '' ){
+			$this->logSkip( $page, "the request carries the cookie $cookie, listed in Never cache with these cookies" );
+			return;
+		}
+		$reason = $this->publisher()->headerSkip();
+		if( $reason !== '' ){
+			$this->logSkip( $page, $reason );
+			return;
+		}
+
 		$html = $event->return;
 		if( !strlen( (string) $html ) ) return;
 
@@ -553,6 +566,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( $this->wire()->config->ajax ) return false;
 		$input = $this->wire()->input;
 		if( count($input->get) > 0 || count($input->post) > 0 ) return false;
+		if( $this->publisher()->cookieSkip() !== '' ) return false;
 		return true;
 	}
 

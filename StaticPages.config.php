@@ -168,6 +168,16 @@ $config = array(
 			),
 
 			array(
+				'name'					=> 'noCacheCookies',
+				'type'					=> 'textarea',
+				'label'					=> $this->_('Never cache with these cookies'),
+				'description'			=> $this->_('one cookie name per line, "*" and "?" as wildcards'),
+				'notes'					=> $this->_('A guest request carrying one of these cookies is rendered but not cached: output that depends on a cookie (a currency, a region, a consent banner) would be frozen into the file everybody gets. Responses that set a cookie (ProcessWire\'s own session cookie aside) or send a Vary header on anything but Accept-Encoding are never cached either. Output that depends on Accept-Language without saying so can not be told apart: exclude its template.'),
+				'columnWidth'			=> 33,
+				'value'					=> '',
+			),
+
+			array(
 				'name'					=> 'logSkips',
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Log skipped pages'),
