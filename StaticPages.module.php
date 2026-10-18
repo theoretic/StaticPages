@@ -150,7 +150,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	public function ___install() {
 		//an upgrade has no install step, ensureTables() creates them when first needed as well
-		$this->index()->ensureTables();
+		$this->index()->ensureTables(true);
 	}
 
 	public function ___uninstall() {

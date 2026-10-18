@@ -295,16 +295,27 @@ class StaticPagesIndex extends Wire {
 
 ////  the index
 
-	public function ensureTables(){
+	public function ensureTables($verify = false){
 		//created when first needed: an install upgraded from the manifest has no install step to
 		//create them in, and neither has a site sharing this module dir through a link. Brought
 		//up to schemaVersion when older, see upgradeSchema(). InnoDB whatever $config->dbEngine
 		//says, a record is a transaction.
 		//False when they can not be created or migrated (no CREATE or ALTER privilege), or when a
 		//newer module version left them in a layout this one does not know: the module falls
-		//back to the manifest and to wiping everything on every save
+		//back to the manifest and to wiping everything on every save.
+		//The check (three CREATE TABLE IF NOT EXISTS and an information_schema query) runs once:
+		//its outcome is kept in the module config as indexSchema, and every later request takes
+		//that for granted without a query. Install and upgrade check again ($verify), and so
+		//does the request after a query found a table missing, see tablesFailed(). The layout
+		//version itself stays in the table comments, see readSchemaVersion()
 
-		if( $this->tablesReady !== null ) return $this->tablesReady;
+		if( $this->tablesReady !== null && !$verify ) return $this->tablesReady;
+
+		if( !$verify && (int) $this->sp->get('indexSchema') === StaticPages::schemaVersion ){
+			$this->tablesReady = true;
+			return true;
+		}
+
 		$this->tablesReady = false;
 
 		//a failure is tried again an hour later, not on every render in between, each of them
@@ -338,8 +349,29 @@ class StaticPagesIndex extends Wire {
 		if( is_file($failed) ) @unlink($failed);
 		$this->tablesReady = true;
 		$this->importManifest();
+		$this->rememberSchema( StaticPages::schemaVersion );
 
 		return true;
+	}
+
+	public function rememberSchema($version){
+		//indexSchema in the module config, see ensureTables(). Stored past Modules::saveConfig
+		//hooks: a bookkeeping key of this module is no config save anybody has to react to, and
+		//it may be written from a front end request. null removes it
+		try {
+			$this->wire()->modules->configs->saveConfig( $this->sp, 'indexSchema', $version );
+			if( $version === null ) $this->sp->remove('indexSchema');
+			else $this->sp->set('indexSchema', (int) $version);
+		}
+		catch( \Throwable $e ){
+			$this->sp->logDrain( 'could not store indexSchema: ' . $e->getMessage() );
+		}
+	}
+
+	public function isMissingTable(\Throwable $e){
+		//SQLSTATE 42S02, base table or view not found: a table dropped or a dump restored
+		//without it, while indexSchema still says the tables are there
+		return $e instanceof \PDOException && (string) $e->getCode() === '42S02';
 	}
 
 	public function createTables(){
@@ -509,6 +541,7 @@ class StaticPagesIndex extends Wire {
 		catch( \Throwable $e ){
 			if( $database->inTransaction() ) $database->rollBack();
 			$this->sp->logDrain( "could not record $relative: " . $e->getMessage() );
+			if( $this->isMissingTable($e) ) $this->tablesFailed($e);
 			return false;
 		}
 	}
@@ -587,9 +620,11 @@ class StaticPagesIndex extends Wire {
 		$query->closeCursor();
 	}
 
-	public function tablesFailed(){
-		//a query on the tables failed after all: the rest of the request makes do without them
+	public function tablesFailed(\Throwable $e = null){
+		//a query on the tables failed after all: the rest of the request makes do without them.
+		//A missing table also drops indexSchema, so the next request checks and creates again
 		$this->tablesReady = false;
+		if( $e && $this->isMissingTable($e) && $this->sp->get('indexSchema') !== null ) $this->rememberSchema(null);
 	}
 
 	public function clearRows(){

@@ -125,6 +125,7 @@ class StaticPagesQueue extends Wire {
 		}
 		catch( \Throwable $e ){
 			$this->sp->logDrain( 'failed: ' . $e->getMessage() );
+			if( $this->sp->index()->isMissingTable($e) ) $this->sp->index()->tablesFailed($e);
 		}
 	}
 
@@ -180,7 +181,7 @@ class StaticPagesQueue extends Wire {
 		}
 		catch( \Throwable $e ){
 			$this->sp->logDrain( 'could not queue, wiping everything now: ' . $e->getMessage() );
-			$this->sp->index()->tablesFailed();
+			$this->sp->index()->tablesFailed($e);
 			return $this->wipeLegacy();
 		}
 
