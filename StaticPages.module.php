@@ -80,6 +80,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	//Page::render hook priority when none is stored: after the output transformers
 	const priorityDefault = 1000;
 
+	//the tags holding a CSRF token in the @atispro/core markup, one regex per line: the
+	//<meta name=csrf-token> pair and <input rel=csrf>. See StaticPagesPublisher::stripCsrf()
+	const csrfPatternsDefault = '/<meta\b[^>]*\bname=([\x22\x27]?)csrf-token(?:-name)?\1(?=[\s\/>])[^>]*>/i' . "\n" . '/<input\b[^>]*\brel=([\x22\x27]?)csrf\1(?=[\s\/>])[^>]*>/i';
+
 	public function init() {
 		$this->addHookBefore('Modules::saveConfig', $this, 'hookBeforeSaveConfig');
 		$this->addHookAfter('Modules::saveConfig', $this, 'hookAfterSaveConfig');
@@ -300,6 +304,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( $class === $this->className() ){
 			if( !is_array( $event->arguments(1) ) ) return;
 			$this->wiper()->warnPageDirsProtected( $event->arguments(1) );
+			$this->publisher()->warnInvalidCsrfPatterns( $event->arguments(1) );
 			if( !$this->wire()->input->post('forceWipeOnModuleSave') ) return;
 			//full disk scan: also catches files the manifest does not know about. With Dry run
 			//checked it only lists them

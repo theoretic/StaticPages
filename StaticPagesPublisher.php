@@ -46,33 +46,79 @@ class StaticPagesPublisher extends Wire {
 		Attribute quoting is not guaranteed -- the markup passes through a minifier
 		that drops quotes around simple values -- so both forms are matched. Quote
 		characters are spelled \x22 and \x27 to keep them out of the PHP string.
+
+		Which tags hold a token is the CSRF token tags setting, one regex per line matching
+		one whole tag; the default is the @atispro/core markup above. In every tag matched,
+		the content and value attributes are emptied, and the name attribute of an input
+		(the token name). Answers null when a pattern is no valid regex or PCRE gives up:
+		the caller caches nothing rather than a live token.
 		*/
 
-		//<meta name=csrf-token content=...> and its -name twin
-		$html = preg_replace(
-			'/(<meta\s+name=([\x22\x27]?)csrf-token(?:-name)?\2\s+content=)(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^\s>]*)/i',
-			'$1""',
-			$html
-			);
-		//preg_replace answers null on a PCRE failure, and the caller must not take that
-		//for markup: writing null produces an empty file rather than a failed write
-		if( $html === null ) return null;
+		$patterns = $this->csrfPatterns();
+		if( $patterns === null ) return null;
 
-		//<input type=hidden rel=csrf name=... value=...>
-		$html = preg_replace_callback(
-			'/<input\b[^>]*\brel=([\x22\x27]?)csrf\1[^>]*>/i',
-			function($tag){
-				return preg_replace(
-					'/\b(value|name)=(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^\s>\/]*)/i',
-					'$1=""',
-					$tag[0]
-					);
-				},
-			$html
-			);
-		if( $html === null ) return null;
+		$html = (string) $html;
+		$failed = false;
+
+		foreach( $patterns as $pattern ){
+			$html = preg_replace_callback(
+				$pattern,
+				function($tag) use (&$failed){
+					$out = $this->blankTokenAttributes($tag[0]);
+					if( $out === null ){
+						$failed = true;
+						return $tag[0];
+					}
+					return $out;
+					},
+				$html
+				);
+			//preg_replace answers null on a PCRE failure, and the caller must not take that
+			//for markup: writing null produces an empty file rather than a failed write
+			if( $html === null || $failed ) return null;
+		}
 
 		return $html;
+	}
+
+	public function csrfPatterns(){
+		//the CSRF token tags lines, or null when one of them is no valid regex
+		$lines = $this->sp->linesToArray( $this->sp->configValue('csrfPatterns', StaticPages::csrfPatternsDefault) );
+		foreach( $lines as $line )
+			if( @preg_match( $line, '' ) === false ) return null;
+		return $lines;
+	}
+
+	public function warnInvalidCsrfPatterns($data){
+		//a broken line stops all caching, the operator learns it on the save
+		if( !is_array($data) || !isset($data['csrfPatterns']) ) return;
+		$bad = array();
+		foreach( $this->sp->linesToArray( $data['csrfPatterns'] ) as $line )
+			if( @preg_match( $line, '' ) === false ) $bad[] = $line;
+		if( !count($bad) ) return;
+		$this->sp->warning( sprintf(
+			$this->_('CSRF token tags holds lines that are no valid regex, nothing is cached until they are fixed: %s'),
+			implode('  ', $bad)
+			) );
+	}
+
+	public function blankTokenAttributes($tag){
+		//<meta ... content=X> keeps its name, the marker 00-csrf.js looks for. An input's name
+		//is the token name, which changes with the session like the value. An unquoted value
+		//ends at a blank or '>', and for value and name at '/' too, as before
+		$tag = preg_replace(
+			'/(?<![\w-])(content)=(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^\s>]*)/i',
+			'$1=""',
+			$tag
+			);
+		if( $tag === null ) return null;
+
+		$attributes = stripos( ltrim($tag), '<input' ) === 0 ? 'value|name' : 'value';
+		return preg_replace(
+			'/(?<![\w-])(' . $attributes . ')=(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^\s>\/]*)/i',
+			'$1=""',
+			$tag
+			);
 	}
 
 	public function publish($path, $content){

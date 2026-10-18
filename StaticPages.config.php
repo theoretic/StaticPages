@@ -178,6 +178,16 @@ $config = array(
 			),
 
 			array(
+				'name'					=> 'csrfPatterns',
+				'type'					=> 'textarea',
+				'label'					=> $this->_('CSRF token tags'),
+				'description'			=> $this->_('one regex per line, delimiters included, each matching one whole tag'),
+				'notes'					=> $this->_('A CSRF token belongs to one session, and a static file is served to everybody. In every tag a line matches, the content and value attributes are emptied before the file is written, and the name attribute of an input. The default matches <meta name=csrf-token> with its -name twin and <input rel=csrf>, the markup @atispro/core 00-csrf.js fills in again. A line that is no valid regex stops all caching. Empty: nothing is stripped.'),
+				'columnWidth'			=> 33,
+				'value'					=> StaticPages::csrfPatternsDefault,
+			),
+
+			array(
 				'name'					=> 'logSkips',
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Log skipped pages'),
