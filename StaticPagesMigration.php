@@ -117,7 +117,7 @@ class StaticPagesMigration extends Wire {
 
 		if( !isset($data['priority']) || trim( (string) $data['priority'] ) === '' ){
 			$data['priority'] = (string) StaticPages::priorityDefault;
-			$notes[] = 'stored priority ' . StaticPages::priorityDefault . ', none was set and the cache hooked at 0';
+			$notes[] = 'stored priority ' . StaticPages::priorityDefault . ', none was stored (012 and 020 hooked at the default 100, 0.7 at 0)';
 		}
 
 		if( isset($data['nonStaticDirs']) && is_string($data['nonStaticDirs']) ){

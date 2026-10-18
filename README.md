@@ -24,7 +24,9 @@ by a killed process is finished by the next admin request. Each drain writes one
 
 While the front end renders a page, the module records what the render depended on: every page
 it loaded, and every `find()` it ran, by the template, parent or ancestor that find was limited
-to. The record lives in three database tables next to the static file.
+to. The record lives in three database tables next to the static file. The finds are turned
+into that record only when the file is written, so requests that end up not cached pay
+nothing for them.
 
 A save of a page then deletes:
 
@@ -63,20 +65,38 @@ Where the tables can not be created (no CREATE privilege) the module says so in 
 save deleting every static file, synchronously.
 
 The tables are named `static_pages_files`, `static_pages_tags` and `static_pages_queue`. Their
-layout version is kept in their table comments (`StaticPages schema 1`), not in the module
-config, so it always matches the tables actually there. Before its first write in a request
-the module creates missing tables and migrates older ones, one request at a time, and logs the
-migration. Tables left by a newer module version are not written to: after a downgrade the
-module falls back as above until it is upgraded again. Uninstalling the module drops them.
+layout version is kept in their table comments (`StaticPages schema 1`), so it always matches
+the tables actually there; tables left by a newer module version are not written to, and the
+module falls back as above until it is upgraded again. The first request that needs the tables
+after an install or an upgrade creates missing ones, migrates older ones (one request at a time)
+and stores the outcome in the module config as `indexSchema`: every later request trusts it
+and runs no `CREATE TABLE` and no `information_schema` query. A query that finds a table missing
+(dropped, or a dump restored without it) clears `indexSchema`, and the next request checks and
+creates again. Uninstalling the module drops the tables.
 
-## Upgrading from 0.6
+## Upgrading
 
-Nothing to do, on every site sharing the module dir as well. The tables are created on the
-first render or save after the upgrade, and tables from 0.7.0 get their version stamped. Files
-listed in the old manifest are imported with unknown dependencies and deleted by the first save
-of any page. A static file the manifest did not know about either is only found by a full disk
-scan: save the module settings once with *Force static pages deletion on module save* checked.
-The *Dir removal passes* setting is gone, every scan now takes one pass.
+Nothing to do, on every site sharing the module dir as well, from any earlier version: 0.3.1
+to 0.7.1, and the older 012 and 020 copies. Replace the module dir; a modules refresh is not
+needed (core skips `___upgrade()` when the module file changes from `StaticPages.module` to
+`StaticPages.module.php`, so nothing depends on it).
+
+After the response of the first admin request, CLI script or request that queued a save, the
+module brings the install up to date once, and logs each step to `static-pages`:
+
+- the stored config loses `rmDirPasses` (every scan takes one pass since 0.7.0), the force wipe
+  boxes are cleared, and a priority of 1000 is stored where none was (012 and 020 never stored
+  one; 0.7 read that as 0 and cached ahead of every output transformer);
+- *Non-static directories* loses the entries that name a first level page dir holding nothing
+  but static copies, or a page dir that is not there at all. Every version before 0.6.3 saved a
+  snapshot of the site root that took them in, and their copies were never wiped;
+- static files on disk that nothing recorded (012 and 020 kept no manifest; files cached before
+  a manifest version was installed were never listed) are found the way a full scan finds them
+  and recorded with unknown dependencies. Nothing is deleted then: the next save removes them.
+  Files listed in an old manifest are imported the same way.
+
+Keys the module does not know (`-dups`, `nonStaticLanguages` from older lineages) are left in
+place. The tables are created on the first render or save.
 
 A file is written to a temporary name in its own directory and moved into place with
 `rename()`, which is atomic within a filesystem. A request arriving while another one is
@@ -99,7 +119,35 @@ module looks like it is doing nothing, and off again afterwards on a busy front 
   one would be handed out as if it were the real thing.
 - The template answers a content type other than html, or the request is an ajax request.
 - The request carries GET or POST variables, or it is a paginated page beyond the first.
+- The request carries a cookie listed in *Never cache with these cookies* (one name per line,
+  `*` and `?` as wildcards): output depending on a currency, region or consent cookie would be
+  frozen for everybody.
+- The response sets a cookie other than ProcessWire's own session cookies, or sends a `Vary`
+  header on anything but `Accept-Encoding` (`Vary: Accept-Language`, `Vary: Cookie`): one file
+  can not answer for every value of that header. Output that depends on `Accept-Language`
+  without saying so can not be told apart; exclude its template.
 - The template is listed in *Non-static page templates*.
+- The page's dir is listed in *Non-static directories*: no wipe would ever delete the file.
+- *Static file name* is not a plain file name (letters, digits, `.`, `_`, `-`, no leading dot).
+- A line of *CSRF token tags* is no valid regex.
+
+## CSRF tokens
+
+A CSRF token belongs to one session, and a static file is served to everybody. Before a file is
+written, the tags matched by the *CSRF token tags* setting have their `content` and `value`
+attributes emptied, and an input's `name` too. One regex per line, delimiters included, each
+matching one whole tag. The default matches the `@atispro/core` markup, which `00-csrf.js`
+fills in again from `GET /api/data`:
+
+```
+/<meta\b[^>]*\bname=([\x22\x27]?)csrf-token(?:-name)?\1(?=[\s\/>])[^>]*>/i
+/<input\b[^>]*\brel=([\x22\x27]?)csrf\1(?=[\s\/>])[^>]*>/i
+```
+
+A site with other markup lists its own tags there. An empty setting strips nothing. A line that
+is no valid regex stops caching altogether, rather than freezing a live token, and the config
+save names it. Site code writing its own static files calls `$modules->get('StaticPages')->stripCsrf($html)`,
+which answers `null` when the markup could not be prepared.
 
 ## Installation
 
@@ -160,6 +208,29 @@ RewriteCond %{REQUEST_URI} ^/?$
 RewriteRule ^$ /index.php [L,QSA]
 ```
 
+## Response headers
+
+A cached page is served by the web server alone: no PHP runs, so nothing a template or a hook
+sends with `header()` reaches the visitor, neither `Content-Security-Policy` nor
+`X-Content-Type-Options: nosniff` nor `Referrer-Policy`. The first visitor gets them from PHP,
+everybody after gets what the web server adds. Headers that must be on every page belong in
+the web server configuration, where they cover static files and PHP responses alike. This is
+why the archived `Headers` module never worked together with caching.
+
+```apache
+<IfModule mod_headers.c>
+	Header always set X-Content-Type-Options "nosniff"
+	Header always set Referrer-Policy "strict-origin-when-cross-origin"
+	Header always set Content-Security-Policy "default-src 'self'"
+</IfModule>
+```
+
+```nginx
+add_header X-Content-Type-Options "nosniff" always;
+add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+add_header Content-Security-Policy "default-src 'self'" always;
+```
+
 ## Multilingual sites
 
 The static file is keyed by `$page->path`, which carries the language segment. That is
@@ -188,19 +259,50 @@ RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]
 ## Non-static directories
 
 Wipes never touch the site root dirs listed in *Non-static directories* (root dirs only: a page dir
-of the same name further down, such as `/parachutes/site/`, is wiped as usual). Until the setting is saved,
-the list defaults to every root dir except those that only hold static copies of first level pages
-(in every language, `/en/` included); a page dir that also holds other files (an `/api/` page next to
-`api/` endpoints) stays protected. Saving the setting stores the list as shown, and the save warns
-when it names a dir that only holds static copies: those copies would never be wiped.
+of the same name further down, such as `/parachutes/site/`, is wiped as usual; an entry like
+`about/keep` protects that dir below the root). Names are matched case-insensitively on Windows,
+slashes around a name are ignored, and a line holding blanks protects each word as well. Until the
+setting is saved, the list defaults to every root dir except those that only hold static copies of
+first level pages (in every language, `/en/` included); a page dir that also holds other files (an
+`/api/` page next to `api/` endpoints) stays protected. Saving the setting stores the list as shown,
+and the save warns when it names a dir that only holds static copies: those copies would never be
+wiped. Nothing is cached below a listed dir.
 
-Before 0.6.3 the default listed every root dir, so on a site that already had static copies it took
-in their page dirs too. If an older install saved such a list, remove the page dirs from it.
+The list is not what keeps a full disk scan out of a dir, see below.
+
+## Full disk scans
+
+A scan only runs when asked for (*Force static pages deletion on module save*, `wipeCaches(true)`)
+or when there is neither index nor manifest. It deletes the home page's copy at the root and walks
+only root dirs that are static copies of pages: named like a first level page in any language, and
+holding nothing but static files (and the temporary files a killed write left). Everything else is
+left alone, listed or not, and the scan logs the unlisted dirs it left alone. Before 0.8.0 it
+walked every root dir the list did not name, and the list is a snapshot from the last config save:
+a dir added since (`vendor/`, a hand made landing page) lost every `index.html` and every empty dir
+in it. A static copy below a dir that is not a page copy (url segments of the home page, say) is
+only removed through the index.
+
+Nothing is ever deleted that `realpath()` does not put below the site root, or that is not named
+like the static file. With *Use shell commands* the scan is one `find` on Linux, macOS and BSD, or
+one PowerShell process on Windows, handed only those dirs; every argument goes through
+`escapeshellarg()`, and the PHP walk takes over when no shell runs (`shell_exec` disabled, say).
+On Windows the PHP walk is the faster of the two, PowerShell takes a few tenths of a second to
+start. *Force static pages deletion on module save* is a one shot action: the box is never stored
+checked.
+
+### Dry run
+
+Check *Dry run* together with the force box, or call `wipeCaches(true, true)`: the same paths and
+the same checks as the real scan (always the PHP walk), nothing deleted, no row dropped, and every
+file and dir it would delete written to the `static-pages` log, with the root dirs it leaves alone.
+`wipeCaches(false, true)` does the same for a wipe by the index or the manifest. The call returns
+the list under `paths` and `leftAlone`. Run one on a copy of a site before trusting a forced wipe
+there: it should list page `index.html` files and their dirs, nothing else.
 
 ## Limits of path tracking
 
 - The check runs on admin requests only. A fully cached URL never reaches PHP, so there is no front end request left to hang it on. A developer who edits files and never opens the admin will not see the cache wiped.
-- Checks are throttled to once every 10 seconds so that admin ajax does not walk the tracked directories on every keystroke.
+- Checks are throttled to once every 10 seconds so that admin ajax does not walk the tracked directories on every keystroke. Between two checks an admin request costs one `stat()` of a stamp file; a check stats every tracked file, keep the patterns narrow.
 - Only the modification time and the size are compared. An edit changing neither goes unnoticed.
 - Symlinked directories inside a tracked path are not descended into. A symlinked base directory is fine.
 - A hash file that is missing or unreadable is treated as a first run: it is seeded, nothing is wiped. So a deploy that clears `site/assets/cache/` and changes templates in the same step will not wipe. Deploy scripts should ask for it directly:
@@ -209,16 +311,9 @@ in their page dirs too. If an older install saved such a list, remove the page d
 $modules->get('StaticPages')->checkTrackedPaths(true);  //check now, ignoring the throttle; deletes at script end
 $modules->get('StaticPages')->wipeCaches();             //or just wipe every indexed file, right now
 $modules->get('StaticPages')->wipeCaches(true);         //the same with a full disk scan
+$modules->get('StaticPages')->wipeCaches(true, true);   //list what the scan would delete, delete nothing
 $modules->get('StaticPages')->drain();                  //process the queue right now
 ```
-
-## Full disk scans
-
-A scan only runs when asked for (*Force static pages deletion on module save*, `wipeCaches(true)`)
-or when there is neither index nor manifest. It walks the site root dirs not listed in
-*Non-static directories*, and never enters the listed ones. With *Use shell commands* it is one
-`find` on Linux, macOS and BSD, or one PowerShell process on Windows; otherwise a PHP walk. On
-Windows the PHP walk is the faster of the two, PowerShell takes a few tenths of a second to start.
 
 ## Warning
 
