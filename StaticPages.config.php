@@ -36,7 +36,7 @@ $config = array(
 				'notes'					=> $this->_('Should be higher than other modules have to transform their output.'),
 				'required'				=> true,
 				'columnWidth'			=> 33,
-				'value'					=> 1000,
+				'value'					=> StaticPages::priorityDefault,
 			),
 
 			array(

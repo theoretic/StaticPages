@@ -77,8 +77,17 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	//FOLLOW_SYMLINKS is passed, this cap catches what a platform fails to report as a link
 	const trackingMaxDepth = 20;
 
+	//Page::render hook priority when none is stored: after the output transformers
+	const priorityDefault = 1000;
+
 	public function init() {
+		$this->addHookBefore('Modules::saveConfig', $this, 'hookBeforeSaveConfig');
 		$this->addHookAfter('Modules::saveConfig', $this, 'hookAfterSaveConfig');
+
+		//012 and 020 installs never stored a priority, and (int) null hooked the cache at 0,
+		//ahead of every output transformer. The default the config screen offers, also for
+		//site code reading $modules->get('StaticPages')->priority
+		if( $this->get('priority') === null ) $this->set('priority', self::priorityDefault);
 
 		if( !$this->isEnabled ) return;
 
@@ -268,13 +277,28 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( (int) $event->arguments(0)->numChildren > 0 ) return $this->queue()->enqueue(self::modeAll);
 	}
 
+	public function hookBeforeSaveConfig($event) {
+		//the force wipe and its dry run are one shot actions: stored checked, the boxes came
+		//back checked on the next visit and any later save of the form scanned the disk again
+		if( $this->configSaveClassName( $event->arguments(0) ) !== $this->className() ) return;
+		$data = $event->arguments(1);
+		if( !is_array($data) ) return;
+		if( empty($data['forceWipeOnModuleSave']) && empty($data['wipeDryRun']) ) return;
+		$data['forceWipeOnModuleSave'] = 0;
+		$data['wipeDryRun'] = 0;
+		$event->arguments(1, $data);
+	}
+
 	public function hookAfterSaveConfig($event) {
 		//should run in backend only!
 		$class = $this->configSaveClassName( $event->arguments(0) );
 
 		//settings of this module are being saved: an explicit, one shot operator action,
-		//deliberately not gated on isEnabled so a disabled module can still be told to clean up
+		//deliberately not gated on isEnabled so a disabled module can still be told to clean up.
+		//Only a save of the whole config is one: this module stores single keys of its own
+		//(saveConfig with a key and a value) from any request, a front end POST among them
 		if( $class === $this->className() ){
+			if( !is_array( $event->arguments(1) ) ) return;
 			$this->wiper()->warnPageDirsProtected( $event->arguments(1) );
 			if( !$this->wire()->input->post('forceWipeOnModuleSave') ) return;
 			//full disk scan: also catches files the manifest does not know about. With Dry run
