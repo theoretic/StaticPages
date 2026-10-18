@@ -277,8 +277,9 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( $class === $this->className() ){
 			$this->wiper()->warnPageDirsProtected( $event->arguments(1) );
 			if( !$this->wire()->input->post('forceWipeOnModuleSave') ) return;
-			//full disk scan: also catches files the manifest does not know about
-			return $this->wipeCaches(true);
+			//full disk scan: also catches files the manifest does not know about. With Dry run
+			//checked it only lists them
+			return $this->wipeCaches( true, (bool) $this->wire()->input->post('wipeDryRun') );
 		}
 
 		//settings of another module are being saved: modules keeping site wide settings in
@@ -439,37 +440,57 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		return $this->publisher()->stripCsrf($html);
 	}
 
-	public function wipeCaches( $forceScan = false ){
+	public function wipeCaches( $forceScan = false, $dryRun = false ){
 		//removes every static file, right now, in this request: the operator's and the deploy
 		//script's tool. Saves go through the queue instead, see enqueue().
 		//$forceScan walks the site root and also finds files nothing recorded.
 		//Without it the index is used, or the manifest where there are no index tables, or the
-		//scan after all where neither exists
+		//scan after all where neither exists.
+		//$dryRun deletes nothing and writes what the same call would delete to the static-pages
+		//log, one line per file and dir; the scan always takes the php walk then.
+		//Returns the counts (null after a shell scan), with 'paths' and 'leftAlone' on a dry run
 
 		$start = microtime(true);
 
-		$this->queue()->bumpGen();
+		if( !$dryRun ) $this->queue()->bumpGen();
 
 		if( $forceScan )
-			$result = $this->wiper()->wipeScan();
+			$result = $this->wiper()->wipeScan($dryRun);
 
 		else if( $this->index()->ensureTables() )
-			$result = $this->wiper()->wipeIndexed(null);
+			$result = $this->wiper()->wipeIndexed(null, $dryRun);
 
 		else if( is_file( $this->manifestPath() ) )
-			$result = $this->wiper()->wipeCachesManifest();
+			$result = $this->wiper()->wipeCachesManifest($dryRun);
 
 		else
-			$result = $this->wiper()->wipeScan();
+			$result = $this->wiper()->wipeScan($dryRun);
 
 		//a render that read the database before the wipe and records after it
-		$this->queue()->bumpGen();
+		if( !$dryRun ) $this->queue()->bumpGen();
 
 		$duration = round( microtime(true)-$start, 2 );
+
+		if( $dryRun ){
+			$this->logDryRun($result);
+			$this->message( $this->wiper()->describeWipe($result) . " The list is in the static-pages log. $duration s." );
+			return $result;
+		}
 
 		//the notice is built directly: an output buffer around the wipe took in whatever else
 		//was echoed meanwhile and handed it out as part of the notice
 		$this->message( $this->wiper()->describeWipe($result) . " Static cache cleaned in $duration s." );
+
+		return $result;
+	}
+
+	private function logDryRun(array $result){
+		$paths = isset($result['paths']) ? $result['paths'] : array();
+		$this->logDrain( 'dry run: ' . $this->wiper()->describeWipe($result) );
+		foreach( array_slice($paths, 0, 10000) as $path ) $this->logDrain( "dry run: would delete $path" );
+		if( count($paths) > 10000 ) $this->logDrain( 'dry run: and ' . ( count($paths) - 10000 ) . ' more' );
+		if( !empty($result['leftAlone']) )
+			$this->logDrain( 'dry run: root dirs left alone, no list names them and they are no static copies of pages: ' . implode(', ', $result['leftAlone']) );
 	}
 
 	public function drain(){

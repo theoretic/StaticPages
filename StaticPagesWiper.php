@@ -31,11 +31,13 @@ class StaticPagesWiper extends Wire {
 		$this->sp = $sp;
 	}
 
-	public function wipeIndexed($tags){
-		//$tags null: every indexed file
+	public function wipeIndexed($tags, $dryRun = false){
+		//$tags null: every indexed file. $dryRun: rows and files stay, the result lists them
 
 		$files = $this->sp->index()->indexedFiles($tags);
-		if( !count($files) ) return array('files' => 0, 'bytes' => 0, 'dirs' => 0);
+		if( !count($files) ) return $this->emptyResult($dryRun);
+
+		if( $dryRun ) return $this->deleteStaticFiles($files, true);
 
 		//rows first, files second: a render recording the same path meanwhile leaves a row for a
 		//file that is gone, which is harmless, and never a file that nothing knows about
@@ -45,9 +47,17 @@ class StaticPagesWiper extends Wire {
 		return $this->deleteStaticFiles($files);
 	}
 
-	public function deleteStaticFiles(array $files){
-
+	public function emptyResult($dryRun = false){
 		$result = array('files' => 0, 'bytes' => 0, 'dirs' => 0);
+		if( $dryRun ) $result += array('dryRun' => true, 'paths' => array(), 'leftAlone' => array());
+		return $result;
+	}
+
+	public function deleteStaticFiles(array $files, $dryRun = false){
+		//$dryRun: nothing is deleted, the result lists what would go under 'paths', root
+		//relative, dirs with a trailing slash
+
+		$result = $this->emptyResult($dryRun);
 
 		$staticFile = $this->sp->staticFileName();
 		if( $staticFile === '' ) return $result;
@@ -56,6 +66,7 @@ class StaticPagesWiper extends Wire {
 		$nonStaticDirs = $this->sp->nonStaticDirsArray();
 		$dirs = array();
 		$failed = array();
+		$deleted = array();
 
 		foreach( $files as $relative ){
 
@@ -72,7 +83,12 @@ class StaticPagesWiper extends Wire {
 			if( !$this->insideRoot($path) ) continue;
 
 			$size = (int) @filesize($path);
-			if( !@unlink($path) ){
+
+			if( $dryRun ){
+				$result['paths'][] = $this->relativePath($path);
+				$deleted[ $this->sp->normalizePath($path) ] = true;
+			}
+			else if( !@unlink($path) ){
 				$failed[] = $relative;
 				continue;
 			}
@@ -80,6 +96,13 @@ class StaticPagesWiper extends Wire {
 			$result['files']++;
 			$result['bytes'] += $size;
 			$dirs[$dirPath] = true;
+		}
+
+		if( $dryRun ){
+			$gone = $this->simulatePrune( array_keys($dirs), $this->sp->normalizePath($root), $deleted );
+			foreach( $gone as $dir ) $result['paths'][] = $this->relativePath($dir) . '/';
+			$result['dirs'] = count($gone);
+			return $result;
 		}
 
 		//a file a reader holds open on Windows: the next drain of any kind tries again
@@ -94,16 +117,69 @@ class StaticPagesWiper extends Wire {
 		//a shell scan counts nothing
 		if( !is_array($result) ) return 'Full disk scan done.';
 		$bytes = $this->readableFilesize( $result['bytes'] );
+		if( !empty($result['dryRun']) )
+			return "Dry run: {$result['files']} static file(s) ($bytes) and {$result['dirs']} dir(s) would be deleted, nothing was.";
 		return "{$result['files']} static file(s) ($bytes) and {$result['dirs']} dir(s) deleted.";
 	}
 
-	public function wipeCachesManifest(){
+	public function relativePath($path){
+		//root relative, forward slashes, leading slash: the form the index and the log use
+		$root = rtrim( str_replace( '\\', '/', $this->sp->rootPath() ), '/' );
+		$path = rtrim( str_replace( '\\', '/', $path ), '/' );
+		return strpos($path, $root) === 0 ? substr($path, strlen($root)) : $path;
+	}
+
+	public function simulatePrune(array $dirs, $rootNorm, array $deleted){
+		//the dirs pruneDirs() would remove once the files in $deleted (normalised path => true)
+		//were gone, without touching anything: a dir goes when everything in it goes
+		$rootNorm = rtrim( $rootNorm, DIRECTORY_SEPARATOR );
+		$rootLength = strlen($rootNorm);
+		$set = array();
+		foreach( $dirs as $dir ){
+			$dir = rtrim( $this->sp->normalizePath($dir), DIRECTORY_SEPARATOR );
+			while( strlen($dir) > $rootLength && !isset($set[$dir]) ){
+				$set[$dir] = true;
+				$parent = dirname($dir);
+				if( $parent === $dir ) break;
+				$dir = $parent;
+			}
+		}
+		$list = array_keys($set);
+		usort( $list, fn($a, $b) => strlen($b) - strlen($a) );
+
+		$gone = array();
+		foreach( $list as $dir ){
+			if( !is_dir($dir) || is_link($dir) || !$this->insideRoot($dir) ) continue;
+			$empty = true;
+			try {
+				foreach( new \FilesystemIterator( $dir, \FilesystemIterator::SKIP_DOTS ) as $entry ){
+					$entryPath = $this->sp->normalizePath( $entry->getPathname() );
+					if( isset($deleted[$entryPath]) || isset($gone[$entryPath]) ) continue;
+					$empty = false;
+					break;
+				}
+			}
+			catch( \Throwable $e ){
+				$empty = false;
+			}
+			if( $empty ) $gone[$dir] = true;
+		}
+		return array_keys($gone);
+	}
+
+	public function wipeCachesManifest($dryRun = false){
 		//no index tables only: deletes the files the manifest lists, no site root scanning.
 		//The manifest is moved aside first and an empty one put in its place: renders appending
 		//meanwhile land in the new one instead of being lost, and an empty manifest means
 		//"nothing cached", where a missing one sent the next save into the full disk scan
 
 		$manifest = $this->sp->manifestPath();
+
+		if( $dryRun ){
+			$lines = @file( $manifest, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
+			return $this->deleteStaticFiles( array_unique( $lines === false ? array() : $lines ), true );
+		}
+
 		$taken = $manifest . '.' . getmypid() . '.wipe';
 		if( !@rename($manifest, $taken) ) return array('files' => 0, 'bytes' => 0, 'dirs' => 0);
 		if( !is_file($manifest) ) @touch($manifest);
@@ -299,15 +375,23 @@ class StaticPagesWiper extends Wire {
 
 ////  the full disk scan
 
-	public function wipeScan(){
+	public function wipeScan($dryRun = false){
 		//walks the site root for static files, finding the ones nothing recorded as well: forced
 		//wipes, and installs with neither index nor manifest. Returns the counts, or null from a
-		//shell, which counts nothing
+		//shell, which counts nothing. $dryRun: the php walk lists what would go, nothing is
+		//deleted, no row and no manifest line either
 
 		$staticFile = $this->sp->staticFileName();
 		if( $staticFile === '' ){
 			$this->sp->logDrain( 'full scan refused: Static file name is not a plain file name' );
-			return array('files' => 0, 'bytes' => 0, 'dirs' => 0);
+			return $this->emptyResult($dryRun);
+		}
+
+		if( $dryRun ){
+			$targets = $this->scanTargets();
+			$result = $this->wipeScanPHP($targets, true);
+			$result['leftAlone'] = $this->leftAlone;
+			return $result;
 		}
 
 		//rows first: a render recording while the scan runs keeps a row for a file the scan then
@@ -409,29 +493,33 @@ class StaticPagesWiper extends Wire {
 		return $this->leftAlone;
 	}
 
-	public function wipeScanPHP(array $targets){
-		//one walk per root dir: files on the way down, empty dirs afterwards, deepest first
+	public function wipeScanPHP(array $targets, $dryRun = false){
+		//one walk per root dir: files on the way down, empty dirs afterwards, deepest first.
+		//$dryRun: the same walk and the same checks, the result lists what would go
 
-		$result = array('files' => 0, 'bytes' => 0, 'dirs' => 0);
+		$result = $this->emptyResult($dryRun);
 
 		$root = $this->sp->rootPath();
 		$nonStaticDirs = $this->sp->nonStaticDirsArray();
 		$staticFile = $this->sp->staticFileName();
 		$tmpGlob = $this->sp->publisher()->tmpFileGlob();
 		$dirs = array();
+		$deleted = array();
 
-		$delete = function($path) use (&$result, $tmpGlob, $staticFile){
+		$delete = function($path) use (&$result, &$deleted, $tmpGlob, $staticFile, $dryRun){
 			$name = basename($path);
 			//a temporary file left behind by a killed publish keeps its directory non-empty,
 			//and an orphan directory holding no index.html is the 403
-			if( fnmatch( $tmpGlob, $name ) ){
-				if( $this->insideRoot($path) ) @unlink($path);
-				return;
-			}
-			if( $name !== $staticFile ) return;
+			$tmp = fnmatch( $tmpGlob, $name );
+			if( !$tmp && $name !== $staticFile ) return;
 			if( !$this->insideRoot($path) ) return;
 			$size = (int) @filesize($path);
-			if( !@unlink($path) ) return;
+			if( $dryRun ){
+				$result['paths'][] = $this->relativePath($path);
+				$deleted[ $this->sp->normalizePath($path) ] = true;
+			}
+			else if( !@unlink($path) ) return;
+			if( $tmp ) return;
 			$result['files']++;
 			$result['bytes'] += $size;
 		};
@@ -467,6 +555,13 @@ class StaticPagesWiper extends Wire {
 
 			//the directory handles are closed before any dir goes, Windows refuses an open one
 			$rii = null;
+		}
+
+		if( $dryRun ){
+			$gone = $this->simulatePrune( array_keys($dirs), $this->sp->normalizePath($root), $deleted );
+			foreach( $gone as $dir ) $result['paths'][] = $this->relativePath($dir) . '/';
+			$result['dirs'] = count($gone);
+			return $result;
 		}
 
 		$result['dirs'] = $this->pruneDirs( array_keys($dirs), $this->sp->normalizePath($root) );

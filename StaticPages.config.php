@@ -100,10 +100,18 @@ $config = array(
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Force static pages deletion on module save'),
 				//'description'			=> $this->_('UNIX string like 0755'),
-				'notes'					=> $this->_('Performs a full disk scan, also removing static files the index does not know about.'),
+				'notes'					=> $this->_('Performs a full disk scan, also removing static files the index does not know about. It only walks root dirs that are static copies of pages: named like a first level page and holding nothing but static files.'),
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				//'value'					=> 1,
+			),
+
+			array(
+				'name'					=> 'wipeDryRun',
+				'type'					=> 'checkbox',
+				'label'					=> $this->_('Dry run'),
+				'notes'					=> $this->_('With the box above: deletes nothing, and writes every file and dir the scan would delete to the static-pages log, with the root dirs it leaves alone. The same from code: $modules->get(\'StaticPages\')->wipeCaches(true, true).'),
+				'columnWidth'			=> 33,
 			),
 
 			array(
