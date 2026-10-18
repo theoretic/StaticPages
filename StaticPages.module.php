@@ -17,6 +17,7 @@ parts, each in its own file next to this one and created when first asked for:
   StaticPagesPublisher.php  the atomic write of a static file, the markup preparation
   StaticPagesWiper.php      deleting static files: by the index, by the manifest, by a disk scan
   StaticPagesTracker.php    tracked path changes
+  StaticPagesMigration.php  bringing an older install up to date
 
 Hooks stay registered on this class: site code looks them up by their toObject.
 */
@@ -25,12 +26,13 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	//real properties, not config keys: WireData's magic __get/__set has no business here
 
-	//the parts, see index(), queue(), publisher(), wiper(), tracker()
+	//the parts, see index(), queue(), publisher(), wiper(), tracker(), migration()
 	private $index = null;
 	private $queue = null;
 	private $publisher = null;
 	private $wiper = null;
 	private $tracker = null;
+	private $migration = null;
 
 	private $adminRequest = false;
 
@@ -79,6 +81,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	//Page::render hook priority when none is stored: after the output transformers
 	const priorityDefault = 1000;
+
+	//the layout of the stored module config. Raised with every change older installs have to
+	//be brought through, see StaticPagesMigration
+	const configVersion = 1;
 
 	//the tags holding a CSRF token in the @atispro/core markup, one regex per line: the
 	//<meta name=csrf-token> pair and <input rel=csrf>. See StaticPagesPublisher::stripCsrf()
@@ -155,6 +161,14 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	public function ___uninstall() {
 		$this->index()->dropTables();
+	}
+
+	public function ___upgrade($fromVersion, $toVersion) {
+		//core skips this when the module file was renamed (.module to .module.php, as in 0.8.0)
+		//and without a modules refresh: nothing may depend on it. The same steps run lazily, see
+		//shutdownDrain()
+		$this->index()->ensureTables(true);
+		$this->migration()->run();
 	}
 
 ////  the parts
@@ -237,6 +251,22 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->tracker = $this->wire(new StaticPagesTracker($this));
 		}
 		return $this->tracker;
+	}
+
+	/**
+	 * Bringing an older install up to date
+	 *
+	 * #pw-internal
+	 *
+	 * @return StaticPagesMigration
+	 *
+	 */
+	public function migration() {
+		if( $this->migration === null ){
+			require_once(__DIR__ . '/StaticPagesMigration.php');
+			$this->migration = $this->wire(new StaticPagesMigration($this));
+		}
+		return $this->migration;
 	}
 
 ////  hooks
@@ -537,6 +567,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	public function drain(){
 		//see StaticPagesQueue::drain(). Public API: a deploy script may call it
+		if( $this->migration()->pending() ) $this->migrate();
 		return $this->queue()->drain();
 	}
 
@@ -548,7 +579,22 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	}
 
 	public function shutdownDrain(){
+		//an install switched from an older version is brought up to date after the response of
+		//its first admin request, CLI script, or request that queued a save, before that drain
+		if( $this->migration()->pending() && ( $this->adminRequest || PHP_SAPI === 'cli' || $this->queue()->drainRequested() ) ){
+			$this->queue()->finishResponse();
+			$this->migrate();
+		}
 		return $this->queue()->shutdownDrain($this->adminRequest);
+	}
+
+	private function migrate(){
+		try {
+			$this->migration()->run();
+		}
+		catch( \Throwable $e ){
+			$this->logDrain( 'upgrade failed, tried again on the next admin request: ' . $e->getMessage() );
+		}
 	}
 
 	public function checkTrackedPaths( $force = false ){

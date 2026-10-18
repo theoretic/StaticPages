@@ -39,6 +39,10 @@ class StaticPagesQueue extends Wire {
 		$this->genAtStart = $this->readGen();
 	}
 
+	public function drainRequested(){
+		return $this->drainRequested;
+	}
+
 	public function noteCached(){
 		//no index tables only: something new is on disk again, the next save has to wipe it
 		$this->didWipe = false;
