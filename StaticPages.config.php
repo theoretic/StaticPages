@@ -7,8 +7,8 @@ AT
 
 namespace ProcessWire;
 
-$nonStaticTemplatesOptions = [];
-$nonStaticTemplatesValue = [];
+$nonStaticTemplatesOptions = array();
+$nonStaticTemplatesValue = array();
 
 foreach( wire('templates') as $template ){
 	$nonStaticTemplatesOptions[$template->id] = $template->name;
@@ -20,15 +20,15 @@ foreach( wire('templates') as $template ){
 //A modules refresh includes this file while it rebuilds the module info cache: asking for the
 //module then would start that rebuild again from inside it, endlessly (memory exhausted where
 //the module dir is a junction the module scan does not see). The list only matters on the form
-$nonStaticDirsValue = wire('modules')->refreshing ? [] : wire('modules')->get('StaticPages')->defaultNonStaticDirs();
+$nonStaticDirsValue = wire('modules')->refreshing ? array() : wire('modules')->get('StaticPages')->defaultNonStaticDirs();
 
 $nonStaticDirsValue = implode("\n", $nonStaticDirsValue);
 
 ////
 
-$config = [
+$config = array(
 
-			[
+			array(
 				'name'					=> 'priority',
 				'type'					=> 'text',
 				'label'					=> $this->_('Priority'),
@@ -37,9 +37,9 @@ $config = [
 				'required'				=> true,
 				'columnWidth'			=> 33,
 				'value'					=> 1000,
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'nonStaticDirs',
 				'type'					=> 'textarea',
 				'label'					=> $this->_('Non-static directories'),
@@ -48,9 +48,9 @@ $config = [
 				'required'				=> true,
 				'columnWidth'			=> 33,
 				'value'					=> $nonStaticDirsValue,
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'nonStaticTemplates',
 				'type'					=> 'AsmSelect',
 				'label'					=> $this->_('Non-static page templates'),
@@ -60,9 +60,9 @@ $config = [
 				'columnWidth'			=> 33,
 				'options'				=> $nonStaticTemplatesOptions,
 				'value'					=> $nonStaticTemplatesValue,
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'newDirPermissions',
 				'type'					=> 'text',
 				'label'					=> $this->_('Permissions for every new static dir'),
@@ -71,9 +71,9 @@ $config = [
 				'required'				=> true,
 				'columnWidth'			=> 33,
 				'value'					=> '0755',
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'staticFile',
 				'type'					=> 'text',
 				'label'					=> $this->_('Static file name'),
@@ -82,9 +82,9 @@ $config = [
 				'required'				=> true,
 				'columnWidth'			=> 33,
 				'value'					=> 'index.html',
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'useShell',
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Use shell commands'),
@@ -93,9 +93,9 @@ $config = [
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				//'value'					=> 1,
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'forceWipeOnModuleSave',
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Force static pages deletion on module save'),
@@ -104,9 +104,9 @@ $config = [
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				//'value'					=> 1,
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'wipeOnConfigSaveModules',
 				'type'					=> 'textarea',
 				'label'					=> $this->_('Wipe on config save of these modules'),
@@ -115,9 +115,9 @@ $config = [
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				'value'					=> 'SettingsFactory',
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'wipeOnSaveField',
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Wipe on single field save'),
@@ -125,19 +125,19 @@ $config = [
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				'value'					=> 1,
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'wipeAllTemplates',
 				'type'					=> 'AsmSelect',
 				'label'					=> $this->_('Wipe everything on save of these templates'),
 				'notes'					=> $this->_('A save normally removes only the static files whose render loaded the saved page or ran a find it may enter. List templates whose pages feed markup by a way that record can not see: $pages->findRaw(), a WireCache or MarkupCache fragment, raw SQL. Language pages always wipe everything.'),
 				'columnWidth'			=> 33,
 				'options'				=> $nonStaticTemplatesOptions,
-				'value'					=> [],
-			],
+				'value'					=> array(),
+			),
 
-			[
+			array(
 				'name'					=> 'wipeAllFields',
 				'type'					=> 'textarea',
 				'label'					=> $this->_('Wipe everything on change of these fields'),
@@ -145,9 +145,9 @@ $config = [
 				'notes'					=> $this->_('The same, for a field rather than a template: a change of a listed field on any page removes every static file. Names are case insensitive.'),
 				'columnWidth'			=> 33,
 				'value'					=> '',
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'trackedPaths',
 				'type'					=> 'textarea',
 				'label'					=> $this->_('Track changes in these paths'),
@@ -157,9 +157,9 @@ $config = [
 				'columnWidth'			=> 33,
 				//kept on the module class so the two can not drift apart
 				'value'					=> StaticPages::trackedPathsDefault,
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'logSkips',
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Log skipped pages'),
@@ -167,9 +167,9 @@ $config = [
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				//'value'					=> 1,
-			],
+			),
 
-			[
+			array(
 				'name'					=> 'isEnabled',
 				'type'					=> 'checkbox',
 				'label'					=> $this->_('Enable this module'),
@@ -178,5 +178,5 @@ $config = [
 				//'required'				=> true,
 				'columnWidth'			=> 33,
 				'value'					=> 1,
-			],
-];
+			),
+);

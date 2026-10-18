@@ -8,7 +8,7 @@ AT
 
 namespace ProcessWire;
 
-$info = [
+$info = array(
 	'title'					=> 'StaticPages',
 	'version'				=> '0.7.1',
 	'summary'				=> 'Saves output to static html files. A page save deletes only the files whose render depended on the saved page; settings module config saves and tracked file changes delete them all.',
@@ -27,4 +27,4 @@ $info = [
 		'title' => 'Static Site Generator',
 	],
 */
-];
+);

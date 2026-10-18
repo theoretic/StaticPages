@@ -16,7 +16,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	private $didWipe = false;
 
 	//dependency tags collected while the front end renders, tag => true. See collecting
-	private $deps = [];
+	private $deps = array();
 	private $collecting = false;
 
 	//set while this module itself asks the API for pages, keeps hookFound() out of it
@@ -30,7 +30,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	private $tablesReady = null;
 
 	//what this request queued already: a bulk save loop must not insert the same tags again
-	private $queuedTags = [];
+	private $queuedTags = array();
 	private $queuedMode = 0;
 	private $drainRequested = false;
 	private $adminRequest = false;
@@ -94,7 +94,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$this->addHookAfter('Page::loaded', $this, 'hookLoaded');
 		$this->pages->addHookAfter('found', $this, 'hookFound');
 
-		$this->addHookAfter('Page::render', $this, 'hookCache', ['priority' => (int) $this->priority]);
+		$this->addHookAfter('Page::render', $this, 'hookCache', array('priority' => (int) $this->priority));
 
 		//after the fact, with the changed field names: a save changing nothing removes nothing
 		$this->pages->addHookAfter('saved', $this, 'hookSaved');
@@ -108,7 +108,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( $this->configValue('wipeOnSaveField', 1) ) $this->pages->addHookAfter('savedField', $this, 'hookSavedField');
 
 		//saves only queue what went stale, the files are removed once the response is out
-		register_shutdown_function([$this, 'shutdown']);
+		register_shutdown_function(array($this, 'shutdown'));
 	}
 
 	public function ready() {
@@ -123,7 +123,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//nothing this request renders will be cached, what was collected so far is dropped
 		if( !$this->isCacheableRequest() ){
 			$this->collecting = false;
-			$this->deps = [];
+			$this->deps = array();
 		}
 
 		if( !$this->adminRequest ) return;
@@ -146,7 +146,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	public function ___uninstall() {
 		$database = $this->wire('database');
-		foreach( [self::tableFiles, self::tableTags, self::tableQueue] as $table )
+		foreach( array(self::tableFiles, self::tableTags, self::tableQueue) as $table )
 			$database->exec("DROP TABLE IF EXISTS `$table`");
 	}
 
@@ -192,17 +192,17 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	public function hookSavedField($event) {
 		$field = $event->arguments(1);
-		return $this->invalidatePage( $event->arguments(0), [ (string) ( $field instanceof Field ? $field->name : $field ) ] );
+		return $this->invalidatePage( $event->arguments(0), array( (string) ( $field instanceof Field ? $field->name : $field ) ) );
 	}
 
 	public function hookDeleted($event) {
 		$page = $event->arguments(0);
 		//emptying the trash: nobody saw these pages since they went in, see invalidatePage()
-		return $this->invalidatePage( $page, $page->isTrash() ? [] : ['status'] );
+		return $this->invalidatePage( $page, $page->isTrash() ? array() : array('status') );
 	}
 
 	public function hookSorted($event) {
-		return $this->invalidatePage( $event->arguments(0), ['sort'] );
+		return $this->invalidatePage( $event->arguments(0), array('sort') );
 	}
 
 	public function hookTrashed($event) {
@@ -343,7 +343,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			//a save landing between the check above and the record: its drain may have looked
 			//for this file before the record existed
 			if( $this->genChanged() ){
-				$this->dropIndexRows( [ md5($relative) ] );
+				$this->dropIndexRows( array( md5($relative) ) );
 				$this->unpublish($path, $dirExisted ? '' : $dir);
 				$this->logSkip( $page, 'content changed while rendering' );
 			}
@@ -461,8 +461,8 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		}
 
 		$start = microtime(true);
-		$total = ['files' => 0, 'bytes' => 0, 'dirs' => 0, 'scan' => false];
-		$modes = [];
+		$total = array('files' => 0, 'bytes' => 0, 'dirs' => 0, 'scan' => false);
+		$modes = array();
 		$tagCount = 0;
 
 		try {
@@ -478,7 +478,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 				if( !count($rows) ) break;
 
 				$mode = self::modeTags;
-				$tags = [];
+				$tags = array();
 				$maxId = 0;
 				foreach( $rows as $row ){
 					$mode = max( $mode, (int) $row['mode'] );
@@ -498,7 +498,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 				$modes[$mode] = true;
 				$tagCount += count($tags);
 				if( $result === null ) $total['scan'] = true;
-				else foreach( ['files', 'bytes', 'dirs'] as $key ) $total[$key] += $result[$key];
+				else foreach( array('files', 'bytes', 'dirs') as $key ) $total[$key] += $result[$key];
 			}
 		}
 
@@ -519,7 +519,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		//registered from init(). Registering once more from inside the shutdown sequence puts the
 		//drain behind every shutdown function registered after this module's init(): a debug bar
 		//rendering its output there would lose it once the response is finished
-		register_shutdown_function([$this, 'shutdownDrain']);
+		register_shutdown_function(array($this, 'shutdownDrain'));
 	}
 
 	public function shutdownDrain(){
@@ -554,7 +554,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		//lines the operator removed or edited would leave their hash file behind forever
 		$this->pruneHashFiles($patterns, $hashDir);
 
-		$changed = [];
+		$changed = array();
 
 		foreach( $patterns as $pattern ){
 
@@ -632,9 +632,9 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		//enter the results, and the most selective one is used. Whatever is not understood
 		//counts as no constraint, which only ever invalidates more
 
-		if( !$selectors instanceof Selectors ) return ['any'];
+		if( !$selectors instanceof Selectors ) return array('any');
 
-		$found = ['parent' => [], 'template' => [], 'tree' => []];
+		$found = array('parent' => array(), 'template' => array(), 'tree' => array());
 		$specific = false;
 
 		foreach( $selectors as $selector ){
@@ -680,7 +680,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 					continue 2;
 			}
 
-			$ids = [];
+			$ids = array();
 			foreach( $values as $value ){
 				$id = $key === 'template' ? $this->resolveTemplateId($value) : $this->resolvePageId($value);
 				//one value not understood would make the constraint look narrower than it is
@@ -690,12 +690,12 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 			$found[$key] = array_merge( $found[$key], $ids );
 		}
 
-		foreach( ['parent' => 'par:', 'template' => 't:', 'tree' => 'tree:'] as $key => $prefix ){
+		foreach( array('parent' => 'par:', 'template' => 't:', 'tree' => 'tree:') as $key => $prefix ){
 			if( !count($found[$key]) ) continue;
 			return array_map( fn($id) => $prefix . $id, array_values( array_unique($found[$key]) ) );
 		}
 
-		return $specific ? [] : ['any'];
+		return $specific ? array() : array('any');
 	}
 
 	private function resolveTemplateId($value){
@@ -709,7 +709,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		$value = trim( (string) $value );
 		if( ctype_digit($value) ) return (int) $value;
 		if( $value === '' || $value[0] !== '/' ) return 0;
-		return (int) $this->wire('pages')->getByPath( $value, ['getID' => true, 'useLanguages' => true, 'allowPartial' => false] );
+		return (int) $this->wire('pages')->getByPath( $value, array('getID' => true, 'useLanguages' => true, 'allowPartial' => false) );
 	}
 
 	private function renderTags(Page $page){
@@ -726,7 +726,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 
 		unset( $tags['p:0'] );
 
-		if( count($tags) > self::maxTags ) return ['*'];
+		if( count($tags) > self::maxTags ) return array('*');
 
 		return array_keys($tags);
 	}
@@ -737,7 +737,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 
 		//a repeater item is part of the content of the page owning it, and of nothing else
 		if( $page instanceof RepeaterPage ){
-			$this->enqueue( self::modeTags, ["p:{$page->id}"] );
+			$this->enqueue( self::modeTags, array("p:{$page->id}") );
 			$owner = $page->getForPage();
 			if( $depth < 10 && $owner instanceof Page && $owner->id && $owner->id !== $page->id )
 				return $this->invalidatePage( $owner, $changes, $depth + 1 );
@@ -746,12 +746,12 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 
 		if( $this->wipesAll($page, $changes) ) return $this->enqueue(self::modeAll);
 
-		$tags = ["p:{$page->id}"];
+		$tags = array("p:{$page->id}");
 
 		//a page nobody could see before the save and nobody sees after it is in no find result
 		//a guest render ran: an unpublished draft is edited for free. A system template (users,
 		//roles, the admin) is listed by nothing a guest sees
-		$structural = array_intersect( $changes, ['status', 'parent', 'parent_id', 'template', 'templates_id', 'sort'] );
+		$structural = array_intersect( $changes, array('status', 'parent', 'parent_id', 'template', 'templates_id', 'sort') );
 		$hidden = $page->isUnpublished() || $page->isTrash();
 		$template = $page->template;
 		$system = $template instanceof Template && ( $template->flags & Template::flagSystem );
@@ -773,12 +773,12 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 	private function listingTags(Page $page){
 		//the tags of every find $page may have entered or left, see the note above selectorTags()
 
-		$tags = ['any'];
+		$tags = array('any');
 
-		foreach( [ $page->template, $page->templatePrevious ] as $template )
+		foreach( array( $page->template, $page->templatePrevious ) as $template )
 			if( $template instanceof Template ) $tags[] = "t:{$template->id}";
 
-		foreach( [ $page->parent, $page->parentPrevious ] as $parent ){
+		foreach( array( $page->parent, $page->parentPrevious ) as $parent ){
 			if( !$parent instanceof Page || !$parent->id ) continue;
 			$tags[] = "par:{$parent->id}";
 			for( $ancestor = $parent, $i = 0; $ancestor && $ancestor->id && $i < 100; $ancestor = $ancestor->parent, $i++ )
@@ -828,7 +828,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		return count( array_intersect($fields, $changed) ) > 0;
 	}
 
-	private function enqueue($mode, array $tags = []){
+	private function enqueue($mode, array $tags = array()){
 		//a save only says what went stale. The drain removes it once the response is out, so an
 		//editor never waits for the unlinks. Queued at once rather than at shutdown: a process
 		//killed in between leaves a row the next admin request drains, not a stale file.
@@ -845,7 +845,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		if( $mode <= $this->queuedMode ) return;
 
 		if( $mode === self::modeTags ){
-			$new = [];
+			$new = array();
 			foreach( $tags as $tag ){
 				$tag = (string) $tag;
 				if( $tag === '' || isset( $this->queuedTags[$tag] ) ) continue;
@@ -857,7 +857,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		}
 		else {
 			$this->queuedMode = $mode;
-			$tags = [];
+			$tags = array();
 		}
 
 		try {
@@ -985,7 +985,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 
 		if( count($rows) < 3 ) return 0;
 
-		$versions = [];
+		$versions = array();
 		foreach( $rows as $row )
 			$versions[] = preg_match( '/^StaticPages schema (\d+)$/', (string) $row['TABLE_COMMENT'], $match ) ? (int) $match[1] : 0;
 
@@ -1009,7 +1009,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 			$this->migrateSchema($from);
 
 			//last, once every step went through: a migration cut short is repeated in full
-			foreach( [self::tableFiles, self::tableTags, self::tableQueue] as $table )
+			foreach( array(self::tableFiles, self::tableTags, self::tableQueue) as $table )
 				$this->wire('database')->exec( "ALTER TABLE `$table` COMMENT = '" . $this->schemaComment() . "'" );
 
 			$this->logDrain( "index tables migrated from schema $from to " . self::schemaVersion );
@@ -1050,7 +1050,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 
 		$imported = true;
 		foreach( array_unique($lines) as $relative )
-			if( !$this->recordStaticFile( $relative, 0, ['*'] ) ) $imported = false;
+			if( !$this->recordStaticFile( $relative, 0, array('*') ) ) $imported = false;
 
 		if( $imported ) @unlink($manifest);
 	}
@@ -1101,7 +1101,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		//carrying one of $tags, and the '*' ones
 
 		$database = $this->wire('database');
-		$files = [];
+		$files = array();
 
 		if( $tags === null ){
 			$query = $database->prepare('SELECT HEX(path_hash) AS hash, path FROM `' . self::tableFiles . '`');
@@ -1130,7 +1130,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		try {
 			foreach( array_chunk( array_values($hashes), self::chunkSize ) as $chunk ){
 				$in = implode( ', ', array_fill( 0, count($chunk), 'UNHEX(?)' ) );
-				foreach( [self::tableTags, self::tableFiles] as $table ){
+				foreach( array(self::tableTags, self::tableFiles) as $table ){
 					$query = $this->wire('database')->prepare("DELETE FROM `$table` WHERE path_hash IN ($in)");
 					foreach( $chunk as $n => $hash ) $query->bindValue( $n + 1, (string) $hash );
 					$query->execute();
@@ -1148,7 +1148,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		//$tags null: every indexed file
 
 		$files = $this->indexedFiles($tags);
-		if( !count($files) ) return ['files' => 0, 'bytes' => 0, 'dirs' => 0];
+		if( !count($files) ) return array('files' => 0, 'bytes' => 0, 'dirs' => 0);
 
 		//rows first, files second: a render recording the same path meanwhile leaves a row for a
 		//file that is gone, which is harmless, and never a file that nothing knows about
@@ -1160,12 +1160,12 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 
 	private function deleteStaticFiles(array $files){
 
-		$result = ['files' => 0, 'bytes' => 0, 'dirs' => 0];
+		$result = array('files' => 0, 'bytes' => 0, 'dirs' => 0);
 
 		$root = $this->rootPath();
 		$nonStaticDirs = $this->nonStaticDirsArray();
-		$dirs = [];
-		$failed = [];
+		$dirs = array();
+		$failed = array();
 
 		foreach( $files as $relative ){
 
@@ -1191,7 +1191,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		}
 
 		//a file a reader holds open on Windows: the next drain of any kind tries again
-		foreach( $failed as $relative ) $this->recordStaticFile( $relative, 0, ['*'] );
+		foreach( $failed as $relative ) $this->recordStaticFile( $relative, 0, array('*') );
 
 		$result['dirs'] = $this->pruneDirs( array_keys($dirs), $this->normalizePath($root) );
 
@@ -1362,12 +1362,12 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 
 		$manifest = $this->manifestPath();
 		$taken = $manifest . '.' . getmypid() . '.wipe';
-		if( !@rename($manifest, $taken) ) return ['files' => 0, 'bytes' => 0, 'dirs' => 0];
+		if( !@rename($manifest, $taken) ) return array('files' => 0, 'bytes' => 0, 'dirs' => 0);
 		if( !is_file($manifest) ) @touch($manifest);
 
 		$lines = @file( $taken, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
 		@unlink($taken);
-		if( $lines === false ) $lines = [];
+		if( $lines === false ) $lines = array();
 
 		return $this->deleteStaticFiles( array_unique($lines) );
 	}
@@ -1379,7 +1379,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 
 		$rootNorm = rtrim( $rootNorm, DIRECTORY_SEPARATOR );
 		$rootLength = strlen($rootNorm);
-		$set = [];
+		$set = array();
 
 		foreach( $dirs as $dir ){
 			$dir = rtrim( $this->normalizePath($dir), DIRECTORY_SEPARATOR );
@@ -1421,7 +1421,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 			$parentDirPath = implode( DIRECTORY_SEPARATOR, $parts );
 
 			if( strlen($parentDirPath) <= strlen($rootNorm) ) continue;
-			if( in_array( $parentDirPath, ['', '.', '..'] ) ) continue;
+			if( in_array( $parentDirPath, array('', '.', '..') ) ) continue;
 			if( !is_dir($parentDirPath) ) continue;
 
 			$dirIsEmpty = !(new \FilesystemIterator($parentDirPath))->valid();
@@ -1455,10 +1455,10 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		//that took in the page dirs too (/about/, /en/): their copies were then never wiped
 		//and went stale
 		$root = $this->rootPath();
-		if( $root === '' || !is_dir($root) || !is_readable($root) ) return [];
+		if( $root === '' || !is_dir($root) || !is_readable($root) ) return array();
 
 		$pageDirs = $this->rootPageDirs();
-		$dirs = [];
+		$dirs = array();
 		try {
 			foreach( new \DirectoryIterator($root) as $fileInfo ){
 				if( $fileInfo->isDot() || !$fileInfo->isDir() ) continue;
@@ -1468,7 +1468,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 			}
 		}
 		catch( \Throwable $e ){
-			return [];
+			return array();
 		}
 		sort($dirs);
 		return $dirs;
@@ -1477,13 +1477,13 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 	private function rootPageDirs(){
 		//names of the first level page dirs, in every language: the children of the home
 		//page, and the home page itself where a language has a name for it (/en/)
-		$names = [];
+		$names = array();
 		try {
 			$home = $this->wire('pages')->get('/');
 			if( !$home->id ) return $names;
 			$languages = $this->wire('modules')->isInstalled('LanguageSupportPageNames') ? $this->wire('languages') : null;
 			$pages = $home->children('include=all');
-			foreach( $languages ?: [null] as $language ){
+			foreach( $languages ?: array(null) as $language ){
 				if( $language ){
 					$homeName = $home->localName($language);
 					if( strlen($homeName) && $homeName !== Pages::defaultRootName ) $names[$homeName] = true;
@@ -1557,7 +1557,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 
 		$value = $this->configValue('wipeOnConfigSaveModules', 'SettingsFactory');
 
-		$classes = [];
+		$classes = array();
 		foreach( $this->linesToArray($value) as $className ){
 			//tolerating a namespace prefix, names are matched the way className() reports them
 			$className = ltrim( $className, '\\' );
@@ -1585,7 +1585,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		if( !$this->wire('user')->isLoggedin() ) return false;
 
 		$adminTemplates = $config->adminTemplates;
-		if( !is_array($adminTemplates) || !count($adminTemplates) ) $adminTemplates = ['admin'];
+		if( !is_array($adminTemplates) || !count($adminTemplates) ) $adminTemplates = array('admin');
 
 		return in_array( $page->template->name, $adminTemplates, true );
 	}
@@ -1624,7 +1624,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 	private function trackedPathsArray(){
 		//validated, normalised, deduplicated spec lines
 
-		$patterns = [];
+		$patterns = array();
 
 		foreach( $this->linesToArray( $this->configValue('trackedPaths', self::trackedPathsDefault) ) as $line ){
 
@@ -1717,7 +1717,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		$segments = explode('/', $pattern);
 		array_pop($segments);
 
-		$base = [];
+		$base = array();
 		foreach( $segments as $segment ){
 			if( $segment === '' ) continue;
 			if( strpbrk($segment, '*?') !== false ) break;
@@ -1731,7 +1731,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		//flat when only the last segment of the pattern holds a wildcard, recursive
 		//otherwise: site/assets/css/*.css must not walk the subdirectories of css/
 
-		$paths = [];
+		$paths = array();
 
 		$segments = explode('/', $pattern);
 		array_pop($segments);
@@ -1793,7 +1793,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		$path = $this->normalizePath($path);
 		$paths = $this->wire('config')->paths;
 
-		foreach( ['cache', 'logs', 'sessions', 'tmp'] as $key ){
+		foreach( array('cache', 'logs', 'sessions', 'tmp') as $key ){
 			$dir = (string) $paths->$key;
 			if( !strlen($dir) ) continue;
 			$dir = rtrim( $this->normalizePath($dir), DIRECTORY_SEPARATOR ) . DIRECTORY_SEPARATOR;
@@ -1818,7 +1818,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		//creating the dir later is then a change like any other
 		if( !is_dir($baseDir) ) return md5('');
 
-		$entries = [];
+		$entries = array();
 
 		foreach( $this->trackedPathWalk($baseDir, $pattern, $base) as $path ){
 
@@ -1876,7 +1876,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		//an edited or removed line leaves its hash file behind: never read again, and a
 		//stale spec line on disk misleads whoever is debugging the next wipe
 
-		$keep = [];
+		$keep = array();
 		foreach( $patterns as $pattern ) $keep[ md5($pattern) . '.hash' ] = true;
 
 		try {
@@ -1895,7 +1895,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 	}
 
 	private function normalizePath($path){
-		return str_replace( ['\\', '/'], DIRECTORY_SEPARATOR, $path );
+		return str_replace( array('\\', '/'), DIRECTORY_SEPARATOR, $path );
 	}
 
 	private function isProtectedPath($dirPath, array $nonStaticDirs){
@@ -1960,16 +1960,16 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		$root = $this->rootPath();
 		$windows = DIRECTORY_SEPARATOR === '\\';
 
-		$protected = [];
+		$protected = array();
 		foreach( $this->nonStaticDirsArray() as $nonStaticDir ){
 			$name = trim( str_replace( '\\', '/', $nonStaticDir ), '/' );
 			$protected[ $windows ? strtolower($name) : $name ] = true;
 		}
 
 		$rootReal = realpath($root);
-		if( $rootReal === false ) return [];
+		if( $rootReal === false ) return array();
 
-		$targets = [];
+		$targets = array();
 
 		try {
 			foreach( new \DirectoryIterator($root) as $entry ){
@@ -1990,7 +1990,7 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 			}
 		}
 		catch( \Throwable $e ){
-			return [];
+			return array();
 		}
 
 		sort($targets);
@@ -2000,12 +2000,12 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 	private function wipeScanPHP(array $targets){
 		//one walk per root dir: files on the way down, empty dirs afterwards, deepest first
 
-		$result = ['files' => 0, 'bytes' => 0, 'dirs' => 0];
+		$result = array('files' => 0, 'bytes' => 0, 'dirs' => 0);
 
 		$root = $this->rootPath();
 		$nonStaticDirs = $this->nonStaticDirsArray();
 		$tmpGlob = $this->tmpFileGlob();
-		$dirs = [];
+		$dirs = array();
 
 		$delete = function($path) use (&$result, $tmpGlob){
 			$name = basename($path);
@@ -2090,20 +2090,20 @@ echo $this->describeWipe($result) . " Static cache cleaned in $duration s.";
 		$text = fn($value) => "([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" . base64_encode( (string) $value ) . "')))";
 
 		//one statement per line: powershell reading a script from stdin runs it line by line
-		$lines = [
+		$lines = array(
 			"\$ErrorActionPreference = 'SilentlyContinue'",
 			'$name = ' . $text( $this->staticFile ),
 			'$tmp = ' . $text( $this->tmpFileGlob() ),
 			'function Wipe-Files([string]$dir){ try { $files = [IO.Directory]::GetFiles($dir) } catch { return }; foreach($file in $files){ $n = [IO.Path]::GetFileName($file); if($n -eq $name -or $n -like $tmp){ try { [IO.File]::Delete($file) } catch {} } } }',
 			'function Wipe-Tree([string]$dir){ try { $subs = [IO.Directory]::GetDirectories($dir) } catch { return }; foreach($sub in $subs){ if(-not ([IO.File]::GetAttributes($sub) -band [IO.FileAttributes]::ReparsePoint)){ Wipe-Tree $sub } }; Wipe-Files $dir; try { if([IO.Directory]::GetFileSystemEntries($dir).Length -eq 0){ [IO.Directory]::Delete($dir) } } catch {} }',
 			'Wipe-Files ' . $text( $this->rootPath() ),
-		];
+		);
 		foreach( $targets as $target ) $lines[] = 'Wipe-Tree ' . $text($target);
 		$lines[] = "Write-Output 'StaticPages-scan-done'";
 
 		$process = @proc_open(
 			'powershell -NoProfile -NonInteractive -Command -',
-			[ 0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', 'NUL', 'w'] ],
+			array( 0 => array('pipe', 'r'), 1 => array('pipe', 'w'), 2 => array('file', 'NUL', 'w') ),
 			$pipes
 			);
 		if( !is_resource($process) ) return false;
