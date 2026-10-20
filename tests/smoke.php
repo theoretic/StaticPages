@@ -396,6 +396,47 @@ $hooked = null;
 foreach($wire->hooks->getHooks($A, 'render') as $hook) if($hook['toObject'] instanceof StaticPages) $hooked = $hook['options']['priority'];
 check('Page::render hook on the module object at its priority', $hooked !== null && (int) $hooked === (int) $sp->priority, json_encode($hooked));
 
+////  config file and module info (0.8.1)
+
+//core includes StaticPages.config.php whenever it builds module info; 0.8.0 asked for the module
+//from there and recursed until memory ran out on a module install or a cleared info cache (its
+//`refreshing` guard covered a refresh only). A recursion ends this script with a fatal error
+$modules->info->clearModuleInfoCache();
+check('clearing the module info cache returns', $modules->isInstalled('StaticPages'));
+$probe = '';
+foreach(array('TextformatterNewlineBR', 'TextformatterNewlineUL', 'TextformatterPstripper', 'TextformatterStripTags') as $name) {
+	if($modules->isInstallable($name) && !$modules->isInstalled($name)) { $probe = $name; break; }
+}
+if($probe) {
+	$modules->install($probe);
+	$installed = $modules->isInstalled($probe);
+	$modules->uninstall($probe);
+	check("a module install and uninstall return ($probe)", $installed && !$modules->isInstalled($probe));
+} else {
+	echo "skip a module install and uninstall: no uninstalled core textformatter to try\n";
+}
+
+//no stored nonStaticDirs reaches the module as '' (the config file's default): that is the
+//default list, never "protect nothing", and the settings form offers that list
+@mkdir("$tmpRoot/smoke-keep", 0777, true);
+$defaults = $sp->wiper()->defaultNonStaticDirs();
+$sp->set('nonStaticDirs', '');
+check('an empty nonStaticDirs is the default list', $sp->nonStaticDirsArray() === $defaults && in_array('smoke-keep', $defaults, true), json_encode($sp->nonStaticDirsArray()));
+$data = $modules->getConfig('StaticPages');
+unset($data['nonStaticDirs']);
+$modules->saveConfig('StaticPages', $data);
+//core finds the module's config file through paths->root, which points at the temp dir here:
+//the real root for the form, and the default list computed under that same root
+$tmpRootPath = $config->paths->root;
+$config->paths->root = "$root/";
+$form = $modules->getModuleConfigInputfields('StaticPages');
+$field = $form ? $form->getChildByName('nonStaticDirs') : null;
+$formDefaults = implode("\n", $sp->wiper()->defaultNonStaticDirs());
+$config->paths->root = $tmpRootPath;
+check('the settings form offers the default list when none is stored', $field && $formDefaults !== '' && (string) $field->attr('value') === $formDefaults, $field ? json_encode((string) $field->attr('value')) : 'no field');
+$sp->set('nonStaticDirs', "site\nvendor");
+rrmdir("$tmpRoot/smoke-keep");
+
 ////  cleanup
 
 foreach(array_reverse($fixtures) as $f) if($f->id) $pages->delete($pages->get($f->id), true);

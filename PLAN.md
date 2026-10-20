@@ -76,7 +76,8 @@ Bugs:
 
 Config screen only, core Inputfields. Native by construction; the new settings (*Dry run*,
 *Never cache with these cookies*, *CSRF token tags*) are core checkbox and textarea fields. The
-0.6.4 `$modules->refreshing` guard in the config file is kept.
+config file never touches the module (0.8.1: the 0.6.4 `$modules->refreshing` guard missed
+module installs); the *Non-static directories* default comes from `hookConfigInputfields()`.
 
 ## Verification
 

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.1 (2026-10-20)
+
+### Fixes
+- **A module install ran out of memory.** Core includes `StaticPages.config.php` whenever it
+  builds module info: a refresh, a module install, a cleared info cache. The config file asked
+  for the module to compute the *Non-static directories* default, which builds the module's info
+  again, endlessly. The 0.6.4 guard (`$modules->refreshing`) only covered a refresh, so
+  installing any module on a site with 0.8.0 exhausted memory (found on a fresh copy of atis.pro:
+  `Modules::install('FieldtypeSelector')` → `clearModuleInfoCache()` → … → `StaticPages.config.php`
+  → `$modules->get('StaticPages')` → …, 1 GB). The config file no longer touches the module.
+- **An empty *Non-static directories* protected nothing.** Without a stored value the config
+  file's default reached the module as `''` (0.8.0: during a refresh), and `nonStaticDirsArray()`
+  read that as an empty list, so a wipe in that request had no protected dirs. Empty now means
+  the default list, as "never saved" always did (the field is required, so it is never saved
+  empty).
+- The settings form gets the default list from a hook on `Modules::getModuleConfigInputfields`,
+  which runs only when the form is built.
+
 ## 0.8.0 (2026-10-18)
 
 Drop-in for every earlier version, including the 012 and 020 copies that never were in this

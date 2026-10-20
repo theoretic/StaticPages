@@ -93,6 +93,8 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	public function init() {
 		$this->addHookBefore('Modules::saveConfig', $this, 'hookBeforeSaveConfig');
 		$this->addHookAfter('Modules::saveConfig', $this, 'hookAfterSaveConfig');
+		//the settings form's default for nonStaticDirs, filled in only when the form is built
+		$this->addHookAfter('Modules::getModuleConfigInputfields', $this, 'hookConfigInputfields');
 
 		//012 and 020 installs never stored a priority, and (int) null hooked the cache at 0,
 		//ahead of every output transformer. The default the config screen offers, also for
@@ -309,6 +311,16 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//the page itself was saved and handled by hookSaved(). Its descendants changed status in
 		//SQL alone: no save, no hook, and a listing of them elsewhere never loaded the page
 		if( (int) $event->arguments(0)->numChildren > 0 ) return $this->queue()->enqueue(self::modeAll);
+	}
+
+	public function hookConfigInputfields($event) {
+		//the config file cannot compute the default list (see there): offer it on the form, so a
+		//never saved install shows, and saves, what nonStaticDirsArray() uses
+		if( wireClassName( $event->arguments(0), false ) !== $this->className() ) return;
+		$form = $event->return;
+		if( !$form instanceof InputfieldWrapper ) return;
+		$field = $form->getChildByName('nonStaticDirs');
+		if( $field && trim( (string) $field->attr('value') ) === '' ) $field->attr( 'value', implode( "\n", $this->defaultNonStaticDirs() ) );
 	}
 
 	public function hookBeforeSaveConfig($event) {
@@ -656,9 +668,11 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	/** #pw-internal */
 	public function nonStaticDirsArray(){
 		//never saved: the same default the config screen offers, so the full scan never
-		//runs unguarded through site/, wire/ and the like
+		//runs unguarded through site/, wire/ and the like. Empty counts as never saved (the
+		//field is required): the config file's default is '' and reaches the module whenever
+		//no value is stored, and 0.8.0 read it as "protect nothing"
 		$value = $this->nonStaticDirs;
-		if( $value === null ) return $this->wiper()->defaultNonStaticDirs();
+		if( $value === null || trim( (string) $value ) === '' ) return $this->wiper()->defaultNonStaticDirs();
 
 		$dirs = array();
 		foreach( $this->linesToArray($value) as $line ){

@@ -15,14 +15,12 @@ foreach( $this->wire()->templates as $template ){
 	if( $template->name == 'admin' ) $nonStaticTemplatesValue[] = $template->id;
 }
 
-//the site root's dirs minus the page dirs (StaticPages::defaultNonStaticDirs()); an empty
-//list where the root is missing or unreadable, so config and modules refresh still work.
-//A modules refresh includes this file while it rebuilds the module info cache: asking for the
-//module then would start that rebuild again from inside it, endlessly (memory exhausted where
-//the module dir is a junction the module scan does not see). The list only matters on the form
-$nonStaticDirsValue = $this->wire()->modules->refreshing ? array() : $this->wire()->modules->get('StaticPages')->defaultNonStaticDirs();
-
-$nonStaticDirsValue = implode("\n", $nonStaticDirsValue);
+//No default here, and never a call to the module: core includes this file while it builds the
+//module's info (refresh, install, clearing the info cache) and asking for the module then
+//builds that info again from inside it, endlessly (0.6.3 and 0.8.0 ran out of memory; 0.8.0's
+//`$modules->refreshing` guard missed installs). Empty means "the default list":
+//nonStaticDirsArray() falls back to it, and hookConfigInputfields() fills it into the form.
+$nonStaticDirsValue = '';
 
 ////
 
