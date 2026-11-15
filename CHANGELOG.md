@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.9.0 (2026-11-15)
+
+Additions asked for in [issue #1](https://github.com/theoretic/StaticPages/issues/1). Nothing
+changes for a site that uses none of them: no config key, table or file changes meaning.
+
+### Added
+- **`noCache()` and the `allowCache` hook.** A render depending on something no URL shows
+  (session state, a URL segment, a request flag) can be kept out of the cache from template code,
+  `$modules->get('StaticPages')->noCache('cart in session')` (`noCache(false)` clears it), or by a
+  hook on `StaticPages::allowCache(Page $page)` returning false. Both are asked only about a render
+  every built-in check of the request accepted, before anything is created on disk: site code can
+  veto, never force a file. Each refusal is logged with *Log skipped pages* on.
+- **The `fileContent` hook.** `StaticPages::fileContent(Page $page, $html)` gets the markup after
+  *CSRF token tags* were stripped and returns what is written, so the stored copy can differ from
+  what the visitor got: a CSP nonce swapped for a server side include, content neutralised for
+  everyone, an incomplete render refused. The render's return value is never touched. A return
+  that is not a non-empty string keeps the render out of the cache, with no file and no dir left.
+- **Never invalidate on save of these templates** (fieldset *Wipe*): a save, deletion, trashing,
+  restore, sort or move of a page of a listed template queues nothing. No file is deleted, the
+  generation stamp stays (renders running meanwhile still write their files), no drain runs. A
+  repeater item counts as a page of its owner's template. For orders, form entries, log pages:
+  every such save used to delete every file whose render ran a find with no template or parent
+  limit. A cached page that shows a page of a listed template stays stale, and so do the page's
+  own copy and, after a move or a rename, the copies of its descendants; see *Templates whose
+  saves invalidate nothing* in the README. A template also in *Wipe everything on save of these
+  templates* still wipes everything, and the settings save warns about it.
+
+### Tests
+- `tests/smoke.php` runs to its end on a sandbox with compiled modules: the module info and
+  module install checks run under the install's own root and cache dir (under the temporary root
+  core re-included a compiled module and died), the fixture pages and the module config are
+  restored from a shutdown function when the script dies early, and the first line prints the
+  version of the files under test.
+
 ## 0.8.2 (2026-11-15)
 
 ### Changes

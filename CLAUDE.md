@@ -9,7 +9,7 @@ before elegance.
 
 | File | Role |
 |---|---|
-| `StaticPages.module.php` | Module class: hooks (stay on this object, site code finds them by `toObject`), public API (`cachePage()`, `stripCsrf()`, `wipeCaches()`, `drain()`, `checkTrackedPaths()`, `defaultNonStaticDirs()`), config helpers shared by the parts, part accessors |
+| `StaticPages.module.php` | Module class: hooks (stay on this object, site code finds them by `toObject`), public API (`cachePage()`, `noCache()`, the hookable `___allowCache()` and `___fileContent()`, `stripCsrf()`, `wipeCaches()`, `drain()`, `checkTrackedPaths()`, `defaultNonStaticDirs()`), config helpers shared by the parts, part accessors |
 | `StaticPagesIndex.php` | Dependency index: the three tables, render dependencies (`pageLoaded()`, `pagesFound()`, `renderTags()`), invalidation (`invalidatePage()`), schema check (`ensureTables()`, `indexSchema`), DB locks |
 | `StaticPagesQueue.php` | Queue rows, the drain after the response, the generation stamp |
 | `StaticPagesPublisher.php` | Atomic write, CSRF stripping, cookie and header skips |

@@ -50,6 +50,32 @@ Everything is deleted when:
 - a renamed or moved page has more than 5000 descendants;
 - a listed module's config is saved, or a tracked file changed.
 
+### Templates whose saves invalidate nothing
+
+*Never invalidate on save of these templates* is for pages no cached page shows and that are
+saved often: orders, form entries, log pages. Each such save used to delete every file whose
+render ran a find with no template or parent limit, and to change the generation stamp, so a
+render running meanwhile was not cached either. A save, single field save, deletion, trashing,
+restore, sort or move of a page of a listed template now queues nothing: no file is deleted, the
+stamp stays, no drain runs. A repeater item counts as a page of its owner's template, through
+nested repeaters. A field listed in *Wipe everything on change of these fields* changing on such
+a page wipes nothing either.
+
+What you sign by listing a template:
+
+- wherever a cached page does show a page of that template (a listing, a counter, a "latest"
+  box, a page reference), that copy stays stale until something else deletes it: a save the
+  copy depends on, a wipe of everything, `wipeCaches()`;
+- the page's own static copy is not deleted either. List the template in *Non-static page
+  templates* as well when guests can open its pages;
+- deleting, moving or renaming such a page deletes nothing, so the static copies of its
+  descendants stay where they are, under their old urls. Trashing or restoring one with
+  children deletes nothing either.
+
+A template also listed in *Wipe everything on save of these templates* still wipes everything,
+the broader rule wins, and saving the settings warns about it. Language pages always wipe
+everything.
+
 What the record can not see, so list the template or the field when it applies:
 
 - `$pages->findRaw()` and `$pages->getRaw()`, which never load pages;
@@ -130,6 +156,8 @@ module looks like it is doing nothing, and off again afterwards on a busy front 
 - The page's dir is listed in *Non-static directories*: no wipe would ever delete the file.
 - *Static file name* is not a plain file name (letters, digits, `.`, `_`, `-`, no leading dot).
 - A line of *CSRF token tags* is no valid regex.
+- Site code said no: `noCache()` was called, a hook on `StaticPages::allowCache` returned false,
+  or a hook on `StaticPages::fileContent` returned nothing. See *Hooks and API* below.
 
 ## CSRF tokens
 
@@ -148,6 +176,89 @@ A site with other markup lists its own tags there. An empty setting strips nothi
 is no valid regex stops caching altogether, rather than freezing a live token, and the config
 save names it. Site code writing its own static files calls `$modules->get('StaticPages')->stripCsrf($html)`,
 which answers `null` when the markup could not be prepared.
+
+## Hooks and API
+
+Site code can keep a render out of the cache and change what is written to the file. It can
+never force a file: `noCache()` and `allowCache` are asked only about a render every built-in
+check of the request already accepted (logged in, status, cookies, headers, template, content
+type, ajax, GET and POST, page number), and before anything is created on disk. A yes is no
+promise: what comes later (*CSRF token tags*, `fileContent`, the generation stamp, *Static file
+name*, *Non-static directories*, the write itself) can still refuse. With *Log skipped pages*
+on, a refusal by `noCache()`, `allowCache` or `fileContent` is logged with its reason.
+
+### Keeping a render out of the cache
+
+For output that depends on something no URL shows (session state, a URL segment, a request
+flag), call `noCache()` from template code. It holds for the rest of the request; the reason,
+when a string, goes to the log, and `noCache(false)` clears it again:
+
+```php
+if( $session->get('cart') ) $modules->get('StaticPages')->noCache('cart in session');
+```
+
+The same decision from a hook, in `site/ready.php`. `allowCache` gets the page being rendered
+and returns true; a falsy return keeps the render out of the cache:
+
+```php
+$wire->addHookAfter('StaticPages::allowCache', function(HookEvent $event) {
+	$page = $event->arguments(0);
+	if( $page->template->name === 'search' && $event->wire()->input->urlSegment1 !== '' ) $event->return = false;
+});
+```
+
+A render refused by `noCache()` never reaches the hook.
+
+### Changing the stored copy
+
+`fileContent` gets the page and the markup about to be written, after *CSRF token tags* were
+stripped, and returns what is written. The visitor of this request gets the render as it was,
+the hook changes the file only. Anything but a non-empty string keeps the render out of the
+cache, with nothing left on disk. Refusing a render that came out incomplete:
+
+```php
+$wire->addHookAfter('StaticPages::fileContent', function(HookEvent $event) {
+	if( stripos($event->return, '</html>') === false ) $event->return = '';
+});
+```
+
+A CSP nonce is made per request, and a static file is served to everybody: the nonce frozen
+into it would be the same for every visitor. The hook can put a server side include in its
+place, which the web server fills with a new value on every request. The template makes the
+nonce for the PHP response:
+
+```php
+// site/templates/_init.php
+$config->cspNonce = base64_encode(random_bytes(16));
+header("Content-Security-Policy: script-src 'nonce-{$config->cspNonce}'");
+```
+
+```php
+<script nonce="<?= $config->cspNonce ?>">…</script>
+```
+
+and the hook swaps it for an SSI echo of nginx's per-request id in the file:
+
+```php
+// site/ready.php
+$wire->addHookAfter('StaticPages::fileContent', function(HookEvent $event) {
+	$nonce = (string) $event->wire()->config->cspNonce;
+	if( $nonce === '' ) return;
+	$event->return = str_replace($nonce, '<!--# echo var="request_id" -->', $event->return);
+});
+```
+
+The location that serves the static files, not the one passing requests to PHP, sends the
+matching header:
+
+```nginx
+ssi on;
+add_header Content-Security-Policy "script-src 'nonce-$request_id'" always;
+```
+
+nginx ignores the server level `add_header` lines in a location that has one of its own: repeat
+the headers of *Response headers* below in it. A second `Content-Security-Policy` sent for the
+same response applies on top of this one, and both have to allow the script.
 
 ## Installation
 
