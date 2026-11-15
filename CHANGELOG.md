@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.2 (2026-11-15)
+
+### Changes
+- **The settings form is grouped in fieldsets:** *General* (Priority), *Static* (permissions for
+  new dirs, static file name), *Non-static and exclusions* (non-static dirs and templates, tracked
+  paths, no-cache cookies), *System* (CSRF token tags, shell commands, dry run, skip logging) and
+  *Wipe* (module config saves, single field saves, wipe-all templates and fields). *Force static
+  pages deletion on module save* and *Enable this module* stay ungrouped at the bottom. Config
+  keys and stored values are unchanged; fieldset names start with `_` and are never stored.
+
 ## 0.8.1 (2026-10-20)
 
 ### Fixes

@@ -434,6 +434,35 @@ $field = $form ? $form->getChildByName('nonStaticDirs') : null;
 $formDefaults = implode("\n", $sp->wiper()->defaultNonStaticDirs());
 $config->paths->root = $tmpRootPath;
 check('the settings form offers the default list when none is stored', $field && $formDefaults !== '' && (string) $field->attr('value') === $formDefaults, $field ? json_encode((string) $field->attr('value')) : 'no field');
+
+//the settings form groups its fields in fieldsets (0.8.2), the force wipe and the main switch
+//ungrouped at the bottom. ProcessModule stores getAll(): wrappers are left out of it, so a
+//fieldset name never reaches the stored config
+$layout = array();
+if($form) foreach($form->children() as $child) {
+	$name = (string) $child->attr('name');
+	if($child instanceof InputfieldFieldset) {
+		$names = array();
+		foreach($child->children() as $c) $names[] = (string) $c->attr('name');
+		$layout[$name] = $names;
+	} else if(strpos($name, '_') !== 0 && $child->className() !== 'InputfieldSubmit') {
+		$layout[$name] = true;
+	}
+}
+$layout = array_slice($layout, -7, null, true);
+$expected = array(
+	'_general' => array('priority'),
+	'_static' => array('newDirPermissions', 'staticFile'),
+	'_exclusions' => array('nonStaticDirs', 'nonStaticTemplates', 'trackedPaths', 'noCacheCookies'),
+	'_system' => array('csrfPatterns', 'useShell', 'wipeDryRun', 'logSkips'),
+	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields'),
+	'forceWipeOnModuleSave' => true,
+	'isEnabled' => true,
+);
+check('the settings form groups fields in fieldsets, two ungrouped at the bottom', $layout === $expected, json_encode($layout));
+$stored = array();
+if($form) foreach($form->getAll() as $f) $stored[] = (string) $f->attr('name');
+check('no fieldset name is among the fields a form save stores', $stored && !array_intersect($stored, array_keys(array_filter($expected, 'is_array'))), json_encode($stored));
 $sp->set('nonStaticDirs', "site\nvendor");
 rrmdir("$tmpRoot/smoke-keep");
 
