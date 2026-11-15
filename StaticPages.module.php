@@ -455,6 +455,15 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			return;
 		}
 
+		//what is written may differ from what the visitor got: the hook sees the prepared
+		//markup and its return is the file. $event->return is never touched. Still nothing on
+		//disk: a hook refusing the render leaves no file and no directory behind
+		$content = $this->fileContent($page, $content);
+		if( !is_string($content) || $content === '' ){
+			$this->logSkip( $page, 'a fileContent hook returned nothing' );
+			return;
+		}
+
 		//a save queued an invalidation while this request was rendering: the markup may hold what
 		//the database said before it, and the drain removing stale files may have run already
 		if( $this->queue()->genChanged() ){
@@ -545,6 +554,22 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	 */
 	public function ___allowCache(Page $page) {
 		return true;
+	}
+
+	/**
+	 * The markup written to the static file of $page
+	 *
+	 * Hook it to change the stored copy only: a CSP nonce placeholder an SSI fills in, content
+	 * neutralised for everyone, a render refused as incomplete. Gets the markup after
+	 * stripCsrf(); what the visitor of this request is sent is never changed. Returns $html.
+	 *
+	 * @param Page $page The page being rendered, the one requested
+	 * @param string $html The markup about to be written
+	 * @return string What is written. Anything but a non-empty string keeps this render out of the cache
+	 *
+	 */
+	public function ___fileContent(Page $page, $html) {
+		return $html;
 	}
 
 	/**

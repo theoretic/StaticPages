@@ -362,6 +362,58 @@ publish($sp, $A);
 check('noCache(false) clears it: the file is written', is_file("$tmpRoot$Pdir/a/index.html"));
 check('with no allowCache hook attached a publish writes the file as before', !count($wire->hooks->getHooks($sp, 'allowCache')) && in_array("p:{$A->id}", tagsOf($sp, "$Pdir/a/index.html")));
 
+////  fileContent() hook (0.9.0)
+
+//the render of A as cachePage() gets it, with the event kept to read its return afterwards
+function publishEvent(StaticPages $sp, Page $page, $html) {
+	$wire = $sp->wire();
+	$wire->pages->uncacheAll();
+	$page = $wire->pages->get($page->id);
+	$wire->wire('page', $page);
+	$sp->queue()->startGen();
+	$event = new HookEvent(array('object' => $page, 'method' => 'render', 'return' => $html));
+	$sp->cachePage($event);
+	return $event;
+}
+//A's file, its index rows and its dir gone, the state before its first publish
+function unpublishA(StaticPages $sp, $tmpRoot, $Pdir) {
+	$sp->index()->dropIndexRows(array(md5("$Pdir/a/index.html")));
+	$sp->publisher()->unpublish("$tmpRoot$Pdir/a/index.html", "$tmpRoot$Pdir/a");
+}
+$markup = "<html><head><meta name=csrf-token content=tok{$A->id}><meta name=nonce content=\"{{NONCE}}\"></head><body>{$A->title}</body></html>";
+
+$event = publishEvent($sp, $A, $markup);
+check('with no fileContent hook attached the file is stripCsrf() of the render, byte for byte', !count($wire->hooks->getHooks($sp, 'fileContent')) && (string) @file_get_contents("$tmpRoot$Pdir/a/index.html") === $sp->stripCsrf($markup) && $sp->stripCsrf($markup) !== $markup, (string) @file_get_contents("$tmpRoot$Pdir/a/index.html"));
+
+$seen = array();
+$hookId = $wire->addHookAfter('StaticPages::fileContent', function(HookEvent $e) use (&$seen) {
+	$seen = array($e->arguments(0), $e->arguments(1));
+	$e->return = str_replace('{{NONCE}}', '<!--#echo var="CSP_NONCE" -->', $e->return);
+});
+unpublishA($sp, $tmpRoot, $Pdir);
+$event = publishEvent($sp, $A, $markup);
+$wire->removeHook($hookId);
+$written = (string) @file_get_contents("$tmpRoot$Pdir/a/index.html");
+check('a fileContent hook replacing a marker: the file holds the replacement', $written === str_replace('{{NONCE}}', '<!--#echo var="CSP_NONCE" -->', $sp->stripCsrf($markup)), $written);
+check('...the hook got the page and the markup after stripCsrf()', ($seen[0] ?? null) instanceof Page && $seen[0]->id === $A->id && ($seen[1] ?? null) === $sp->stripCsrf($markup));
+check('...and the render event still returns the original markup', $event->return === $markup, (string) $event->return);
+check('...and the file is indexed as usual', in_array("p:{$A->id}", tagsOf($sp, "$Pdir/a/index.html")));
+
+foreach(array("''" => '', 'null' => null) as $label => $value) {
+	unpublishA($sp, $tmpRoot, $Pdir);
+	$skipsBefore = substr_count(logText($tmp), "skip $Pdir/a/: a fileContent hook returned nothing");
+	$hookId = $wire->addHookAfter('StaticPages::fileContent', function(HookEvent $e) use ($value) { $e->return = $value; });
+	$event = publishEvent($sp, $A, $markup);
+	$wire->removeHook($hookId);
+	check("a fileContent hook returning $label: no file, no dir created, nothing indexed", !is_file("$tmpRoot$Pdir/a/index.html") && !is_dir("$tmpRoot$Pdir/a") && !count(tagsOf($sp, "$Pdir/a/index.html")), files($tmpRoot));
+	check('...and the skip is logged', substr_count(logText($tmp), "skip $Pdir/a/: a fileContent hook returned nothing") === $skipsBefore + 1);
+	check('...and the render event still returns the original markup', $event->return === $markup);
+}
+
+//A published again with no hook, as the blocks before left it
+publish($sp, $A);
+check('with the hooks removed A is published again', !count($wire->hooks->getHooks($sp, 'fileContent')) && is_file("$tmpRoot$Pdir/a/index.html") && in_array("p:{$A->id}", tagsOf($sp, "$Pdir/a/index.html")));
+
 ////  forced wipe on a temporary root
 
 function layout($tmpRoot, $Pdir) {
