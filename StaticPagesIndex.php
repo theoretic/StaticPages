@@ -225,6 +225,10 @@ class StaticPagesIndex extends Wire {
 
 		if( !$page->id ) return;
 
+		//a template listed in Never invalidate: nothing is queued, so no generation bump and no
+		//drain either. Asked once, before anything else: a repeater item counts as its owner's
+		if( !$depth && $this->ignoresSave($page) ) return;
+
 		//a repeater item is part of the content of the page owning it, and of nothing else
 		if( $page instanceof RepeaterPage ){
 			$this->sp->queue()->enqueue( StaticPages::modeTags, array("p:{$page->id}") );
@@ -303,19 +307,58 @@ class StaticPagesIndex extends Wire {
 
 	public function wipesAll(Page $page, array $changes){
 		//what no render-time record can follow: languages are loaded before this module's
-		//init(), and the operator names templates and fields whose content ends up everywhere
+		//init(), and the operator names templates and fields whose content ends up everywhere.
+		//A template in Never invalidate never gets here, see ignoresSave(): the fields below
+		//are asked after that list, the templates above before it
 
 		$template = $page->template;
 		if( !$template instanceof Template ) return true;
-		if( $this->isLanguage($page, $template) ) return true;
-
-		$templates = array_map( 'intval', (array) $this->sp->wipeAllTemplates );
-		if( in_array( (int) $template->id, $templates, true ) ) return true;
+		if( $this->wipesAllTemplate($page, $template) ) return true;
 
 		$fields = array_map( 'strtolower', $this->sp->linesToArray( $this->sp->configValue('wipeAllFields', '') ) );
 		if( !count($fields) ) return false;
 		$changed = array_map( fn($change) => strtolower( (string) $change ), $changes );
 		return count( array_intersect($fields, $changed) ) > 0;
+	}
+
+	public function wipesAllTemplate(Page $page, Template $template){
+		//a language page, or a template listed in Wipe everything on save
+		if( $this->isLanguage($page, $template) ) return true;
+		$templates = array_map( 'intval', (array) $this->sp->wipeAllTemplates );
+		return in_array( (int) $template->id, $templates, true );
+	}
+
+	public function ignoresSave(Page $page){
+		//whether a save, a deletion or a trashing of $page invalidates nothing at all: its
+		//template, or for a repeater item its owner's, is listed in Never invalidate on save.
+		//The operator signs that a page of such a template shown on a cached page stays stale
+		//there. A language page and a template also listed in Wipe everything still wipe
+		//everything: the broader rule wins, and saving the config warns about the overlap
+
+		//absent until the config is saved once: an empty list, as before the setting existed
+		$ignored = array_filter( array_map( 'intval', (array) $this->sp->configValue('ignoreTemplates', array()) ) );
+		if( !count($ignored) ) return false;
+
+		$owner = $this->saveOwner($page);
+		if( !$owner ) return false;
+
+		$template = $owner->template;
+		if( !$template instanceof Template ) return false;
+		if( $this->wipesAllTemplate($owner, $template) ) return false;
+
+		return in_array( (int) $template->id, $ignored, true );
+	}
+
+	public function saveOwner(Page $page){
+		//the page whose template decides about a save of $page: $page itself, or the page a
+		//repeater item belongs to, through nested repeaters as far as invalidatePage() follows
+		//them (10 levels). null when the chain ends before reaching one: an item without an owner
+		for( $depth = 0; $page instanceof RepeaterPage; $depth++ ){
+			$owner = $page->getForPage();
+			if( $depth >= 10 || !$owner instanceof Page || !$owner->id || $owner->id === $page->id ) return null;
+			$page = $owner;
+		}
+		return $page;
 	}
 
 	public function isLanguage(Page $page, Template $template){

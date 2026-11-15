@@ -231,6 +231,16 @@ $config = array(
 						'value'					=> '',
 					),
 
+					array(
+						'name'					=> 'ignoreTemplates',
+						'type'					=> 'AsmSelect',
+						'label'					=> $this->_('Never invalidate on save of these templates'),
+						'notes'					=> $this->_('For pages no cached page shows, saved often: orders, form entries, log pages. Saving, deleting, trashing or moving a page of a listed template removes no static file and queues nothing, and a render running meanwhile still writes its file. A repeater item counts as a page of its owner\'s template. What you sign: wherever a cached page does show a page of a listed template (a listing, a counter, a "latest" box), it stays stale until something else wipes it, and so do the static copies of its descendants after a move or a rename. A template also listed in "Wipe everything on save of these templates" still wipes everything, and so do language pages.'),
+						'columnWidth'			=> 100,
+						'options'				=> $nonStaticTemplatesOptions,
+						'value'					=> array(),
+					),
+
 				),
 			),
 

@@ -2,9 +2,9 @@
 
 /**
  * Smoke test: runs StaticPages against a bootstrapped ProcessWire install with the module
- * installed. Writes to the database (four fixture pages, the module's own tables, its config,
- * all restored or removed at the end, or from a shutdown function when the script dies before
- * it) and to a temporary directory: the site root, the cache dir and the log dir are pointed
+ * installed. Writes to the database (fixture pages with a repeater item or two, the module's
+ * own tables, its config, all restored or removed at the end, or from a shutdown function when
+ * the script dies before it) and to a temporary directory: the site root, the cache dir and the log dir are pointed
  * there right after the boot, so no file of the install is written, wiped or logged to. Only
  * the module info and module install checks run under the install's own root and cache dir,
  * where core may refresh a stale compiled module.
@@ -414,6 +414,179 @@ foreach(array("''" => '', 'null' => null) as $label => $value) {
 publish($sp, $A);
 check('with the hooks removed A is published again', !count($wire->hooks->getHooks($sp, 'fileContent')) && is_file("$tmpRoot$Pdir/a/index.html") && in_array("p:{$A->id}", tagsOf($sp, "$Pdir/a/index.html")));
 
+////  Never invalidate on save of these templates (0.9.0)
+
+//what a new request starts with: nothing queued by it, the generation not bumped by it yet.
+//The queue part remembers both for the whole process, this script is one long request
+function freshQueue(StaticPages $sp) {
+	(function() {
+		$this->genBumped = false;
+		$this->queuedTags = array();
+		$this->queuedMode = 0;
+		$this->drainRequested = false;
+	})->call($sp->queue());
+}
+function queueMaxId(StaticPages $sp) {
+	return (int) $sp->wire()->database->query('SELECT COALESCE(MAX(id), 0) FROM `' . StaticPages::tableQueue . '`')->fetchColumn();
+}
+function queueRowsAfter(StaticPages $sp, $id) {
+	$query = $sp->wire()->database->prepare('SELECT mode, tags FROM `' . StaticPages::tableQueue . '` WHERE id > :id ORDER BY id');
+	$query->bindValue(':id', (int) $id, \PDO::PARAM_INT);
+	$query->execute();
+	return $query->fetchAll(\PDO::FETCH_ASSOC);
+}
+function queuedTagsOf(array $rows) {
+	$tags = array();
+	foreach($rows as $row) foreach(explode("\n", (string) $row['tags']) as $tag) if($tag !== '') $tags[] = $tag;
+	return $tags;
+}
+//saves $page with a changed title under the given lists, from a fresh queue: what it queued
+function saveListed(StaticPages $sp, $id, array $ignore, array $wipeAll = array(), ?callable $save = null) {
+	$wire = $sp->wire();
+	$wipeAllBefore = $sp->get('wipeAllTemplates');
+	$sp->set('ignoreTemplates', $ignore);
+	$sp->set('wipeAllTemplates', $wipeAll);
+	freshQueue($sp);
+	$gen = $sp->queue()->readGen();
+	$maxId = queueMaxId($sp);
+	$wire->pages->uncacheAll();
+	$page = $wire->pages->get($id);
+	if($save) {
+		$save($page);
+	} else {
+		$page->of(false);
+		$page->title = $page->title . '+';
+		$wire->pages->save($page);
+	}
+	$out = array('gen' => $sp->queue()->readGen() !== $gen, 'rows' => queueRowsAfter($sp, $maxId), 'drain' => $sp->queue()->drainRequested());
+	$sp->remove('ignoreTemplates');
+	if($wipeAllBefore === null) $sp->remove('wipeAllTemplates');
+	else $sp->set('wipeAllTemplates', $wipeAllBefore);
+	return $out;
+}
+
+$sp->drain();
+check('the generation stamp exists before the ignore checks', is_file($sp->queue()->genPath()));
+
+$r = saveListed($sp, $A->id, array($tpl->id));
+$sp->drain();
+check('a save of a page of a listed template: the generation stays, no queue row, no drain', !$r['gen'] && !count($r['rows']) && !$r['drain'], json_encode($r));
+check('...and a file tagged p:<that page> is still on disk after drain()', is_file("$tmpRoot$Pdir/a/index.html") && in_array("p:{$A->id}", tagsOf($sp, "$Pdir/a/index.html")));
+
+$r = saveListed($sp, $A->id, array());
+$sp->drain();
+check('the same save with the list empty bumps the generation and queues p:<that page>', $r['gen'] && count($r['rows']) && in_array("p:{$A->id}", queuedTagsOf($r['rows'])) && $r['drain'], json_encode($r));
+check('...and drain() removes that file', !is_file("$tmpRoot$Pdir/a/index.html") && !count(tagsOf($sp, "$Pdir/a/index.html")), files($tmpRoot));
+
+$r = saveListed($sp, $A->id, array($tpl->id), array($tpl->id));
+check('a template in both Wipe everything and Never invalidate queues modeAll', count($r['rows']) === 1 && (int) $r['rows'][0]['mode'] === StaticPages::modeAll, json_encode($r));
+$sp->drain();
+
+$isWarning = fn($n) => $n instanceof NoticeWarning && strpos((string) $n->text, 'Never invalidate on save of these templates') !== false && strpos((string) $n->text, $tpl->name) !== false;
+$warningsBefore = count(array_filter(iterator_to_array($wire->notices), $isWarning));
+$data = $modules->getConfig('StaticPages');
+$both = $data;
+$both['ignoreTemplates'] = array($tpl->id);
+$both['wipeAllTemplates'] = array((string) $tpl->id);
+$modules->saveConfig('StaticPages', $both);
+$warned = count(array_filter(iterator_to_array($wire->notices), $isWarning)) - $warningsBefore;
+$one = $data;
+$one['ignoreTemplates'] = array($tpl->id);
+$one['wipeAllTemplates'] = array();
+$modules->saveConfig('StaticPages', $one);
+$warnedOne = count(array_filter(iterator_to_array($wire->notices), $isWarning)) - $warningsBefore - $warned;
+$modules->saveConfig('StaticPages', $data);
+check('saving the config with a template in both lists warns, naming it; one list alone does not', $warned === 1 && $warnedOne === 0, "warned $warned, then $warnedOne");
+
+//a repeater item counts as its owner's page: a nested item if the install has a repeater whose
+//items carry a repeater of their own, else a plain one
+$textOf = function($template) {
+	if($template instanceof Template) foreach($template->fieldgroup as $f) if($f->type instanceof FieldtypeText) return $f;
+	return null;
+};
+$repeatersOf = function($template) {
+	$out = array();
+	if($template instanceof Template) foreach($template->fieldgroup as $f) if($f->type instanceof FieldtypeRepeater && $f->type->className() === 'FieldtypeRepeater') $out[] = $f;
+	return $out;
+};
+$rep = null;
+foreach($wire->templates as $t) {
+	if(($t->flags & Template::flagSystem) || strpos($t->name, 'repeater_') === 0 || $t->noParents || count((array) $t->parentTemplates)) continue;
+	foreach($repeatersOf($t) as $f) {
+		$itemTpl = $wire->templates->get((int) $f->get('template_id'));
+		if(!$textOf($itemTpl)) continue;
+		$inner = null;
+		foreach($repeatersOf($itemTpl) as $g) if($textOf($wire->templates->get((int) $g->get('template_id')))) { $inner = $g; break; }
+		if($inner) { $rep = array($t, $f, $inner); break 2; }
+		if(!$rep) $rep = array($t, $f, null);
+	}
+}
+if($rep) {
+	list($repTpl, $outerField, $innerField) = $rep;
+	$R = new Page();
+	$R->template = $repTpl;
+	$R->parent = $P;
+	$R->name = 'r';
+	$R->title = 'R';
+	$pages->save($R);
+	$fixtures[] = $R;
+	$R->of(false);
+	$item = $R->get($outerField->name)->getNew();
+	$item->set($textOf($item->template)->name, 'outer');
+	$item->save();
+	$R->save($outerField->name);
+	if($innerField) {
+		$item->of(false);
+		$leaf = $item->get($innerField->name)->getNew();
+		$leaf->set($textOf($leaf->template)->name, 'inner');
+		$leaf->save();
+		$item->save($innerField->name);
+	} else {
+		$leaf = $item;
+	}
+	$sp->drain();
+	$leafId = $leaf->id;
+	$label = ($innerField ? "a nested repeater item ({$outerField->name}.{$innerField->name})" : "a repeater item ({$outerField->name})") . " of a {$repTpl->name} page";
+	$saveLeaf = function(Page $page) use ($pages, $textOf) {
+		$page->of(false);
+		$name = $textOf($page->template)->name;
+		$page->set($name, $page->get($name) . '+');
+		$pages->save($page);
+	};
+	$r = saveListed($sp, $leafId, array($repTpl->id), array(), $saveLeaf);
+	check("$label, the owner's template listed: nothing queued, no generation bump", $leaf instanceof RepeaterPage && !$r['gen'] && !count($r['rows']) && !$r['drain'], json_encode($r));
+	$r = saveListed($sp, $leafId, array(), array(), $saveLeaf);
+	$tags = queuedTagsOf($r['rows']);
+	check('...the same save with the list empty queues the item and its owner', in_array("p:$leafId", $tags) && in_array("p:{$R->id}", $tags) && in_array("t:{$repTpl->id}", $tags), implode(',', $tags));
+	$r = saveListed($sp, $leafId, array($tpl->id), array(), $saveLeaf);
+	check('...and with only another template listed as well', in_array("p:{$R->id}", queuedTagsOf($r['rows'])), json_encode($r));
+	$sp->drain();
+} else {
+	echo "skip the repeater checks: no template here carries a repeater field with a text field in its items and takes any parent\n";
+}
+
+//trashing: the descendants change status in SQL alone, hookTrashed() queues modeAll for them
+$T = $mk($P, 't', 'T');
+$mk($T, 't1', 'T1');
+$U = $mk($P, 'u', 'U');
+$mk($U, 'u1', 'U1');
+$sp->drain();
+$trash = fn($page) => $pages->trash($page);
+$r = saveListed($sp, $T->id, array($tpl->id), array(), $trash);
+check('trashing a page with children of a listed template queues nothing', $pages->get($T->id)->isTrash() && !count($r['rows']) && !$r['gen'] && !$r['drain'], json_encode($r));
+$r = saveListed($sp, $U->id, array(), array(), $trash);
+check('...trashing one with the list empty queues modeAll', $pages->get($U->id)->isTrash() && in_array(StaticPages::modeAll, array_map(fn($row) => (int) $row['mode'], $r['rows']), true), json_encode($r));
+$sp->drain();
+
+//the queue part as a new request has it: the modeAll queued above would otherwise keep every
+//later save of this script from queueing tags (a request queues nothing below what it queued)
+freshQueue($sp);
+
+//the files the blocks below expect, as they were before this block
+publish($sp, $A);
+publish($sp, $B);
+check('A and B are published again after the ignore checks', is_file("$tmpRoot$Pdir/a/index.html") && is_file("$tmpRoot$Pdir/b/index.html"));
+
 ////  forced wipe on a temporary root
 
 function layout($tmpRoot, $Pdir) {
@@ -598,7 +771,7 @@ $expected = array(
 	'_static' => array('newDirPermissions', 'staticFile'),
 	'_exclusions' => array('nonStaticDirs', 'nonStaticTemplates', 'trackedPaths', 'noCacheCookies'),
 	'_system' => array('csrfPatterns', 'useShell', 'wipeDryRun', 'logSkips'),
-	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields'),
+	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields', 'ignoreTemplates'),
 	'forceWipeOnModuleSave' => true,
 	'isEnabled' => true,
 );

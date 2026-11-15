@@ -312,8 +312,12 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	public function hookTrashed($event) {
 		//the page itself was saved and handled by hookSaved(). Its descendants changed status in
-		//SQL alone: no save, no hook, and a listing of them elsewhere never loaded the page
-		if( (int) $event->arguments(0)->numChildren > 0 ) return $this->queue()->enqueue(self::modeAll);
+		//SQL alone: no save, no hook, and a listing of them elsewhere never loaded the page. A
+		//template listed in Never invalidate on save queues nothing here either
+		$page = $event->arguments(0);
+		if( (int) $page->numChildren < 1 ) return;
+		if( $this->index()->ignoresSave($page) ) return;
+		return $this->queue()->enqueue(self::modeAll);
 	}
 
 	public function hookConfigInputfields($event) {
@@ -350,6 +354,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			if( !is_array( $event->arguments(1) ) ) return;
 			$this->wiper()->warnPageDirsProtected( $event->arguments(1) );
 			$this->publisher()->warnInvalidCsrfPatterns( $event->arguments(1) );
+			$this->warnIgnoredWipeAll( $event->arguments(1) );
 			if( !$this->wire()->input->post('forceWipeOnModuleSave') ) return;
 			//full disk scan: also catches files the manifest does not know about. With Dry run
 			//checked it only lists them
@@ -787,6 +792,26 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( is_object($class) ) return $class->className();
 		if( ctype_digit( (string) $class ) ) return (string) $this->wire()->modules->getModuleClass( (int) $class );
 		return (string) $class;
+	}
+
+	private function warnIgnoredWipeAll($data){
+		//a template in both lists wipes everything on save, see StaticPagesIndex::ignoresSave():
+		//the operator learns on the save that Never invalidate does nothing for it
+		if( !isset($data['ignoreTemplates'], $data['wipeAllTemplates']) ) return;
+		$both = array_intersect(
+			array_filter( array_map( 'intval', (array) $data['ignoreTemplates'] ) ),
+			array_filter( array_map( 'intval', (array) $data['wipeAllTemplates'] ) )
+			);
+		if( !count($both) ) return;
+		$names = array();
+		foreach( array_unique($both) as $id ){
+			$template = $this->wire()->templates->get($id);
+			$names[] = $template instanceof Template ? $template->name : "#$id";
+		}
+		$this->warning( sprintf(
+			$this->_('Templates listed in both "Wipe everything on save of these templates" and "Never invalidate on save of these templates": %s. A save of their pages wipes everything, the broader rule wins.'),
+			implode(', ', $names)
+			) );
 	}
 
 	private function wipeOnConfigSaveModulesArray(){
