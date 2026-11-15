@@ -2,10 +2,12 @@
 
 /**
  * Smoke test: runs StaticPages against a bootstrapped ProcessWire install with the module
- * installed. Writes to the database (three fixture pages, the module's own tables, its config,
- * all restored or removed at the end) and to a temporary directory: the site root, the cache
- * dir and the log dir are pointed there right after the boot, so no file of the install is
- * written, wiped or logged to.
+ * installed. Writes to the database (four fixture pages, the module's own tables, its config,
+ * all restored or removed at the end, or from a shutdown function when the script dies before
+ * it) and to a temporary directory: the site root, the cache dir and the log dir are pointed
+ * there right after the boot, so no file of the install is written, wiped or logged to. Only
+ * the module info and module install checks run under the install's own root and cache dir,
+ * where core may refresh a stale compiled module.
  *
  * Usage: php tests/smoke.php /path/to/pw/webroot
  *
@@ -42,6 +44,14 @@ $database = $wire->database;
 
 if(!$modules->isInstalled('StaticPages')) exit("StaticPages is not installed on this site\n");
 
+//both read before the temporary root below: core finds module files through paths->root.
+//The version of the files under test, from StaticPages.info.php rather than the info cache,
+//which may still hold the version of another copy. The config to restore at the end: with no
+//module info cache core looks for the module's config file before loading it, finds none
+//under the temporary root and answers an empty array, which the cleanup then stored
+$info = $modules->getModuleInfoVerbose('StaticPages', array('noCache' => true));
+$configAtStart = $modules->getConfig('StaticPages');
+
 //everything on disk goes to a temporary dir from here on
 //TEMP rather than sys_get_temp_dir(): a PHP build may keep its temp dir inside the sites tree
 $tmpBase = getenv('STATICPAGES_SMOKE_TMP') ?: (getenv('TMPDIR') ?: (getenv('TEMP') ?: (getenv('TMP') ?: sys_get_temp_dir())));
@@ -49,15 +59,22 @@ $tmpReal = str_replace('\\', '/', (string) realpath($tmpBase));
 if($tmpReal === '' || stripos($tmpReal, '/work/sites/') !== false || stripos($tmpReal, 'Z:/home') === 0) exit("Temp dir '$tmpBase' is missing or inside the sites tree: set STATICPAGES_SMOKE_TMP\n");
 $tmp = rtrim($tmpReal, '/') . '/staticpages-smoke-' . getmypid();
 foreach(array('root', 'cache', 'logs') as $dir) @mkdir("$tmp/$dir", 0777, true);
+$realPaths = array('root' => $config->paths->root, 'cache' => $config->paths->cache);
 $config->paths->root = "$tmp/root/";
 $config->paths->cache = "$tmp/cache/";
 $config->paths->logs = "$tmp/logs/";
 $tmpRoot = "$tmp/root";
 
+//the install's own root and cache dir for the few core calls that need them (module files,
+//compiled modules); false points both at the temporary dir again. Logs stay there either way
+function realPaths($real) {
+	global $config, $realPaths, $tmp;
+	$config->paths->root = $real ? $realPaths['root'] : "$tmp/root/";
+	$config->paths->cache = $real ? $realPaths['cache'] : "$tmp/cache/";
+}
+
 /** @var StaticPages $sp */
 $sp = $modules->get('StaticPages');
-$configAtStart = $modules->getConfig('StaticPages');
-$info = $modules->getModuleInfoVerbose('StaticPages');
 echo "PW {$config->version}, StaticPages {$info['versionStr']} from " . dirname((new \ReflectionClass($sp))->getFileName()) . "\n";
 echo "temp dir $tmp\n\n";
 
@@ -195,6 +212,38 @@ check('header skip: Vary Accept-Language', strpos($p->headerSkip(array('Vary: Ac
 $home = $pages->get('/');
 $tpl = $wire->templates->get('default') ?: $home->template;
 $fixtures = array();
+
+//removes the fixture pages and puts the module config back. Called at the end, and from a
+//shutdown function when a fatal error or an exit() ends the script before that: a PHP fatal
+//still runs the shutdown functions, this one ahead of the module's drain (which the module
+//registers from inside the shutdown sequence, so behind every function registered before)
+$cleanedUp = false;
+function cleanup() {
+	global $wire, $sp, $fixtures, $configAtStart, $cleanedUp;
+	if($cleanedUp) return;
+	$cleanedUp = true;
+	//the script may have died while the install's own root was in use
+	realPaths(false);
+	$pages = $wire->pages;
+	foreach(array_reverse($fixtures) as $f) if($f->id && $pages->get($f->id)->id) $pages->delete($pages->get($f->id), true);
+	$sp->drain();
+	$wire->modules->configs->saveConfig('StaticPages', $configAtStart);
+	//the restored config may say the migration is pending; this process ran it on the temp root
+	$sp->set('configVersion', StaticPages::configVersion);
+}
+register_shutdown_function(function() {
+	global $cleanedUp, $fails, $tmp;
+	if($cleanedUp) return;
+	$fails++;
+	echo "\nFAIL the script ended before its last check: removing the fixture pages\n";
+	try {
+		cleanup();
+		echo "fixture pages removed, module config restored; temp dir kept: $tmp\n";
+	} catch(\Throwable $t) {
+		echo 'FAIL cleanup: ' . $t->getMessage() . "\n";
+	}
+});
+
 $mk = function($parent, $name, $title) use ($pages, $tpl, &$fixtures) {
 	$p = new Page();
 	$p->template = $tpl;
@@ -400,20 +449,37 @@ check('Page::render hook on the module object at its priority', $hooked !== null
 
 //core includes StaticPages.config.php whenever it builds module info; 0.8.0 asked for the module
 //from there and recursed until memory ran out on a module install or a cleared info cache (its
-//`refreshing` guard covered a refresh only). A recursion ends this script with a fatal error
-$modules->info->clearModuleInfoCache();
-check('clearing the module info cache returns', $modules->isInstalled('StaticPages'));
-$probe = '';
-foreach(array('TextformatterNewlineBR', 'TextformatterNewlineUL', 'TextformatterPstripper', 'TextformatterStripTags') as $name) {
-	if($modules->isInstallable($name) && !$modules->isInstalled($name)) { $probe = $name; break; }
-}
-if($probe) {
-	$modules->install($probe);
-	$installed = $modules->isInstalled($probe);
-	$modules->uninstall($probe);
-	check("a module install and uninstall return ($probe)", $installed && !$modules->isInstalled($probe));
+//`refreshing` guard covered a refresh only). A recursion ends this script with a fatal error.
+//Run under the install's own root and cache dir: core finds module files, StaticPages.config.php
+//among them, through paths->root. Under the temporary root it found none, so the config file
+//was never included here; it also took a root namespace module already in memory (a compiled
+//SettingsFactory) for one in ProcessWire's, compiled it again under the temporary cache and
+//died on "Cannot redeclare class". Nothing below writes under the root: a wipe these calls
+//queue is drained later, on the temporary root. Without index tables a queued wipe would run
+//at once, on the real root: the block is skipped then
+if($sp->index()->ensureTables()) {
+	realPaths(true);
+	$modules->info->clearModuleInfoCache();
+	$cleared = $modules->isInstalled('StaticPages');
+	$probe = '';
+	foreach(array('TextformatterNewlineBR', 'TextformatterNewlineUL', 'TextformatterPstripper', 'TextformatterStripTags') as $name) {
+		if($modules->isInstallable($name) && !$modules->isInstalled($name)) { $probe = $name; break; }
+	}
+	if($probe) {
+		$modules->install($probe);
+		$installed = $modules->isInstalled($probe);
+		$modules->uninstall($probe);
+		$uninstalled = !$modules->isInstalled($probe);
+	}
+	realPaths(false);
+	check('clearing the module info cache returns', $cleared);
+	if($probe) {
+		check("a module install and uninstall return ($probe)", $installed && $uninstalled);
+	} else {
+		echo "skip a module install and uninstall: no uninstalled core textformatter to try\n";
+	}
 } else {
-	echo "skip a module install and uninstall: no uninstalled core textformatter to try\n";
+	echo "skip clearing the module info cache, a module install and uninstall: no index tables, a wipe they queued would run on the install's own root\n";
 }
 
 //no stored nonStaticDirs reaches the module as '' (the config file's default): that is the
@@ -468,11 +534,7 @@ rrmdir("$tmpRoot/smoke-keep");
 
 ////  cleanup
 
-foreach(array_reverse($fixtures) as $f) if($f->id) $pages->delete($pages->get($f->id), true);
-$sp->drain();
-$modules->configs->saveConfig('StaticPages', $configAtStart);
-//the restored config may say the migration is pending; this process ran it on the temp root
-$sp->set('configVersion', StaticPages::configVersion);
+cleanup();
 rrmdir($tmp);
 
 echo "\n" . ($fails ? "$fails FAILED" : 'all passed') . "\n";
