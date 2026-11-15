@@ -337,6 +337,31 @@ publish($sp, $A);
 check('an invalid static file name writes nothing', !is_file("$tmpRoot$Pdir/a/index.html") && strpos(files($tmpRoot), '*') === false);
 $sp->set('staticFile', 'index.html');
 
+////  allowCache() hook and noCache() (0.9.0)
+
+$hookId = $wire->addHookAfter('StaticPages::allowCache', function(HookEvent $e) { $e->return = false; });
+publish($sp, $A);
+$wire->removeHook($hookId);
+check('an allowCache hook returning false: no file, no dir left behind', !is_file("$tmpRoot$Pdir/a/index.html") && !is_dir("$tmpRoot$Pdir/a"), files($tmpRoot));
+check('...and the skip is logged', strpos(logText($tmp), "skip $Pdir/a/: refused by an allowCache hook") !== false);
+
+$allowCalls = 0;
+$hookId = $wire->addHookAfter('StaticPages::allowCache', function(HookEvent $e) use (&$allowCalls) { $allowCalls++; $e->return = true; });
+$wire->input->get->set('smoke', '1');
+publish($sp, $A);
+$wire->input->get->remove('smoke');
+$wire->removeHook($hookId);
+check('a render with a GET parameter is not published, the allowCache hook is never asked', !is_file("$tmpRoot$Pdir/a/index.html") && $allowCalls === 0, "hook called $allowCalls times");
+
+$sp->noCache('cart in session');
+publish($sp, $A);
+check('noCache(reason): no file', !is_file("$tmpRoot$Pdir/a/index.html") && !is_dir("$tmpRoot$Pdir/a"));
+check('...and the reason is logged', strpos(logText($tmp), "skip $Pdir/a/: noCache() was called: cart in session") !== false);
+$sp->noCache(false);
+publish($sp, $A);
+check('noCache(false) clears it: the file is written', is_file("$tmpRoot$Pdir/a/index.html"));
+check('with no allowCache hook attached a publish writes the file as before', !count($wire->hooks->getHooks($sp, 'allowCache')) && in_array("p:{$A->id}", tagsOf($sp, "$Pdir/a/index.html")));
+
 ////  forced wipe on a temporary root
 
 function layout($tmpRoot, $Pdir) {

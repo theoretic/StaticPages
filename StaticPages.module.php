@@ -36,6 +36,9 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	private $adminRequest = false;
 
+	//set by noCache(): false, true, or the reason given as a string. Lives as long as the request
+	private $noCache = false;
+
 	//the dependency index, see StaticPagesIndex::ensureTables()
 	const tableFiles = 'static_pages_files';
 	const tableTags = 'static_pages_tags';
@@ -428,6 +431,17 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//skipping paginated pages: pageNum is not part of urlSegmentStr, page 1 would be overwritten
 		if( (int) $this->wire()->input->pageNum > 1 ) return;
 
+		//site code may only veto: neither noCache() nor an allowCache hook is asked about a
+		//render one of the checks above refused already
+		if( $this->noCache !== false ){
+			$this->logSkip( $page, 'noCache() was called' . ( is_string($this->noCache) && $this->noCache !== '' ? ": {$this->noCache}" : '' ) );
+			return;
+		}
+		if( !$this->allowCache($page) ){
+			$this->logSkip( $page, 'refused by an allowCache hook' );
+			return;
+		}
+
 		//caching url segments independently
 		$urlSegmentStr = $this->wire()->input->urlSegmentStr;
 
@@ -516,6 +530,40 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 		//something new is on disk again, the next save has to wipe it
 		$this->queue()->noteCached();
+	}
+
+	/**
+	 * Whether the render of $page may be written to a static file
+	 *
+	 * Hook it to keep renders out of the cache that depend on something no URL shows: session
+	 * state, a URL segment, a request flag. Asked only for a render every built-in check
+	 * already accepted, so a hook can veto, never force a file. Returns true.
+	 *
+	 * @param Page $page The page being rendered, the one requested
+	 * @return bool False keeps this render out of the cache
+	 *
+	 */
+	public function ___allowCache(Page $page) {
+		return true;
+	}
+
+	/**
+	 * Keep the current request's render out of the cache
+	 *
+	 * For template code: `$modules->get('StaticPages')->noCache('cart in session');`. The
+	 * reason, when a string, is written to the skip log. noCache(false) clears it again.
+	 *
+	 * @param bool|string $reason
+	 * @return $this
+	 *
+	 */
+	public function noCache($reason = true) {
+		if( $reason === false ){
+			$this->noCache = false;
+			return $this;
+		}
+		$this->noCache = is_string($reason) ? $reason : true;
+		return $this;
 	}
 
 	public function stripCsrf($html) {
