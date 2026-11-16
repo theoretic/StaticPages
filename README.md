@@ -61,6 +61,13 @@ stamp stays, no drain runs. A repeater item counts as a page of its owner's temp
 nested repeaters. A field listed in *Wipe everything on change of these fields* changing on such
 a page wipes nothing either.
 
+A template change is judged by both templates. Moving a page into a listed template from one
+that is not listed still invalidates once, as it would with the list empty: until that save
+cached pages could show it. Saves of the page after that are ignored; ProcessWire keeps
+reporting the old template on that page object for the rest of the request, though, so a
+further save of it in the same request invalidates as well. Moving a page out of the list
+invalidates as usual. A change between two listed templates queues nothing.
+
 What you sign by listing a template:
 
 - wherever a cached page does show a page of that template (a listing, a counter, a "latest"

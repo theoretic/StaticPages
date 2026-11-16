@@ -345,8 +345,19 @@ class StaticPagesIndex extends Wire {
 		$template = $owner->template;
 		if( !$template instanceof Template ) return false;
 		if( $this->wipesAllTemplate($owner, $template) ) return false;
+		if( !in_array( (int) $template->id, $ignored, true ) ) return false;
 
-		return in_array( (int) $template->id, $ignored, true );
+		//a page given a listed template by this save was a page of another template until now,
+		//and cached pages may show it as one: judged by both sides, as listingTags() does. Core
+		//keeps templatePrevious on the page object for the rest of the request, so a later save
+		//of the same object there invalidates as well, which errs on the side of a wipe
+		$previous = $owner->templatePrevious;
+		if( $previous instanceof Template && (int) $previous->id !== (int) $template->id ){
+			if( !in_array( (int) $previous->id, $ignored, true ) ) return false;
+			if( $this->wipesAllTemplate($owner, $previous) ) return false;
+		}
+
+		return true;
 	}
 
 	public function saveOwner(Page $page){

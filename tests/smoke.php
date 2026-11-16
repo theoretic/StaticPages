@@ -578,6 +578,74 @@ $r = saveListed($sp, $U->id, array(), array(), $trash);
 check('...trashing one with the list empty queues modeAll', $pages->get($U->id)->isTrash() && in_array(StaticPages::modeAll, array_map(fn($row) => (int) $row['mode'], $r['rows']), true), json_encode($r));
 $sp->drain();
 
+//a template change is judged by both sides: a page given a listed template was a page of an
+//unlisted one until that save, and cached pages may show it as one
+$other = null;
+foreach($wire->templates as $t) {
+	if($t->id == $tpl->id || ($t->flags & Template::flagSystem) || strpos($t->name, 'repeater_') === 0 || $t->noParents || count((array) $t->parentTemplates) || $t->noChangeTemplate) continue;
+	$other = $t;
+	break;
+}
+if($other) {
+	$C = $mk($P, 'c', 'C');
+	$sp->drain();
+	publish($sp, $C);
+	$Cfile = "$tmpRoot$Pdir/c/index.html";
+	$kept = null;
+	//the page object saved last, for a second save of the same object
+	$setTemplate = function(Template $template) use ($pages, &$kept) {
+		return function(Page $page) use ($pages, $template, &$kept) {
+			$page->of(false);
+			$page->template = $template;
+			$pages->save($page);
+			$kept = $page;
+		};
+	};
+	$retitle = function(Page $page) use ($pages) {
+		$page->of(false);
+		$page->title = $page->title . '+';
+		$pages->save($page);
+	};
+	$X = $tpl->id;
+	$Y = $other->id;
+	$templateOf = fn() => (int) $pages->getFresh($C->id)->template->id;
+	check("C ({$tpl->name}) is published before the template changes", is_file($Cfile) && in_array("p:{$C->id}", tagsOf($sp, "$Pdir/c/index.html")));
+
+	//unlisted to listed
+	$r = saveListed($sp, $C->id, array($Y), array(), $setTemplate($other));
+	$tags = queuedTagsOf($r['rows']);
+	check("a page given a listed template ({$tpl->name} to {$other->name}) queues p:<it> and t:<old template>, bumps the generation", $templateOf() === $Y && $r['gen'] && $r['drain'] && in_array("p:{$C->id}", $tags) && in_array("t:$X", $tags), json_encode($r));
+	$sp->drain();
+	check('...and drain() removes its own copy, rendered with the old template', !is_file($Cfile) && !count(tagsOf($sp, "$Pdir/c/index.html")), files($tmpRoot));
+	$r = saveListed($sp, $C->id, array($Y), array(), function() use ($pages, &$kept) {
+		$kept->title = $kept->title . '+';
+		$pages->save($kept);
+	});
+	check('...a further save of the same page object in that request queues p:<it> again (core keeps templatePrevious)', in_array("p:{$C->id}", queuedTagsOf($r['rows'])), json_encode($r));
+	$sp->drain();
+	$r = saveListed($sp, $C->id, array($Y), array(), $retitle);
+	check('...a save of it loaded afresh queues nothing', !count($r['rows']) && !$r['gen'] && !$r['drain'], json_encode($r));
+
+	//listed to listed
+	$r = saveListed($sp, $C->id, array($X, $Y), array(), $setTemplate($tpl));
+	check('a template change between two listed templates queues nothing', $templateOf() === $X && !count($r['rows']) && !$r['gen'] && !$r['drain'], json_encode($r));
+
+	//listed to unlisted, as before
+	$r = saveListed($sp, $C->id, array($X), array(), $setTemplate($other));
+	$tags = queuedTagsOf($r['rows']);
+	check('a page given an unlisted template from a listed one queues p:<it>, t:<old> and t:<new>', $templateOf() === $Y && in_array("p:{$C->id}", $tags) && in_array("t:$X", $tags) && in_array("t:$Y", $tags), json_encode($r));
+	$sp->drain();
+
+	//the old template in both lists: Wipe everything wins over Never invalidate on that side too
+	$r = saveListed($sp, $C->id, array($X, $Y), array($Y), $setTemplate($tpl));
+	$tags = queuedTagsOf($r['rows']);
+	check('a page leaving a template listed in both lists for a listed one queues p:<it> and t:<old>', $templateOf() === $X && in_array("p:{$C->id}", $tags) && in_array("t:$Y", $tags), json_encode($r));
+	$sp->drain();
+	$kept = null;
+} else {
+	echo "skip the template change checks: no second template here takes any parent and allows a template change\n";
+}
+
 //the queue part as a new request has it: the modeAll queued above would otherwise keep every
 //later save of this script from queueing tags (a request queues nothing below what it queued)
 freshQueue($sp);
