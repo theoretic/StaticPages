@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.1 (2026-11-16)
+
+### Fixed
+- **A save after `drain()` in the same request queued nothing.** The queue remembered for the
+  whole PHP process what it had queued and that it had bumped the generation stamp, so a bulk
+  save loop inserts each tag once. A deploy script or CLI tool that queued all files (or some
+  tags), called `$modules->get('StaticPages')->drain()` and then saved pages queued nothing for
+  those saves and left their static files stale. `drain()` forgets that memory: the next save
+  queues its row and changes the generation stamp again, so a render that read the database
+  before that save does not publish. Saves with no drain between them still queue each tag once.
+
+### Tests
+- `tests/smoke.php` saves a page after `drain()` in a request that queued all files, and saves it
+  again after the next `drain()`: each save queues its row, changes the generation stamp and
+  loses its file to the drain. The checks after it no longer reset the queue by hand.
+
 ## 0.9.0 (2026-11-15)
 
 Additions asked for in [issue #1](https://github.com/theoretic/StaticPages/issues/1). Nothing

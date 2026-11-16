@@ -646,14 +646,58 @@ if($other) {
 	echo "skip the template change checks: no second template here takes any parent and allows a template change\n";
 }
 
-//the queue part as a new request has it: the modeAll queued above would otherwise keep every
-//later save of this script from queueing tags (a request queues nothing below what it queued)
-freshQueue($sp);
-
 //the files the blocks below expect, as they were before this block
 publish($sp, $A);
 publish($sp, $B);
 check('A and B are published again after the ignore checks', is_file("$tmpRoot$Pdir/a/index.html") && is_file("$tmpRoot$Pdir/b/index.html"));
+
+////  a save after drain() in the same request (0.9.1)
+
+//the queue part remembers what this request queued, so a bulk save loop inserts each tag once
+//and bumps the generation once. drain() takes those rows: a deploy script or CLI saving pages
+//after it has to queue, and bump, again. No freshQueue() from here on, drain() alone does it
+function saveTitle(StaticPages $sp, $id) {
+	$pages = $sp->wire()->pages;
+	$pages->uncacheAll();
+	$page = $pages->get($id);
+	$page->of(false);
+	$page->title = $page->title . '+';
+	$pages->save($page);
+}
+$Afile = "$tmpRoot$Pdir/a/index.html";
+
+$sp->queue()->enqueue(StaticPages::modeAll);
+$sp->drain();
+publish($sp, $A);
+$sp->queue()->startGen();
+$maxId = queueMaxId($sp);
+saveTitle($sp, $A->id);
+$r = queueRowsAfter($sp, $maxId);
+check('a save after drain() in a request that queued modeAll queues p:<that page>', is_file($Afile) && in_array("p:{$A->id}", queuedTagsOf($r)) && $sp->queue()->drainRequested(), json_encode($r));
+check('...and bumps the generation: a render that read the database before it does not publish', $sp->queue()->genChanged());
+$sp->drain();
+check('...and drain() removes that file', !is_file($Afile) && !count(tagsOf($sp, "$Pdir/a/index.html")), files($tmpRoot));
+
+publish($sp, $A);
+$sp->queue()->startGen();
+$maxId = queueMaxId($sp);
+saveTitle($sp, $A->id);
+$r = queueRowsAfter($sp, $maxId);
+check('a second save of the same page after drain() queues p:<it> again', is_file($Afile) && in_array("p:{$A->id}", queuedTagsOf($r)), json_encode($r));
+check('...and bumps the generation again', $sp->queue()->genChanged());
+$sp->drain();
+check('...and drain() removes the file published in between', !is_file($Afile) && !count(tagsOf($sp, "$Pdir/a/index.html")), files($tmpRoot));
+
+$maxId = queueMaxId($sp);
+saveTitle($sp, $A->id);
+saveTitle($sp, $A->id);
+$r = queueRowsAfter($sp, $maxId);
+check('two saves of one page with no drain() between still queue p:<it> once', count(array_keys(queuedTagsOf($r), "p:{$A->id}")) === 1, json_encode($r));
+$sp->drain();
+
+//the files the blocks below expect
+publish($sp, $A);
+check('A is published again after the drain() checks', is_file($Afile));
 
 ////  forced wipe on a temporary root
 

@@ -25,7 +25,8 @@ class StaticPagesQueue extends Wire {
 	protected $genAtStart = '';
 	protected $genBumped = false;
 
-	//what this request queued already: a bulk save loop must not insert the same tags again
+	//what this request queued already: a bulk save loop must not insert the same tags again.
+	//Forgotten by drain(), see forgetQueued()
 	protected $queuedTags = array();
 	protected $queuedMode = 0;
 	protected $drainRequested = false;
@@ -54,6 +55,10 @@ class StaticPagesQueue extends Wire {
 		//database, so two sites sharing a server do not wait for each other
 
 		if( !$this->sp->index()->ensureTables() ) return;
+
+		//whatever this request queued so far is this drain's, or the one holding the lock: a save
+		//after it queues, and bumps the generation, again
+		$this->forgetQueued();
 
 		$database = $this->wire()->database;
 		$lock = $this->sp->index()->lockName('drain');
@@ -116,6 +121,16 @@ class StaticPagesQueue extends Wire {
 		$what = isset($modes[StaticPages::modeScan]) ? 'full scan' : ( isset($modes[StaticPages::modeAll]) ? 'all files' : "$tagCount tag(s)" );
 		$duration = round( microtime(true)-$start, 2 );
 		$this->sp->logDrain( "$what: " . $this->sp->wiper()->describeWipe( $total['scan'] ? null : $total ) . " $duration s" );
+	}
+
+	public function forgetQueued(){
+		//the per request memory of enqueue(). Kept until a drain takes the rows it stands for: a
+		//row deleted by a drain is no longer there to cover a later save of the same request, and
+		//a render started after that drain read the database under the new generation. Forgetting
+		//too early only queues a row twice, forgetting too late leaves a stale file
+		$this->queuedTags = array();
+		$this->queuedMode = 0;
+		$this->genBumped = false;
 	}
 
 	public function shutdownDrain($adminRequest){
