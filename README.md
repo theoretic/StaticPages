@@ -66,18 +66,27 @@ that is not listed still invalidates once, as it would with the list empty: unti
 cached pages could show it. Saves of the page after that are ignored; ProcessWire keeps
 reporting the old template on that page object for the rest of the request, though, so a
 further save of it in the same request invalidates as well. Moving a page out of the list
-invalidates as usual. A change between two listed templates queues nothing.
+invalidates as usual. A change between two listed templates queues nothing, but for the
+repeater container below.
+
+One exception to "queues nothing": ProcessWire keeps a page's repeater items under an admin page
+of their own (`…/repeaters/for-field-N/for-page-<id>/`). Deleting a listed page that has repeater
+items, or changing its template to one without that repeater field, deletes this container too,
+and its deletion is judged by its own template, which is not listed: one queue row
+(`p:<container id>`), one change of the generation stamp, one drain. That drain deletes a file
+only where a render loaded the container page itself, which a render of a page that never
+stored a value for the repeater field does.
 
 What you sign by listing a template:
 
 - wherever a cached page does show a page of that template (a listing, a counter, a "latest"
   box, a page reference), that copy stays stale until something else deletes it: a save the
   copy depends on, a wipe of everything, `wipeCaches()`;
-- the page's own static copy is not deleted either. List the template in *Non-static page
-  templates* as well when guests can open its pages;
-- deleting, moving or renaming such a page deletes nothing, so the static copies of its
-  descendants stay where they are, under their old urls. Trashing or restoring one with
-  children deletes nothing either.
+- the page's own static copy is not deleted either (but for the repeater container above). List
+  the template in *Non-static page templates* as well when guests can open its pages;
+- deleting, moving or renaming such a page deletes nothing (but for the repeater container
+  above), so the static copies of its descendants stay where they are, under their old urls.
+  Trashing or restoring one with children deletes nothing either.
 
 A template also listed in *Wipe everything on save of these templates* still wipes everything,
 the broader rule wins, and saving the settings warns about it. Language pages always wipe

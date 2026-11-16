@@ -24,8 +24,12 @@ changes for a site that uses none of them: no config key, table or file changes 
   every such save used to delete every file whose render ran a find with no template or parent
   limit. A cached page that shows a page of a listed template stays stale, and so do the page's
   own copy and, after a move or a rename, the copies of its descendants; see *Templates whose
-  saves invalidate nothing* in the README. A template also in *Wipe everything on save of these
-  templates* still wipes everything, and the settings save warns about it.
+  saves invalidate nothing* in the README. A save that moves a page into a listed template from
+  one that is not listed still invalidates once. Deleting a listed page with repeater items, or a
+  template change that drops a repeater field, still queues one row for ProcessWire's repeater
+  container page: the generation stamp changes once and one drain runs, deleting a file only
+  where a render loaded that container page. A template also in *Wipe everything on save of
+  these templates* still wipes everything, and the settings save warns about it.
 
 ### Tests
 - `tests/smoke.php` runs to its end on a sandbox with compiled modules: the module info and
