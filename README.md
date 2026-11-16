@@ -70,12 +70,14 @@ invalidates as usual. A change between two listed templates queues nothing, but 
 repeater container below.
 
 One exception to "queues nothing": ProcessWire keeps a page's repeater items under an admin page
-of their own (`…/repeaters/for-field-N/for-page-<id>/`). Deleting a listed page that has repeater
-items, or changing its template to one without that repeater field, deletes this container too,
-and its deletion is judged by its own template, which is not listed: one queue row
-(`p:<container id>`), one change of the generation stamp, one drain. That drain deletes a file
-only where a render loaded the container page itself, which a render of a page that never
-stored a value for the repeater field does.
+of their own (`…/repeaters/for-field-N/for-page-<id>/`), created when the page is saved, with or
+without items, unless the field's *lazy parents* option is on. Deleting a listed page whose
+template carries a repeater field, or changing its template to one without that repeater field,
+deletes this container too, and its deletion is judged by its own template, which is not listed:
+one queue row (`p:<container id>`), one change of the generation stamp, one drain. That drain
+deletes the files whose render loaded the container page itself (a render of the page does where
+its stored value for the repeater field names no container) and, as every drain does, the files
+tagged `*`: more than 5000 dependencies, adopted files, files a delete failed on.
 
 What you sign by listing a template:
 
