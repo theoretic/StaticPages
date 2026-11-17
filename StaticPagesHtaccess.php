@@ -155,6 +155,10 @@ class StaticPagesHtaccess extends Wire {
 	//the settings a save is storing, see using(); null: the module's own properties
 	protected $settings = null;
 
+	//a settings save of this request was a dry run: the check after the response writes
+	//nothing either, the next request's does [R4]
+	protected $dryRunSave = false;
+
 	/** @var StaticPages */
 	protected $sp;
 
@@ -1355,7 +1359,8 @@ class StaticPagesHtaccess extends Wire {
 	 * The lazy check, run by StaticPages::shutdownDrain() after a superuser's admin request and
 	 * in a CLI run, never after a visitor's request
 	 *
-	 * With the stamp unchanged nothing is read. Otherwise, the response finished first: absent
+	 * With the stamp unchanged nothing is read, nor after a settings save of this request that was
+	 * a dry run (the next request's check writes). Otherwise, the response finished first: absent
 	 * and outdated get the block [decided by user; Q3], a candidate a warning, once per change of
 	 * the candidates and never for the ones Keep was chosen for, the other states one log line
 	 * when first seen. The notices are kept in the module config until a superuser's next admin
@@ -1367,6 +1372,7 @@ class StaticPagesHtaccess extends Wire {
 	 *
 	 */
 	public function check() {
+		if( $this->dryRunSave ) return null;
 		if( is_file( $this->stampPath() ) ) return null;
 		$this->sp->queue()->finishResponse();
 		return $this->act( '', false, true );
@@ -1403,6 +1409,7 @@ class StaticPagesHtaccess extends Wire {
 	 */
 	public function onSave(array $data, $action = '', $dryRun = false) {
 		$this->using($data);
+		if( $dryRun ) $this->dryRunSave = true;
 		return $this->act( $action, $dryRun, false );
 	}
 

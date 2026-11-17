@@ -1785,14 +1785,36 @@ $expected = $h->write(true, true)['text'];
 $stored = htSave($sp, array('htaccessAction' => 'replace'));
 check('settings save with Replace: the file is what write() with Replace gives, one backup, the state current; htaccessAction not stored', is_string($expected) && file_get_contents($htFile) === $expected && count(htBackups($tmpRoot)) === 1 && $h->status()['state'] === 'current' && !array_key_exists('htaccessAction', $stored));
 htClean($tmpRoot);
+htForget($tmp);
 htPut($htFile, $candidateFixture);
 $listing = files($tmpRoot);
 $log0 = logText($tmp);
 $stored = htSave($sp, array('htaccessAction' => 'replace', 'wipeDryRun' => 1));
 $logged = substr(logText($tmp), strlen($log0));
 check('settings save with Replace and Dry run: nothing written, no backup; the log holds the new text line by line; neither box stored checked', file_get_contents($htFile) === $candidateFixture && files($tmpRoot) === $listing && strpos($logged, 'htaccess dry run: ') !== false && strpos($logged, ': # BEGIN StaticPages') !== false && strpos($logged, ': ' . $prefix . 'RewriteRule ^(.+)/$ /$1/index.html [L]') !== false && substr_count($logged, 'htaccess dry run: ') === count(explode("\n", $expected)) + 1 && empty($stored['wipeDryRun']) && !array_key_exists('htaccessAction', $stored), substr($logged, 0, 300));
+$dryRunSave = new \ReflectionProperty(StaticPagesHtaccess::class, 'dryRunSave');
+$dryRunSave->setAccessible(true);
+htShutdown($sp, 'admin');
+check('after a save with Replace and Dry run, the same request\'s shutdown writes nothing and warns about nothing', file_get_contents($htFile) === $candidateFixture && files($tmpRoot) === $listing && !htPending($sp) && !htStamps($tmp), json_encode(htPending($sp)));
+$dryRunSave->setValue($h, false);
 htClean($tmpRoot);
 htForget($tmp);
+
+//[R4] Dry run on a save without a choice: an absent block is not written by that save, nor by
+//the check after its response; the next request's check writes it
+htPut($htFile, $stock);
+$listing = files($tmpRoot);
+$log0 = logText($tmp);
+htSave($sp, array('wipeDryRun' => 1));
+$logged = substr(logText($tmp), strlen($log0));
+htShutdown($sp, 'admin');
+$held = file_get_contents($htFile) === $stock && files($tmpRoot) === $listing && !htPending($sp);
+$dryRunSave->setValue($h, false);
+htShutdown($sp, 'admin');
+check('settings save with Dry run, absent: the save and its own shutdown write nothing, the log holds the new text; the check of the next request writes the block', $held && strpos($logged, ': # BEGIN StaticPages') !== false && file_get_contents($htFile) === $withBlock && count(htBackups($tmpRoot)) === 1, substr($logged, 0, 200));
+htClean($tmpRoot);
+htForget($tmp);
+htClearPending($sp);
 
 //a saved Static file name rewrites a current block, from the array saved (the loaded module still
 //has the old name)
@@ -1869,6 +1891,23 @@ $listing = files($tmpRoot);
 $out = $h->onUninstall();
 check('onUninstall() with a candidate never replaced: the .htaccess unchanged, no backup', file_get_contents($htFile) === $candidateFixture && files($tmpRoot) === $listing && $out['htaccess']['done'] === 'nothing', $out['htaccess']['message']);
 htClean($tmpRoot);
+//[R1] without index tables the manifest's copies go; with neither, nothing is scanned for
+$tablesAtStart = $tablesReady->getValue($sp->index());
+$tablesReady->setValue($sp->index(), false);
+@mkdir("$tmpRoot$Pdir/a", 0777, true);
+file_put_contents($copy, 'listed in the manifest');
+@unlink($sp->manifestPath());
+$sp->publisher()->logStaticFile($copy);
+$out = $h->onUninstall();
+$byManifest = !is_file($copy) && $out['copies'] !== null && $out['copies']['files'] === 1;
+@unlink($sp->manifestPath());
+@mkdir("$tmpRoot$Pdir/a", 0777, true);
+file_put_contents($copy, 'recorded nowhere');
+$log0 = logText($tmp);
+$out = $h->onUninstall();
+$tablesReady->setValue($sp->index(), $tablesAtStart);
+check('onUninstall() without index tables deletes what the manifest lists; with neither tables nor manifest it scans for nothing: an unrecorded copy stays', $byManifest && is_file($copy) && $out['copies'] === null && strpos(substr(logText($tmp), strlen($log0)), 'neither index tables nor a manifest') !== false);
+rrmdir("$tmpRoot$Pdir");
 $out = $h->onUninstall();
 check('onUninstall() without a .htaccess: nothing created, the refusal logged', !file_exists($htFile) && $out['htaccess']['state'] === 'none' && strpos(logText($tmp), 'uninstall: htaccess: Nothing was changed: the state of the .htaccess is none') !== false);
 htForget($tmp);

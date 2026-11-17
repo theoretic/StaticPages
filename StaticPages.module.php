@@ -874,11 +874,13 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( !is_array($pending) || !count($pending) ) return 0;
 		if( !$this->adminRequest || $this->wire()->config->ajax || !$this->wire()->user->isSuperuser() ) return 0;
 		$shown = 0;
+		//shown even when this request said the same already: it was kept to be shown. The flag
+		//only where the core has it
+		$flags = defined( Notice::class . '::allowDuplicate' ) ? Notice::allowDuplicate : 0;
 		foreach( $pending as $notice ){
 			if( !is_array($notice) || !isset($notice['text']) ) continue;
 			$type = isset($notice['type']) ? $notice['type'] : 'message';
-			//shown even when this request said the same already: it was kept to be shown
-			$type === 'warning' ? $this->warning( (string) $notice['text'], Notice::allowDuplicate ) : $this->message( (string) $notice['text'], Notice::allowDuplicate );
+			$type === 'warning' ? $this->warning( (string) $notice['text'], $flags ) : $this->message( (string) $notice['text'], $flags );
 			$shown++;
 		}
 		//past the config hooks: bookkeeping, no operator's save
