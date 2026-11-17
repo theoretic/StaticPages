@@ -9,17 +9,18 @@ before elegance.
 
 | File | Role |
 |---|---|
-| `StaticPages.module.php` | Module class: hooks (stay on this object, site code finds them by `toObject`), public API (`cachePage()`, `noCache()`, the hookable `___allowCache()` and `___fileContent()`, `stripCsrf()`, `wipeCaches()`, `drain()`, `checkTrackedPaths()`, `defaultNonStaticDirs()`), config helpers shared by the parts, part accessors |
+| `StaticPages.module.php` | Module class: hooks (stay on this object, site code finds them by `toObject`), public API (`cachePage()`, `noCache()`, the hookable `___allowCache()` and `___fileContent()`, `stripCsrf()`, `wipeCaches()`, `drain()`, `checkTrackedPaths()`, `defaultNonStaticDirs()`, `htaccessStatus()`, `writeHtaccess()`, `removeHtaccess()`), the uninstall flag (`markUninstalling()`, `uninstalling()`), config helpers shared by the parts, part accessors |
 | `StaticPagesIndex.php` | Dependency index: the three tables, render dependencies (`pageLoaded()`, `pagesFound()`, `renderTags()`), invalidation (`invalidatePage()`), schema check (`ensureTables()`, `indexSchema`), DB locks |
 | `StaticPagesQueue.php` | Queue rows, the drain after the response, the generation stamp |
 | `StaticPagesPublisher.php` | Atomic write, CSRF stripping, cookie and header skips |
 | `StaticPagesWiper.php` | Deleting: by index, by manifest, by scan (PHP, `find`, PowerShell), dry run, protected dirs, `insideRoot()` |
 | `StaticPagesTracker.php` | Tracked path hashes |
 | `StaticPagesMigration.php` | Lazy migration of older installs (`configVersion`) and adoption of unrecorded files |
-| `StaticPagesHtaccess.php` | The root `.htaccess`: the rule generator (`rules()`, `apacheBlock()`: settings and `$config` in, text out, no disk, no database) |
+| `StaticPagesHtaccess.php` | The root `.htaccess`, four layers: the generator (`rules()`, `apacheBlock()`: settings and `$config` in, text out, no disk, no database), the reader (`status()`, `classify()`: the states and the heuristic for hand-written rules, writes nothing), the writer (`write()`, `remove()`: one block, the Replace prefix, backups, read-back, the check request), the manager (`check()` after a superuser admin request or a CLI run, `onInstall()`, `onSave()`, `onUninstall()`, the kept notices) |
 | `StaticPages.config.php` | Config array. Included whenever core builds module info (refresh, install, cleared info cache): never touch the module from here (0.6.3 and 0.8.0 looped until memory ran out); defaults that need the module are filled in by `hookConfigInputfields()` |
 | `StaticPages.info.php` | Module info, semver string |
 | `tests/smoke.php` | CLI smoke test against a Bridge sandbox |
+| `tests/fixtures/` | The stock `htaccess.txt` of 3.0.274 and anonymised hand-written rule sets: no site's host, path or name |
 
 Parts extend `Wire`, get the module as `$this->sp`, are `require_once`d by their accessor.
 Part methods are public so the smoke test can call them. No build step, no composer.
@@ -46,10 +47,12 @@ read it). PW core: `D:/install/processwire/wire` (3.0.274); read it instead of g
 
 ## Compatibility rules
 
-- The repo is junctioned into ~20 sites replacing copies of 0.3.1 to 0.7.1 and the 012/020
-  lineages. Config keys, table names and layout (`StaticPages schema N` table comments), cache
-  files (`site/assets/cache/StaticPages.manifest`, `site/assets/cache/StaticPages/`) and static
-  files on disk must keep working. A config change gets a step in
+- This code replaces copies of 0.3.1 to 0.9.1 and of the 012/020 lineages on about twenty
+  sites. Today one local site links its module dir to this repo and the others use a copy of
+  0.9.1; that may change, and every change has to keep working on all of them. Config keys,
+  table names and layout (`StaticPages schema N` table comments), cache files
+  (`site/assets/cache/StaticPages.manifest`, `site/assets/cache/StaticPages/`) and static files
+  on disk must keep working. A config change gets a step in
   `StaticPagesMigration::configChanges()` and a raise of `StaticPages::configVersion`; a table
   change a step in `migrateSchema()` and a raise of `schemaVersion`.
 - Nothing may depend on `___upgrade()`: core skips it when the module file is renamed, and
@@ -60,3 +63,13 @@ read it). PW core: `D:/install/processwire/wire` (3.0.274); read it instead of g
   StaticPages` and its priority (atispro `georestrictions.static.php`, kit `seoneo.inject.php`).
 - Every delete goes through the static file name check, the protected dir check and
   `insideRoot()`. A scan walks only `scanTargets()`.
+- The root `.htaccess` is changed only between `# BEGIN StaticPages` and `# END StaticPages`
+  (one block, immediately before `# PW-PAGENAME`). On an operator's Replace, hand-written lines
+  get the prefix `# StaticPages-replaced: `, and a stock `DirectoryIndex` line is added after a
+  prefixed one. Nothing else is touched and no line is ever deleted; `remove()` gives the file
+  back byte for byte. Never from a front-end request; always after a backup. The markers and the
+  prefix are on-disk format: keep them.
+- Bookkeeping keys, absent by default and no field of the form: `indexSchema`, `htaccessNotice`
+  and `uninstalling` are saved past the config hooks (`$modules->configs->saveConfig()`),
+  `htaccessKeep` by the settings save that chose Keep. `uninstalling` goes with the module's row;
+  it counts for `StaticPages::uninstallingMaxAge` seconds only.

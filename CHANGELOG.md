@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.10.0 (2026-11-17)
+
+The module looks after the web server rules that serve its static files itself: on Apache it
+keeps one block of rules in the site's root `.htaccess`. Until now the README asked for rules
+written by hand.
+
+### What happens on an existing site
+After the update, the module reads the root `.htaccess` once. That happens after the response of
+the first admin request of a **superuser**, or in the first CLI script run, whichever comes first.
+A visitor's or an editor's request never reads or writes the file. What happens depends on the
+state the file is in:
+
+- **Stock ProcessWire rules, nothing served by hand (`absent`)**: the StaticPages block is added
+  immediately before the `# PW-PAGENAME` line, after a backup `.htaccess.sp-<YmdHis>.bak` next to
+  it. One line goes to the `static-pages` log and a notice to the next superuser admin page. From
+  then on the static copies are served. A web root under git shows the change of `.htaccess`.
+- **Rules written by hand for the static files (`candidate`)**, as most sites have them: nothing
+  is written. One log line, and a warning on the next superuser admin page, naming the lines and
+  the settings page. There, *Hand-written rules found* offers *Keep them* (nothing is written, no
+  more warnings until the rules change) or *Replace them with the StaticPages block*: after a
+  backup, the hand-written lines are commented out with the prefix `# StaticPages-replaced: `,
+  nothing is deleted, and the block is written.
+- **No `.htaccess` (nginx, rules in the virtual host), a file that cannot be written, broken
+  block markers, or a file that is no ProcessWire `.htaccess`**: nothing is written; one log line,
+  and the state on the settings form.
+- **A site that chooses the language by host name** must add its own rules before updating
+  (README, *Multilingual sites*) and choose *Keep them*. Without them its file is `absent`, and the
+  block would serve the second host the other language's copies.
+
+At the time of this release one site loads the module straight from this repository. The others
+run a copy of 0.9.1 and meet all this when that copy is updated. This may change.
+
+### Added
+- **The StaticPages block** in the root `.htaccess`, made from the settings. It serves a page's
+  copy to a guest's `GET` or `HEAD` without a query string. A `POST`, a query string and the
+  login cookie go to ProcessWire (the README's old rules served the copy to a `POST` and to a logged-in
+  visitor). A
+  directory without a copy goes to ProcessWire instead of 403, and a directory with an `index.php`
+  of its own (an `/api/` endpoint) keeps the stock answers. Proven on Apache 2.4 at the web root
+  and in a subdirectory.
+- **The check**: after a superuser's admin request and a CLI run, three `stat()` calls while
+  nothing changed. A missing block is added, and an outdated one (a module update, a changed
+  *Static file name*, a hand edit inside it) is written again. Hand-written StaticPages-like rules
+  are reported and never touched without the operator's choice. Every write keeps a backup (the
+  five newest), is read back, and from a web request is followed by one request for the home
+  page; a 5xx puts the backup back. A notice from the check waits in the module config
+  (`htaccessNotice`) until a superuser's next admin page. The *Keep* choice is stored as a hash of
+  the rules kept (`htaccessKeep`).
+- **The settings form** shows the state (*Root .htaccess*), the hand-written rules found with
+  their line numbers, the block (*The StaticPages block*) and the one-shot choice *Hand-written
+  rules found*. *Dry run* also keeps a save from writing the `.htaccess`, and logs the new text.
+- **Deploy scripts**: `htaccessStatus()`, `writeHtaccess($dryRun = false, $replace = false)`,
+  `removeHtaccess($dryRun = false)`.
+- **README**: *Server configuration* rewritten around the block. It now covers the states, what
+  counts as a hand-written rule, Replace and Keep, the backups, web roots under git, and an nginx
+  example. *Multilingual sites* has a hand-written example for languages chosen by host name.
+
+### Changed
+- **Uninstalling** first marks the module as being uninstalled (`uninstalling` in its config,
+  gone with its row): from then on no request writes a static copy. It then takes the block and
+  the `# StaticPages-replaced: ` prefixes out of the `.htaccess` after a backup, which gives
+  hand-written rules back byte for byte. Next it deletes the static copies the index (or the
+  manifest) records, and last it drops the tables. Copies nothing recorded stay. An uninstall
+  that throws takes the mark back; one that dies halfway stops caching for an hour at most, and
+  the next admin request after that removes the mark.
+
+### Tests
+- `tests/smoke.php` checks the generator, the reader and the heuristic on the stock file and on
+  anonymised hand-written rule sets, and every state. It covers Replace, Keep and the refusals, the
+  backups and the restore, the check after admin, editor, visitor and CLI requests, the kept
+  notices, and an uninstall from an admin request and from a CLI run: no block written back, no
+  copy and no unrecorded file left, nothing cached while it runs.
+
 ## 0.9.1 (2026-11-16)
 
 ### Fixed
