@@ -872,6 +872,36 @@ foreach($stockText as $label => $lines) {
 }
 check('htaccess Replace: a rule written like a stock line whose hand conditions would be prefixed is refused with the reason, also in a dry run; nothing written', !count($bad), implode('; ', $bad));
 
+//[decided by user, audit 1, A1.1] the site's own rule 19 written differently from stock is an S2
+//candidate (classification unchanged); Replace would comment out the last catch-all to
+//index.php, so it is refused with the reason
+$stock14 = str_replace(array('  # RewriteCond %{REQUEST_URI} "[^-_.a-zA-Z0-9/~]"', "  # RewriteCond %{REQUEST_FILENAME} !-f\n  # RewriteCond %{REQUEST_FILENAME} !-d\n  # RewriteRule ^(.*)$ index.php?it=/http404/"), array('  RewriteCond %{REQUEST_URI} "[^-_.a-zA-Z0-9/~]"', "  RewriteCond %{REQUEST_FILENAME} !-f\n  RewriteCond %{REQUEST_FILENAME} !-d\n  RewriteRule ^(.*)$ index.php?it=/http404/"), $stock);
+$rule19 = '  RewriteRule ^(.*)$ index.php?it=$1 [L,QSA]';
+$ownRule19 = array(
+	'flags in another order' => str_replace($rule19, '  RewriteRule ^(.*)$ index.php?it=$1 [QSA,L]', $stock),
+	'a subdirectory install\'s absolute path' => str_replace($rule19, '  RewriteRule ^(.*)$ /pw/index.php?it=$1 [L,QSA]', $stock),
+	'flags in another order, section 14 switched on' => str_replace($rule19, '  RewriteRule ^(.*)$ index.php?it=$1 [QSA,L]', $stock14),
+);
+check('htaccess catch-alls: the stock rule 19, and rule 20 when switched on, count, also with a path before index.php; the block\'s rules, section 14, a home rule, ^(.+)$ and a commented-out rule do not', strpos($stock14, "\n  RewriteRule ^(.*)$ index.php?it=/http404/ [L,QSA]\n") !== false && $h->catchAlls($stock) === array(484) && $h->catchAlls($withBlock) === array(484 + count(explode("\n", $block))) && $h->catchAlls(str_replace('  # RewriteRule ^(.*)$ /index.php?it=$1 [L,QSA]', '  RewriteRule ^(.*)$ /index.php?it=$1 [L,QSA]', $stock)) === array(484, 490) && $h->catchAlls(str_replace($rule19, '#', $stock14)) === array() && $h->catchAlls("RewriteRule ^$ /index.php [L,QSA]\nRewriteRule ^(.+)$ index.php?it=$1 [L,QSA]\n# RewriteRule ^(.*)$ index.php?it=$1 [L,QSA]\n$block") === array() && $h->catchAlls($ownRule19['a subdirectory install\'s absolute path']) === array(484), json_encode(array($h->catchAlls($stock), $h->catchAlls($withBlock), $h->catchAlls($stock14))));
+$bad = array();
+foreach($ownRule19 as $label => $fixture) {
+	htPut($htFile, $fixture);
+	$listing = files($tmpRoot);
+	$st = $h->status();
+	$r = $h->write(false, true);
+	$d = $h->write(true, true);
+	if($fixture === $stock || htSummary($st) !== 'candidate 445-484:S2' || $r['ok'] || $r['done'] !== 'refused' || $d['ok'] || $d['done'] !== 'refused' || $d['text'] !== null || strpos($r['message'], 'no active rule outside the StaticPages block would hand requests to index.php') === false || strpos($r['message'], 'the rule on line 484, written differently from the stock line, would be commented out') === false || strpos($r['message'], 'choose Keep') === false || $r['messages'] || $r['prefixed'] || file_get_contents($htFile) !== $fixture || files($tmpRoot) !== $listing) $bad[] = "$label: " . htSummary($st) . " {$r['done']} {$r['message']} " . implode(' ', $r['messages']);
+	htClean($tmpRoot);
+}
+check('htaccess Replace: the site\'s own rule 19 written differently from stock (flags reordered, /pw/index.php, also with section 14 switched on) is an S2 candidate; Replace is refused with the reason, also in a dry run; nothing written', !count($bad), implode('; ', $bad));
+//the same rule as a hand catch-all beside the stock rule 19: Replace goes ahead, rule 19 stays
+list($fixture) = htHand($stock, '# PW-PAGENAME', array('RewriteCond %{HTTP_HOST} ^(www\.)?example\.com$ [NC]', 'RewriteRule ^(.*)$ index.php?it=$1 [QSA,L]'));
+htPut($htFile, $fixture);
+$r = $h->write(false, true);
+$new = (string) file_get_contents($htFile);
+check('htaccess Replace: a hand catch-all to index.php beside the stock rule 19 is replaced, the stock rule 19 is left as the one catch-all', $r['ok'] && $r['done'] === 'written' && $r['prefixed'] === array(439, 440) && $h->status()['state'] === 'current' && count($h->catchAlls($new)) === 1 && strpos($new, "\n$rule19\n") !== false, json_encode(array($r['message'], $r['prefixed'], $h->catchAlls($new))));
+htClean($tmpRoot);
+
 //states that may not be written: refused, naming the state, the bytes and the listing unchanged
 $bad = array();
 $refusable = array('none' => null, 'locked: a directory in place of the file' => 'dir') + array_map(fn($t) => $t, $damaged) + $unrecognised;
@@ -1876,6 +1906,21 @@ $pending = htPending($sp);
 check('gate shape: after Keep no warning; after the gate rule is edited, the warning again', !$keptPending && count($pending) === 1 && $pending[0]['type'] === 'warning', json_encode(array($keptPending, $pending)));
 htSave($sp, array(), array('htaccessKeep'));
 $h->using(null);
+htClean($tmpRoot);
+htForget($tmp);
+htClearPending($sp);
+
+//[decided by user, audit 1, A1.1] Replace chosen on the settings form when the site's own rule 19
+//differs from stock: refused, the reason shown and logged, nothing written
+htPut($htFile, $ownRule19['flags in another order']);
+$listing = files($tmpRoot);
+$n0 = count($wire->notices);
+$log0 = logText($tmp);
+$stored = htSave($sp, array('htaccessAction' => 'replace'));
+$texts = htNoticeTexts($wire, $n0);
+$logged = substr(logText($tmp), strlen($log0));
+$warned = array_values(array_filter($texts, fn($t) => strpos($t, 'NoticeWarning: ') !== false && strpos($t, 'no active rule outside the StaticPages block would hand requests to index.php') !== false && strpos($t, 'line 484') !== false));
+check('settings save with Replace, the site\'s own rule 19 written differently from stock: refused, the reason shown as a warning and logged; nothing written, no backup; htaccessAction not stored', count($warned) === 1 && strpos($logged, 'no active rule outside the StaticPages block would hand requests to index.php') !== false && file_get_contents($htFile) === $ownRule19['flags in another order'] && files($tmpRoot) === $listing && !array_key_exists('htaccessAction', $stored), json_encode(array($texts, $logged)));
 htClean($tmpRoot);
 htForget($tmp);
 htClearPending($sp);

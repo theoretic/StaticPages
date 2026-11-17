@@ -66,6 +66,10 @@ class StaticPagesHtaccess extends Wire {
 		'RewriteRule ^(.*)$ /index.php?it=$1 [L,QSA]',
 		);
 
+	//the stock rule 19 (htaccess.txt :484): the catch-all that hands every page URL to
+	//ProcessWire, which Replace must leave one of, see catchAlls()
+	const stockCatchAll = 'RewriteRule ^(.*)$ index.php?it=$1 [L,QSA]';
+
 	//the states of the file, see status(), in the order they are tested
 	const states = array('none', 'locked', 'damaged', 'unrecognised', 'candidate', 'absent', 'current', 'outdated');
 
@@ -770,7 +774,10 @@ class StaticPagesHtaccess extends Wire {
 	 * prefixed and the stock DirectoryIndex line written right after it [decided by user, step 4].
 	 * Refused as well: a rule written like a stock line (so kept) whose hand conditions would be
 	 * prefixed, and any write that would leave an active RewriteCond right above the block,
-	 * where it would join the block's first rule [decided by user, step 4].
+	 * where it would join the block's first rule [decided by user, step 4]; and a Replace after
+	 * which no active catch-all to index.php (the stock rule 19, see catchAlls()) would be left
+	 * outside the block, as when the site's own rule 19 differs from the stock text and is an S2
+	 * candidate [decided by user, audit 1, A1.1].
 	 *
 	 * Steps: the lock; read and refuse unless the state allows it; a dry run stops here; a backup
 	 * (.htaccess.sp-<YmdHis>.bak, the five newest kept); the new bytes to a temporary file in the
@@ -1050,6 +1057,21 @@ class StaticPagesHtaccess extends Wire {
 		$edits[] = $this->blockEdit( $lines, $status );
 		$text = $this->applyEdits( $bytes, $edits );
 
+		//the site's own catch-all to ProcessWire (rule 19) written differently from stock is an S2
+		//candidate: without an active one left, every page URL would reach ProcessWire only as
+		//the 404 error document, so Replace is refused [decided by user, audit 1, A1.1]
+		if( $state === 'candidate' && !count( $this->catchAlls($text) ) ){
+			$lost = array();
+			foreach( $plan['info']['prefixed'] as $n ){
+				$directive = $this->directive( $lines[$n]['text'] );
+				if( $directive && $directive[0] === 'rewriterule' && isset($directive[1][1]) && $this->isCatchAll( $directive[1][0], $directive[1][1] ) ) $lost[] = $n;
+			}
+			$plan['refuse'] = 'Nothing was written: after Replace no active rule outside the StaticPages block would hand requests to index.php, as the stock rule "' . self::stockCatchAll . '" does' . ( count($lost) ? ': the rule' . ( count($lost) > 1 ? 's' : '' ) . ' on line' . ( count($lost) > 1 ? 's ' : ' ' ) . implode( ', ', $lost ) . ', written differently from the stock line, would be commented out' : '' ) . '. ProcessWire would then get its pages only as the 404 error document. ' . ( count($lost) ? 'Write that rule like the stock line by hand' : 'Add such a rule by hand' ) . ', or choose Keep.';
+			$plan['info'] = array();
+			$plan['messages'] = array();
+			return $plan;
+		}
+
 		//a condition left standing right above the block would join the block's first rule
 		$dangling = $this->conditionAboveBlock($text);
 		if( $dangling ){
@@ -1145,6 +1167,39 @@ class StaticPagesHtaccess extends Wire {
 			if( $directive[0] === 'rewritecond' ) return $n;
 		}
 		return 0;
+	}
+
+	/**
+	 * The lines of the active catch-alls to ProcessWire in $text, outside the StaticPages block
+	 *
+	 * A catch-all is a RewriteRule with the pattern ^(.*)$ and a substitution ending in
+	 * "index.php?it=$1", with or without a path before it (stock rule 19, rule 20, a subdirectory
+	 * install's "/pw/index.php?it=$1"), whatever its flags and conditions. Section 14's
+	 * "?it=/http404/" and a home rule to index.php are none.
+	 *
+	 * #pw-internal
+	 *
+	 * @param string $text
+	 * @return array Line numbers, from 1
+	 *
+	 */
+	public function catchAlls($text) {
+		$found = array();
+		$inBlock = false;
+		foreach( $this->lines($text) as $n => $line ){
+			$t = trim( $line['text'] );
+			if( $t === self::markerBegin ) $inBlock = true;
+			else if( $t === self::markerEnd ) $inBlock = false;
+			if( $inBlock || $t === self::markerEnd ) continue;
+			$directive = $this->directive($t);
+			if( !$directive || $directive[0] !== 'rewriterule' || !isset($directive[1][1]) ) continue;
+			if( $this->isCatchAll( $directive[1][0], $directive[1][1] ) ) $found[] = $n;
+		}
+		return $found;
+	}
+
+	protected function isCatchAll($pattern, $target) {
+		return $pattern === '^(.*)$' && preg_match( '#^(\S*/)?index\.php\?it=\$1$#i', $target ) === 1;
 	}
 
 	protected function backup($path, $bytes) {

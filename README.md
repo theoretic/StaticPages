@@ -420,7 +420,11 @@ The settings form shows them with their line numbers, and *Hand-written rules fo
   - A `DirectoryIndex` line that listed the static file first is commented out, and the stock
     line `DirectoryIndex index.php index.html index.htm` is added after it.
   - Replace is refused, with the reason on the form, when it would leave a kept rule without its
-    hand-written condition, or an active `RewriteCond` right above the block.
+    hand-written condition, or an active `RewriteCond` right above the block, or no active rule
+    that hands every request to `index.php` (the stock rule 19,
+    `RewriteRule ^(.*)$ index.php?it=$1 [L,QSA]`). A rule 19 not written like the stock line
+    (flags in another order, an absolute path such as `/pw/index.php?it=$1`) counts as
+    hand-written: write it like the stock line, or choose *Keep them*.
 
 The choice is acted on once, when the settings are saved, and never stored. Uninstalling the
 module takes the prefixes off again and gives the hand-written rules back byte for byte.
