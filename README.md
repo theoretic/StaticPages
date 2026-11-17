@@ -122,9 +122,10 @@ the tables, see *Uninstalling* below.
 ## Upgrading
 
 Nothing to do, on every site sharing the module dir as well, from any earlier version: 0.3.1
-to 0.7.1, and the older 012 and 020 copies. Replace the module dir; a modules refresh is not
-needed (core skips `___upgrade()` when the module file changes from `StaticPages.module` to
-`StaticPages.module.php`, so nothing depends on it).
+to 0.9.1, and the older 012 and 020 copies; but a site that chooses the language by host name
+adds its own `.htaccess` rules before updating to 0.10.0 (see below). Replace the module dir; a
+modules refresh is not needed (core skips `___upgrade()` when the module file changes from
+`StaticPages.module` to `StaticPages.module.php`, so nothing depends on it).
 
 After the response of the first admin request, CLI script or request that queued a save, the
 module brings the install up to date once, and logs each step to `static-pages`:
@@ -398,10 +399,12 @@ a time, comments ignored, and takes as StaticPages-like a rule that:
 - depends on the request method (`RewriteCond %{REQUEST_METHOD} …`);
 - or is a `DirectoryIndex` line that lists the static file first.
 
-The stock lines are never counted, nor a rule that only routes one file name to a page
-(`RewriteRule ^sitemap\.xml$ index.php?it=/sitemap/ [L,QSA]`), nor a redirect that only adds a
-trailing slash. A false alarm costs a warning and nothing is written. When the module finds such
-rules it writes nothing, and a superuser gets a warning naming the lines and the settings page.
+Stock lines are not counted, with one exception: the stock request method block of section 11E,
+when uncommented, depends on the request method and is reported. Neither is a hand-written
+route of one file name to a page (`RewriteRule ^sitemap\.xml$ index.php?it=/sitemap/ [L,QSA]`)
+nor a redirect that only adds a trailing slash. A false alarm costs a warning and nothing is
+written. When the module finds such rules it writes nothing, and a superuser gets a warning
+naming the lines and the settings page.
 The settings form shows them with their line numbers, and *Hand-written rules found* offers:
 
 - *Keep them*: nothing is written, and there is no warning about these rules again until they
