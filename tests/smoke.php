@@ -629,6 +629,316 @@ check('htaccessStatus() is the reader\'s status() of the root .htaccess', $sp->h
 @unlink($htFile);
 check('the .htaccess checks leave the temporary root empty', files($tmpRoot) === '', files($tmpRoot));
 
+////  .htaccess writer (0.10.0)
+
+//write(), Replace and remove() on fixtures on the temporary root only: $h->file is '', so the
+//part works on <temporary root>/.htaccess. The fetch is a stub where one is asked: under CLI
+//the writer makes no request of its own
+$prefix = StaticPagesHtaccess::replacedPrefix;
+check('htaccess writer: the part works on the temporary root\'s .htaccess', $h->filePath() === $htFile && strpos($htFile, $tmp) === 0);
+
+$keys = preg_split('/\s+/', trim(StaticPagesHtaccess::stockLineKeys));
+check('htaccess writer: the stock line keys kept in the part are those of the stock fixture (every line, and its commented-out directives uncommented)', $keys === $h->stockKeysOf($stock) && count($keys) > 262, count($keys) . ' kept, ' . count($h->stockKeysOf($stock)) . ' from the fixture');
+check('htaccess writer: stock lines are known whatever their indentation, blank lines count as stock, hand lines do not', $h->isStockLine('RewriteCond %{REQUEST_URI} "^/~?[-_.a-zA-Z0-9/]*$"') && $h->isStockLine("\t RewriteCond  %{REQUEST_FILENAME} !-f ") && $h->isStockLine('') && $h->isStockLine('  ') && $h->isStockLine('  RewriteRule ^(.*)$ index.php?it=$1 [L,QSA]') && $h->isStockLine('RewriteCond %{REQUEST_URI} !\.(jpg|jpeg|gif|png|ico|webp|svg|js|css)$ [NC]') && !$h->isStockLine('RewriteCond %{REQUEST_FILENAME} -d') && !$h->isStockLine('RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]') && !$h->isStockLine('DirectoryIndex index.html index.php') && !$h->isStockLine('# A directory holding a static file, requested without a query string: serve the file.'));
+
+//$add inserted as by htInsert(), and the line numbers the added lines get
+function htHand($text, $marker, array $add, $after = false) {
+	$at = null;
+	foreach(explode("\n", $text) as $i => $l) if(trim($l) === $marker) { $at = $i; break; }
+	$first = ($after ? $at + 1 : $at) + 1;
+	return array(htInsert($text, $marker, $add, $after), range($first, $first + count($add) - 1));
+}
+function htPut($file, $bytes) {
+	file_put_contents($file, $bytes);
+	clearstatcache();
+}
+function htBackups($tmpRoot) {
+	return array_values(array_filter(scandir($tmpRoot), fn($n) => strpos($n, '.htaccess.sp-') === 0));
+}
+function htClean($tmpRoot) {
+	foreach(htBackups($tmpRoot) as $n) @unlink("$tmpRoot/$n");
+	@unlink("$tmpRoot/.htaccess");
+	clearstatcache();
+}
+//the text written by a Replace against its fixture: our block taken out, and the stock
+//DirectoryIndex line written after a prefixed one; then every line equals the fixture's, or is
+//one of the fixture's hand lines ($hand, line numbers) with the prefix. array(problems, the
+//fixture's line numbers that carry the prefix)
+function htCompare($fixture, $new, array $hand) {
+	$prefix = StaticPagesHtaccess::replacedPrefix;
+	$out = array();
+	$inBlock = false;
+	$prev = '';
+	foreach(explode("\n", $new) as $l) {
+		$t = trim($l);
+		if($t === '# BEGIN StaticPages') { $inBlock = true; continue; }
+		if($inBlock) { if($t === '# END StaticPages') $inBlock = false; continue; }
+		if($t === StaticPagesHtaccess::stockDirectoryIndex && strpos($prev, $prefix) === 0 && preg_match('/^\s*DirectoryIndex\s/i', substr($prev, strlen($prefix)))) { $prev = $l; continue; }
+		$out[] = $l;
+		$prev = $l;
+	}
+	$fl = explode("\n", $fixture);
+	if(count($out) !== count($fl)) return array(array('line count ' . count($out) . ' against ' . count($fl)), array());
+	$bad = $prefixed = array();
+	foreach($fl as $i => $l) {
+		if($out[$i] === $l) continue;
+		if(in_array($i + 1, $hand, true) && $out[$i] === $prefix . $l) $prefixed[] = $i + 1;
+		else $bad[] = ($i + 1) . ': ' . trim($out[$i]);
+	}
+	return array($bad, $prefixed);
+}
+//the hand lines of the S1/S2 candidate groups of a status: what a Replace must prefix
+function htExpected(StaticPagesHtaccess $h, array $status, array $hand) {
+	$want = array();
+	foreach($status['candidates'] as $g) {
+		if($g['signatures'] === array('S4') || $g['signatures'] === array('S3')) continue;
+		foreach($g['lines'] as $n => $t) if(in_array($n, $hand, true) && !$h->isStockLine($t)) $want[] = $n;
+	}
+	sort($want);
+	return $want;
+}
+function htLoneLf($text) {
+	return (bool) preg_match('/(?<!\r)\n/', $text);
+}
+
+htClean($tmpRoot);
+$h->fetch = null;
+$h->reread = null;
+
+//absent: the block goes in, after one backup
+htPut($htFile, $stock);
+$perms = fileperms($htFile);
+$r = $h->write();
+$after = $h->status();
+$bk = htBackups($tmpRoot);
+check('htaccess write, absent: gives current; the file is the fixture with the block immediately before # PW-PAGENAME and nothing else changed', $r['ok'] && $r['done'] === 'written' && $r['state'] === 'absent' && $after['state'] === 'current' && file_get_contents($htFile) === $withBlock, $r['message']);
+check('htaccess write, absent: one .htaccess.sp-*.bak holding the fixture\'s bytes, named in the result; the file\'s permissions are the fixture\'s; no request made under CLI', count($bk) === 1 && preg_match('/^\.htaccess\.sp-\d{14}\.bak$/', $bk[0]) && $r['backup'] === $bk[0] && file_get_contents("$tmpRoot/{$bk[0]}") === $stock && fileperms($htFile) === $perms && $r['fetch'] === null, json_encode($bk));
+check('htaccess write logs one line naming the backup', substr_count(logText($tmp), "backup {$bk[0]}") === 1 && strpos(logText($tmp), 'the StaticPages block was added') !== false);
+touch($htFile, time() - 100);
+clearstatcache();
+$mtime = filemtime($htFile);
+$r = $h->write();
+clearstatcache();
+check('htaccess write, current: a second write changes nothing and makes no backup', $r['ok'] && $r['done'] === 'nothing' && $r['backup'] === '' && htBackups($tmpRoot) === $bk && filemtime($htFile) === $mtime && file_get_contents($htFile) === $withBlock, $r['done']);
+
+//outdated: the block's lines only
+$sp->set('staticFile', 'cache.htm');
+$r = $h->write();
+$new = (string) file_get_contents($htFile);
+$begin = strpos($withBlock, '# BEGIN StaticPages');
+$end = strpos($withBlock, '# END StaticPages') + strlen('# END StaticPages');
+$nbegin = strpos($new, '# BEGIN StaticPages');
+$nend = strpos($new, '# END StaticPages') + strlen('# END StaticPages');
+check('htaccess write, outdated: replaces the block only, the bytes before and after it unchanged', $r['ok'] && $r['state'] === 'outdated' && $h->status()['state'] === 'current' && substr($new, 0, $nbegin) === substr($withBlock, 0, $begin) && substr($new, $nend) === substr($withBlock, $end) && strpos($new, 'cache\\.htm') !== false && count(htBackups($tmpRoot)) === 2, $r['message']);
+$sp->set('staticFile', 'index.html');
+$r = $h->write();
+check('htaccess write, outdated again: back to the block of these settings', $r['ok'] && file_get_contents($htFile) === $withBlock);
+
+//remove(): a plain current gives the stock fixture back, absent does nothing
+$r = $h->remove();
+check('htaccess remove, current: gives back the stock fixture byte for byte, after a backup', $r['ok'] && $r['done'] === 'written' && file_get_contents($htFile) === $stock && $r['backup'] !== '' && file_get_contents("$tmpRoot/{$r['backup']}") === $withBlock, $r['message']);
+$count = count(htBackups($tmpRoot));
+$r = $h->remove();
+check('htaccess remove, absent: does nothing, no backup', $r['ok'] && $r['done'] === 'nothing' && file_get_contents($htFile) === $stock && count(htBackups($tmpRoot)) === $count, $r['done']);
+htClean($tmpRoot);
+
+//candidate: refused without Replace; with it, the hand lines of every S1 and S2 group get the
+//prefix, the stock lines stay, the block goes in; remove() gives the fixture back
+$readme = array_merge($hand['the README\'s first rule'][0], $hand['the README\'s second rule'][0], $hand['the README\'s home pair'][0]);
+list($fixture, $handLines) = htHand($stock, '# PW-PAGENAME', $readme);
+htPut($htFile, $fixture);
+$listing = files($tmpRoot);
+$r = $h->write();
+check('htaccess write, candidate without Replace: refused, the file and the dir listing unchanged', !$r['ok'] && $r['done'] === 'refused' && $r['state'] === 'candidate' && strpos($r['message'], 'Replace or Keep') !== false && file_get_contents($htFile) === $fixture && files($tmpRoot) === $listing, $r['message']);
+$status = $h->status();
+$want = htExpected($h, $status, $handLines);
+$r = $h->write(false, true);
+$new = (string) file_get_contents($htFile);
+$after = $h->status();
+list($bad, $prefixed) = htCompare($fixture, $new, $handLines);
+check('htaccess Replace: every hand line of every S1 and S2 group carries the prefix, every other line is byte-identical, the block is in place, current with no candidate', $r['ok'] && $r['done'] === 'written' && $after['state'] === 'current' && !$after['candidates'] && !count($bad) && $prefixed === $want && $r['prefixed'] === $want && count($want) === 12 && !$r['regrouped'] && !$r['directoryIndex'], json_encode(array($r['message'], $bad, $prefixed, $want)));
+$r = $h->remove();
+check('htaccess remove after a Replace: gives back the candidate fixture byte for byte', $r['ok'] && file_get_contents($htFile) === $fixture && $r['prefixed'] === $want, $r['message']);
+htClean($tmpRoot);
+
+//[decided by user, step 4] a hand DirectoryIndex naming the copy first (S3): prefixed, and the
+//stock line written right after it; remove() takes both back
+list($fixture, $handLines) = htHand($stock, 'DirectoryIndex index.php index.html index.htm', array('DirectoryIndex index.html index.php'), true);
+list($fixture, $more) = htHand($fixture, '# PW-PAGENAME', $hand['the README\'s first rule'][0]);
+$handLines = array_merge($handLines, $more);
+htPut($htFile, $fixture);
+$r = $h->write(false, true);
+$new = (string) file_get_contents($htFile);
+$after = $h->status();
+list($bad, $prefixed) = htCompare($fixture, $new, $handLines);
+check('htaccess Replace, S3: the hand DirectoryIndex line is prefixed and the stock DirectoryIndex line follows it; named in the result; current', $r['ok'] && $after['state'] === 'current' && strpos($new, "DirectoryIndex index.php index.html index.htm\n{$prefix}DirectoryIndex index.html index.php\nDirectoryIndex index.php index.html index.htm\n") !== false && $r['directoryIndex'] === array(171) && strpos(implode(' ', $r['messages']), 'DirectoryIndex') !== false && !count($bad) && in_array(171, $prefixed, true), json_encode(array($r['message'], $bad, $prefixed)));
+$r = $h->remove();
+check('htaccess remove after a Replace with S3: the stock line it added goes, the hand line is back, the fixture byte for byte', $r['ok'] && file_get_contents($htFile) === $fixture && $r['directoryIndex'] === array(172), json_encode(array($r['message'], $r['directoryIndex'])));
+htClean($tmpRoot);
+
+//[changed by user decision 2026-11-17] a candidate between the stock 16A condition and rule 19:
+//Replace succeeds, the 16A line stays and joins rule 19 again
+list($fixture, $handLines) = htHand($stock, '# END-PW-PAGENAME', array_merge($hand['the README\'s first rule'][0], $hand['the README\'s second rule'][0]), true);
+htPut($htFile, $fixture);
+$status = $h->status();
+$want = htExpected($h, $status, $handLines);
+$r = $h->write(false, true);
+$new = (string) file_get_contents($htFile);
+$after = $h->status();
+list($bad, $prefixed) = htCompare($fixture, $new, $handLines);
+$newLines = $h->lines($new);
+$active = array();
+foreach($newLines as $n => $l) if(preg_match('/^\s*Rewrite(Cond|Rule)\s/', $l['text']) && $n > $after['blockLines'][1]) $active[] = trim($l['text']);
+check('htaccess Replace, a candidate between 16A and rule 19: succeeds, every stock line byte-identical, every hand line of the group prefixed, the block in place, nothing regrouped', $status['candidates'][0]['start'] === 445 && $r['ok'] && $after['state'] === 'current' && !count($bad) && $prefixed === $want && count($want) === 7 && !$r['regrouped'], json_encode(array($r['message'], $bad, $prefixed, $want, $status['candidates'][0]['start'])));
+check('htaccess Replace, a candidate between 16A and rule 19: below the block the active rewrite lines are the stock 16A, section 17 and rule 19 again', $active === array('RewriteCond %{REQUEST_URI} "^/~?[-_.a-zA-Z0-9/]*$"', 'RewriteCond %{REQUEST_FILENAME} !-f', 'RewriteCond %{REQUEST_FILENAME} !-d', 'RewriteCond %{REQUEST_FILENAME} !(favicon\.ico|robots\.txt)', 'RewriteRule ^(.*)$ index.php?it=$1 [L,QSA]'), json_encode($active));
+$r = $h->remove();
+check('htaccess remove after that Replace: the fixture byte for byte', $r['ok'] && file_get_contents($htFile) === $fixture);
+htClean($tmpRoot);
+
+//[decided by user, step 4] the shape of several local sites: a rule the heuristic does not count
+//(an exclusion list) between the hand rules; the 16A line stays and joins it, and the result
+//says so
+$shape = $sections['index-url-redirect']['lines'];
+while(count($shape) && trim(end($shape)) === '') array_pop($shape);
+list($fixture, $handLines) = htHand($stock, '# END-PW-PAGENAME', $shape, true);
+htPut($htFile, $fixture);
+$r = $h->write(false, true);
+$new = (string) file_get_contents($htFile);
+list($bad, $prefixed) = htCompare($fixture, $new, $handLines);
+$exclusions = array_search('RewriteRule ^(api|assets|admin|stats|favicon\.ico|robots\.txt)/ - [L]', $shape, true) + $handLines[0];
+check('htaccess Replace, a rule the heuristic does not count between 16A and rule 19: goes ahead, the 16A line stays and is named with the rule it joins now', $r['ok'] && $h->status()['state'] === 'current' && !count($bad) && count($r['regrouped']) === 1 && $r['regrouped'][0]['line'] === 445 && $r['regrouped'][0]['ruleLine'] === $exclusions && strpos(implode(' ', $r['messages']), "line 445 stays and from now on belongs to the hand-written rule on line $exclusions") !== false && strpos($new, "\n" . $shape[array_search('RewriteRule ^(api|assets|admin|stats|favicon\.ico|robots\.txt)/ - [L]', $shape, true)] . "\n") !== false, json_encode(array($r['message'], $r['regrouped'], $bad)));
+$r = $h->remove();
+check('htaccess remove after that Replace: the fixture byte for byte', $r['ok'] && file_get_contents($htFile) === $fixture);
+htClean($tmpRoot);
+
+//[decided by user, step 4] a group conditioned on the request method only (S4) is never
+//prefixed; the block must go below it, else Replace is refused
+$gate = array('RewriteCond %{REQUEST_METHOD} ^(GET|HEAD)$', 'RewriteCond %{REQUEST_URI} ^/((?:[-_.a-zA-Z0-9]+/)*)$', 'RewriteRule ^ gate.php [L]');
+list($fixture, $handLines) = htHand($stock, '# PW-PAGENAME', array_merge($gate, $hand['the README\'s first rule'][0]));
+htPut($htFile, $fixture);
+$r = $h->write(false, true);
+$new = (string) file_get_contents($htFile);
+$after = $h->status();
+list($bad, $prefixed) = htCompare($fixture, $new, $handLines);
+check('htaccess Replace with an S4 group above the block: the S4 group stays as it is and is named, the rest is replaced; the state stays candidate with that group only', $r['ok'] && $r['kept'] === array('439-441') && $prefixed === array(443, 444, 445, 446) && !count($bad) && $after['state'] === 'candidate' && count($after['candidates']) === 1 && $after['candidates'][0]['signatures'] === array('S4') && strpos($new, "\nRewriteRule ^ gate.php [L]\n") !== false, json_encode(array($r['message'], $prefixed, $bad, htSummary($after))));
+$r = $h->remove();
+check('htaccess remove with the S4 group left: the fixture byte for byte', $r['ok'] && file_get_contents($htFile) === $fixture, $r['message']);
+htClean($tmpRoot);
+list($fixture) = htHand($stock, '# END-PW-PAGENAME', array_merge($hand['the README\'s first rule'][0], $gate), true);
+htPut($htFile, $fixture);
+$listing = files($tmpRoot);
+$r = $h->write(false, true);
+check('htaccess Replace with an S4 group below the place of the block: refused with the reason, the file and the dir listing unchanged', !$r['ok'] && $r['done'] === 'refused' && strpos($r['message'], 'request method only') !== false && file_get_contents($htFile) === $fixture && files($tmpRoot) === $listing, $r['message']);
+htClean($tmpRoot);
+
+//a hand line equal to a stock line is never prefixed: left above the block, with no rule
+//between, it would join the block's first rule, so the write is refused
+list($fixture) = htHand($stock, '# PW-PAGENAME', array('RewriteCond %{REQUEST_FILENAME} !-f', 'RewriteCond %{REQUEST_FILENAME}/index.html -f', 'RewriteRule ^(.+)/$ /$1/index.html [L]'));
+htPut($htFile, $fixture);
+$listing = files($tmpRoot);
+$r = $h->write(false, true);
+check('htaccess Replace: a condition that would stand right above the block is refused, nothing written', !$r['ok'] && strpos($r['message'], 'right above the StaticPages block') !== false && file_get_contents($htFile) === $fixture && files($tmpRoot) === $listing, $r['message']);
+htClean($tmpRoot);
+
+//states that may not be written: refused, naming the state, the bytes and the listing unchanged
+$bad = array();
+$refusable = array('none' => null, 'locked: a directory in place of the file' => 'dir') + array_map(fn($t) => $t, $damaged) + $unrecognised;
+foreach($refusable as $label => $text) {
+	htClean($tmpRoot);
+	$state = $label === 'none' ? 'none' : (strpos($label, 'locked') === 0 ? 'locked' : (isset($damaged[$label]) ? 'damaged' : 'unrecognised'));
+	if($text === 'dir') @mkdir($htFile);
+	else if($text !== null) htPut($htFile, $text);
+	$listing = files($tmpRoot);
+	foreach(array('write' => fn() => $h->write(), 'replace' => fn() => $h->write(false, true), 'remove' => fn() => $h->remove()) as $call => $fn) {
+		$r = $fn();
+		clearstatcache();
+		$same = $text === 'dir' ? is_dir($htFile) : ($text === null ? !file_exists($htFile) : file_get_contents($htFile) === $text);
+		if($r['ok'] || $r['state'] !== $state || strpos($r['message'], "state of the .htaccess is $state") === false || !$same || files($tmpRoot) !== $listing) $bad[] = "$label $call: {$r['state']} {$r['message']}";
+	}
+	if($text === 'dir') @rmdir($htFile);
+}
+check('htaccess write and remove refuse none, locked, damaged and unrecognised, naming the state; the file (or its absence) and the dir listing unchanged', count($refusable) === 8 && !count($bad), implode('; ', $bad));
+htClean($tmpRoot);
+
+//CRLF: what is written takes the file's own line ends
+htPut($htFile, crlf($stock));
+$r = $h->write();
+$new = (string) file_get_contents($htFile);
+check('htaccess write, CRLF fixture: no lone LF, the block in CRLF before # PW-PAGENAME', $r['ok'] && !htLoneLf($new) && $new === crlf($withBlock) && $h->status()['state'] === 'current');
+htClean($tmpRoot);
+list($fixture, $handLines) = htHand($stock, 'DirectoryIndex index.php index.html index.htm', array('DirectoryIndex index.html index.php'), true);
+list($fixture, $more) = htHand($fixture, '# PW-PAGENAME', $readme);
+$handLines = array_merge($handLines, $more);
+htPut($htFile, crlf($fixture));
+$r = $h->write(false, true);
+$new = (string) file_get_contents($htFile);
+list($bad) = htCompare(crlf($fixture), $new, $handLines);
+check('htaccess Replace, CRLF fixture: no lone LF, every other line byte-identical, current', $r['ok'] && !htLoneLf($new) && !count($bad) && $h->status()['state'] === 'current' && strpos($new, "\r\n{$prefix}DirectoryIndex index.html index.php\r\nDirectoryIndex index.php index.html index.htm\r\n") !== false, json_encode(array($r['message'], $bad)));
+$r = $h->remove();
+check('htaccess remove, CRLF fixture: the CRLF fixture byte for byte', $r['ok'] && file_get_contents($htFile) === crlf($fixture));
+htClean($tmpRoot);
+
+//dry run: what would be written, nothing touched
+htPut($htFile, $stock);
+$listing = files($tmpRoot);
+$r = $h->write(true);
+$d = $sp->writeHtaccess(true);
+check('htaccess dry run, absent: returns the state, the block and the new text; the file and the dir listing unchanged; writeHtaccess() says the same', $r['ok'] && $r['done'] === 'dry run' && $r['state'] === 'absent' && $r['block'] === $block && $r['text'] === $withBlock && $r['backup'] === '' && file_get_contents($htFile) === $stock && files($tmpRoot) === $listing && $d['done'] === 'dry run' && $d['text'] === $r['text']);
+list($fixture) = htHand($stock, '# PW-PAGENAME', $readme);
+htPut($htFile, $fixture);
+$listing = files($tmpRoot);
+$r = $h->write(true, true);
+$text = $r['text'];
+check('htaccess dry run, Replace: returns the state, the candidates, the block and the new text; the file and the dir listing unchanged', $r['ok'] && $r['done'] === 'dry run' && $r['state'] === 'candidate' && count($r['candidates']) === 4 && $r['block'] === $block && is_string($text) && strpos($text, $prefix) !== false && file_get_contents($htFile) === $fixture && files($tmpRoot) === $listing);
+$r = $h->write(false, true);
+check('htaccess Replace writes what its dry run showed', $r['ok'] && file_get_contents($htFile) === $text);
+$listing = files($tmpRoot);
+$r = $h->remove(true);
+$d = $sp->removeHtaccess(true);
+check('htaccess dry run, remove: returns the text it would give back; the file and the dir listing unchanged; removeHtaccess() says the same', $r['ok'] && $r['done'] === 'dry run' && $r['text'] === $fixture && file_get_contents($htFile) === $text && files($tmpRoot) === $listing && $d['text'] === $fixture);
+htClean($tmpRoot);
+
+//six writes leave five backups, the oldest gone: within one second, a counter tells them apart
+htPut($htFile, $stock);
+$names = array();
+foreach(array('index.html', 'cache.htm', 'index.html', 'cache.htm', 'index.html', 'cache.htm') as $name) {
+	$sp->set('staticFile', $name);
+	$r = $h->write();
+	$names[] = $r['backup'];
+}
+$sp->set('staticFile', 'index.html');
+$left = array_keys($h->backups($htFile));
+check('htaccess: six writes leave five backups, the oldest gone, the newest first', count(array_unique($names)) === 6 && count(htBackups($tmpRoot)) === 5 && !file_exists("$tmpRoot/{$names[0]}") && $left === array_reverse(array_slice($names, 1)), json_encode(array($names, $left)));
+htClean($tmpRoot);
+
+//the check request: a 5xx puts the backup back, 200 and no answer keep the new file
+$asked = $results = array();
+foreach(array('500' => 500, '200' => 200, 'throwing' => null) as $label => $code) {
+	htPut($htFile, $stock);
+	$h->fetch = function($url) use ($code, &$asked) {
+		$asked[] = $url;
+		if($code === null) throw new WireException('no answer');
+		return $code;
+	};
+	$r = $h->write();
+	$results[$label] = array($r, (string) file_get_contents($htFile));
+	htClean($tmpRoot);
+}
+$h->fetch = null;
+list($r, $bytes) = $results['500'];
+check('htaccess write: a check request answered 500 puts the backup back, and the result says so', !$r['ok'] && $r['done'] === 'restored' && $r['restored'] && $r['fetch'] === 500 && $bytes === $stock && strpos($r['message'], 'answered 500') !== false && strpos($r['message'], 'was put back') !== false && strpos(logText($tmp), 'put back from') !== false, $r['message']);
+check('htaccess write: a check request answered 200 keeps the new file; one that throws keeps it too and is logged', $results['200'][0]['ok'] && $results['200'][0]['fetch'] === 200 && $results['200'][1] === $withBlock && $results['throwing'][0]['ok'] && $results['throwing'][0]['fetch'] === 0 && $results['throwing'][1] === $withBlock && strpos(logText($tmp), 'got no answer') !== false && count($asked) === 3 && $asked[0] === (string) $config->urls->httpRoot, json_encode(array($results['throwing'][0]['message'], $asked)));
+
+//a re-read that is not what was meant puts the backup back
+htPut($htFile, $stock);
+$h->reread = function(array $status) { $status['state'] = 'outdated'; return $status; };
+$r = $h->write();
+$h->reread = null;
+check('htaccess write: a re-read that is not current (forced) puts the backup back', !$r['ok'] && $r['restored'] && file_get_contents($htFile) === $stock && strpos($r['message'], 'outdated, not current') !== false, $r['message']);
+htClean($tmpRoot);
+
+check('htaccess writer: no temporary file is left, the temporary root is empty again', files($tmpRoot) === '' && !count(glob("$tmpRoot/{,.}*.tmp", GLOB_BRACE)), files($tmpRoot));
+
 ////  fixture
 
 $home = $pages->get('/');

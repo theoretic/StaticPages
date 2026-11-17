@@ -65,6 +65,64 @@ class StaticPagesHtaccess extends Wire {
 	//the states of the file, see status(), in the order they are tested
 	const states = array('none', 'locked', 'damaged', 'unrecognised', 'candidate', 'absent', 'current', 'outdated');
 
+	//what Replace puts at the start of a hand-written line, and remove() takes off again
+	const replacedPrefix = '# StaticPages-replaced: ';
+
+	//the stock line (htaccess.txt :170) Replace writes after a hand DirectoryIndex it prefixes
+	const stockDirectoryIndex = 'DirectoryIndex index.php index.html index.htm';
+
+	//backups kept, seconds to wait for the lock, seconds for the check request
+	const keepBackups = 5;
+	const lockWait = 10;
+	const fetchTimeout = 5;
+
+	//directives whose commented-out stock form counts as stock uncommented too, see stockKeysOf()
+	const optionalDirectives = 'Rewrite[A-Za-z]+|Options|Header|DirectoryIndex|SetEnv[A-Za-z]*|LimitRequestBody|Deny|Allow|Order|Require|AddDefaultCharset';
+
+	//every line of htaccess.txt of 3.0.274 (@htaccessVersion 301) as lineKey() gives it, plus its
+	//commented-out directives uncommented: stockKeysOf() of tests/fixtures/htaccess-301.txt,
+	//compared by the smoke test. What isStockLine() asks: a line Replace never prefixes. Kept
+	//here, not read from the fixture, because a site's copy of the module need not ship tests/
+	const stockLineKeys =
+		'01abfc750a0c 02f5f966c125 04870a8f3aa6 04c00c85f796 055e3bd27716 05e8b985d06b 07a926d3a416 08a8df16706e ' .
+		'0936d30f83de 09dbdfb6f6be 0a29d6dd2cf3 0a69f6ca9ea1 0a72fb574a76 0b44a0a5e545 0c01093d5d8e 0c10b82e760f ' .
+		'0cb1c9503f27 0cdea7fbbff4 0d063b828c52 0df38a8de79e 0e1803db0be1 0ebc2541a3b6 11b685f90c9f 1249f50356f5 ' .
+		'129efa6567be 15428f32b0b2 159d4c368695 16255cf35630 170ac7610a16 18a32bc23f84 18fa64aaadf3 18ff874746be ' .
+		'199088965585 1a643f9262de 1a765dfbbc8a 1c0ba9111c7b 1c2863b9b90e 1c708df60cf7 1d3f11bde674 1e1b2bace272 ' .
+		'2054390d5414 2063e5fb0840 210cf42d72c2 2487a9493d8e 248a7785fe49 258fe68324f8 261e24dd702b 26c87a375b16 ' .
+		'277a2f3b7fe2 27c95da9505d 28e8f4a8f705 29849a3620a4 2a49420f5433 2a4b22731414 2b263bd14e97 2bf6de603135 ' .
+		'2e43548f95e2 2f7b5eec872d 30ba00b34c10 32391cb66450 3259eb970990 32af50d25817 335cd46ce5f7 33df1eb087f9 ' .
+		'3668290c8086 37cff0934868 396e8cebb2f0 3ac9f6bfe88b 3aeed8576dba 3af2cdfec37e 3b03a6044d47 3b72535ebae2 ' .
+		'3b9f543e4fd8 3c3098805176 3cf91278e0a8 3de02dadff3a 3e4c52daa480 3ef56a36098b 3f32fb5e0482 40afe384a8aa ' .
+		'40f1e7bb8573 41aa5831deb1 42b762e75ad9 42e1601885d7 4554e728874b 45bd4ac3ba33 47437c1ebd75 47e7a50edf20 ' .
+		'488d50140508 4935e0a5ea1e 494857d35fcd 49ee93a5d73f 4a0593efbd34 4ab2780b2b85 4b37d1ac8d27 4d90a71b4349 ' .
+		'4d975e6d7f60 4dabe7f63770 4ea3f6e85614 50d50536372b 518294ad08d7 53ecaeb957c1 544c9c1c3942 54c8b5310a8b ' .
+		'55e9e0b6aece 579ba39f1adc 57ef3f1dd179 594f9c416a38 597b20acb614 59ef1431b38b 59f1ea40024b 5bb0ae5ea243 ' .
+		'5c46061d12af 5cc8a02be988 5d48f5f41422 5da68097cb48 5de6c5fade16 5ea8ad1558cb 5fa02de72e9c 609023884abe ' .
+		'60e10952a884 610c4e82fde8 616e2974a478 6183087a7aaa 6190aaedba9a 61cb8c36d193 627169d98bc2 635eaa511aff ' .
+		'63d69bf887fb 645ecd385193 648af639ed4e 64abad78d06b 66f1b258769d 69622b536eff 6a756878164d 6acd055bc50f ' .
+		'6ae2bbcbe874 6c02ea8dd5be 6c2fec133661 6c7b6967641e 6ca2a34e2f58 6d40aff5a94c 6d423d327e64 6daf27bcb999 ' .
+		'6e36c7782572 6e840f9ca71f 709c70aeda69 71ccb8279eab 732f4066c708 7332d982d2e4 733c11dbaf40 755e044eaa41 ' .
+		'75ba14acacde 75dda649d90b 75e84b7344cb 76c6d2825198 782d5678d1b0 783493117ebc 794ea4dab40a 7a783f7b68d6 ' .
+		'7a9e10fd6da8 7c372c8e1bd4 7d68c5fa51e8 7e0248d1dde5 7e692d047b58 7f3761da6c44 81265b97d740 82728f08666e ' .
+		'82806b6488b1 830d1d3be571 84a8de6628f7 853a45fb5511 85692ebae22e 85725a40d27b 85be96ad1427 86a5e0bae366 ' .
+		'8bf04c06dd71 8c0bc9c9863e 8c0c8b5bce54 8c51f4727f58 8f4b90fbb2b9 8f4c5342126a 919084e387db 92be8330fade ' .
+		'933346163c70 935f074fb875 9399067d7935 9612f04ee4cd 975132cb3911 9b01420d1357 9c4cfa6fc4a2 9f2438dc1309 ' .
+		'a0eb8b2eb9c5 a196a9bcaf3f a1efb3cbd771 a3ca9deb6198 a4adbbde61be a5d7ab98c0c0 a6cb1f3486ce a80462458dca ' .
+		'a9cb92b0e9ae aa45d2dfd6bc ab3a9a7827fa ab4bbb952b8c acaddc8d02d5 ad963fae7c3b ae32c7b13ab8 af14fecee2c5 ' .
+		'b21e3b0fa111 b26b9802e38a b2ce9ff64494 b2ecc52de787 b3313744e749 b600851042da b60a8991d259 bb8a965736a4 ' .
+		'bc18638e042a bccd1aa04b0e bd0d2bccacc2 bdd68ae3d344 be957757f47c bfad419d8da5 c08896a8ec1d c1407690eecb ' .
+		'c14ce88fddca c170e2d5c11e c178a19482ea c187323d4822 c2eacac65387 c42fa6ff73bd c51a35c7cdd2 c69cf8128bcb ' .
+		'c7d00da10e24 c7d0fd970fca c80b7f922f70 ca4c62cd739e caf64c6d6065 cb85616a99ef cc71503e902e cdfe09f629da ' .
+		'ce68ceb19f81 cf96496fe813 cfaa055b6e8c d05e9b727c5f d3600c4ba1b0 d41d8cd98f00 d766815b70aa da65e30c134d ' .
+		'db71cdd94c5b dbabccb80f31 dbc9fa605ae9 dc12af065020 deb8a1b2b223 ded61a14c215 e1c529128396 e23fdd874ff3 ' .
+		'e2f405c25ef2 e2fec11f5285 e4b459e81144 e58bf6c4c83c e6b9fa045d22 e7723455f6fa e7c91313c7fc e90a4b59dad2 ' .
+		'e94912dc3859 e9c76dd20d2d ea6dae5ed196 ea88e22daca3 ea8bf380bf84 ec4fef3ab7ee ed29f323fbd4 ee22ea06bc2a ' .
+		'efb087dde877 f05d35e539e3 f0970d1915e3 f12d266ce61f f18fdec57b86 f2d9c7be80a3 f305c4d17de2 f45c93217b80 ' .
+		'f573c9e40c7c f5e374bf2a23 f6d0eabb5355 f702576917cc f83a97499ce5 f89b1778005f f93209ae6da3 f94d88a333b4 ' .
+		'f952e57fdd3f f953c534245c fa3e98db7c5a fa87c7ea50e7 fafef7940ed2 fb688888c464 fbfd63ab904c fd0383dfff12 ' .
+		'fdfbd5b13e1a feb93476a898 feea1b78eec8 ff1526cb0a34 ff543a630fbc ff5b26f0e9a3 ffff2c7a9a68 ';
+
 	/**
 	 * The file status() reads; '' is the .htaccess in the site root. Set by the tests only: they
 	 * build the settings form under the install's own root, where no fixture may go
@@ -75,6 +133,19 @@ class StaticPagesHtaccess extends Wire {
 	 *
 	 */
 	public $file = '';
+
+	/**
+	 * Test seams of the writer: $fetch, a callable($url) giving the root URL's status code,
+	 * asked in place of a WireHttp request (and then under CLI too); $reread, a callable(array
+	 * $status) giving the status the writer judges after its write
+	 *
+	 * #pw-internal
+	 *
+	 * @var callable|null
+	 *
+	 */
+	public $fetch = null;
+	public $reread = null;
 
 	/** @var StaticPages */
 	protected $sp;
@@ -251,11 +322,18 @@ class StaticPagesHtaccess extends Wire {
 	 *
 	 */
 	public function status() {
+		list($result) = $this->read();
+		return $result;
+	}
+
+	protected function read() {
+		//array(status, the bytes classified or null): the writer works from the very bytes it
+		//classified, read once
 		$path = $this->filePath();
 
 		//nothing is ever created where there is no file: nginx, IIS, Caddy, rules in the vhost
 		if( !file_exists($path) && !is_link($path) )
-			return $this->result( 'none', 'There is no .htaccess in the site root.', $path );
+			return array( $this->result( 'none', 'There is no .htaccess in the site root.', $path ), null );
 
 		//a write goes to a temporary file in the same dir and is renamed over the original:
 		//that needs the dir writable, and would replace a link by a plain file
@@ -267,11 +345,11 @@ class StaticPagesHtaccess extends Wire {
 		else if( !is_writable( dirname($path) ) ) $why = 'its directory is not writable';
 		$bytes = $why === '' ? @file_get_contents($path) : false;
 		if( $why === '' && $bytes === false ) $why = 'it cannot be read';
-		if( $why !== '' ) return $this->result( 'locked', "The .htaccess is left alone: $why.", $path );
+		if( $why !== '' ) return array( $this->result( 'locked', "The .htaccess is left alone: $why.", $path ), null );
 
 		$result = $this->classify($bytes);
 		$result['file'] = $path;
-		return $result;
+		return array( $result, $bytes );
 	}
 
 	/**
@@ -350,30 +428,65 @@ class StaticPagesHtaccess extends Wire {
 			return $this->state( $result, 'candidate', 'The .htaccess holds hand-written rules that look like StaticPages rules (lines ' . implode( ', ', $at ) . ').' );
 		}
 
-		$eol = $result['eol'];
-		$block = str_replace( "\n", $eol, $result['block'] );
-
 		if( !$result['blockLines'] ){
-			//immediately before the "# PW-PAGENAME" line: inside mod_rewrite, after the access
-			//rules, ahead of the 16A condition, which belongs to the stock rule 19
-			$at = $lines[ $result['pageNameLine'] ]['offset'];
-			$result['text'] = substr( $bytes, 0, $at ) . $block . $eol . substr( $bytes, $at );
+			$result['text'] = $this->applyEdits( $bytes, array( $this->blockEdit( $lines, $result ) ) );
 			return $this->state( $result, 'absent', 'The .htaccess has no StaticPages block yet.' );
 		}
 
-		list($first, $last) = $result['blockLines'];
-		$current = array();
-		for( $n = $first; $n <= $last; $n++ ) $current[] = $lines[$n]['text'];
-		if( implode( "\n", $current ) === $result['block'] ){
+		if( $this->blockIsCurrent( $lines, $result ) ){
 			$result['text'] = $bytes;
 			return $this->state( $result, 'current', 'The StaticPages block in the .htaccess is up to date.' );
 		}
 
-		//the block's lines only, the last one without its line end: no other byte changes
+		$result['text'] = $this->applyEdits( $bytes, array( $this->blockEdit( $lines, $result ) ) );
+		return $this->state( $result, 'outdated', 'The StaticPages block in the .htaccess differs from the one the current settings generate.' );
+	}
+
+	/**
+	 * The edit that puts the generated block in: array(offset, length, text)
+	 *
+	 * Without a block, it goes immediately before the "# PW-PAGENAME" line: inside mod_rewrite,
+	 * after the access rules, ahead of the 16A condition, which belongs to the stock rule 19.
+	 * With one, its lines are replaced, the last one without its line end: no other byte changes.
+	 * The block takes the file's own line ends.
+	 *
+	 * @param array $lines From lines()
+	 * @param array $result From classify(): 'blockLines', 'pageNameLine', 'eol', 'block'
+	 * @return array
+	 *
+	 */
+	protected function blockEdit(array $lines, array $result) {
+		$eol = $result['eol'] ? $result['eol'] : "\n";
+		$block = str_replace( "\n", $eol, $result['block'] );
+		if( !$result['blockLines'] ) return array( $lines[ $result['pageNameLine'] ]['offset'], 0, $block . $eol );
+		list($first, $last) = $result['blockLines'];
 		$from = $lines[$first]['offset'];
 		$to = $lines[$last]['offset'] + strlen( $lines[$last]['text'] );
-		$result['text'] = substr( $bytes, 0, $from ) . $block . substr( $bytes, $to );
-		return $this->state( $result, 'outdated', 'The StaticPages block in the .htaccess differs from the one the current settings generate.' );
+		return array( $from, $to - $from, $block );
+	}
+
+	protected function blockIsCurrent(array $lines, array $result) {
+		//the block's lines equal the generated block, line ends aside
+		if( !$result['blockLines'] ) return false;
+		list($first, $last) = $result['blockLines'];
+		$current = array();
+		for( $n = $first; $n <= $last; $n++ ) $current[] = $lines[$n]['text'];
+		return implode( "\n", $current ) === $result['block'];
+	}
+
+	/**
+	 * $bytes with edits applied, each array(offset, length, text) on the original offsets; edits
+	 * must not overlap
+	 *
+	 * @param string $bytes
+	 * @param array $edits
+	 * @return string
+	 *
+	 */
+	public function applyEdits($bytes, array $edits) {
+		usort( $edits, function($a, $b) { return $b[0] - $a[0]; } );
+		foreach( $edits as $edit ) $bytes = substr_replace( $bytes, $edit[2], $edit[0], $edit[1] );
+		return $bytes;
 	}
 
 	/**
@@ -624,6 +737,500 @@ class StaticPagesHtaccess extends Wire {
 		$result['state'] = $state;
 		$result['reason'] = $reason;
 		return $result;
+	}
+
+////  the writer: the block spliced in, hand rules prefixed on Replace, always after a backup
+
+	/**
+	 * Write the generated block into the root .htaccess
+	 *
+	 * Writes from the states absent and outdated, and from candidate on the operator's Replace;
+	 * current needs nothing; none, locked, damaged and unrecognised are refused. On Replace every
+	 * hand-written line of a candidate group (S1, S2) gets the prefix "# StaticPages-replaced: "
+	 * and nothing is deleted. A line the stock htaccess.txt also holds is never prefixed (the 16A
+	 * condition stays, so it joins the next rule again), and neither is a group that is a
+	 * candidate only by the request method (S4): the block must then go below it, else Replace is
+	 * refused [decided by user, step 4]. A hand DirectoryIndex line naming the copy first (S3) is
+	 * prefixed and the stock DirectoryIndex line written right after it [decided by user, step 4].
+	 *
+	 * Steps: the lock; read and refuse unless the state allows it; a dry run stops here; a backup
+	 * (.htaccess.sp-<YmdHis>.bak, the five newest kept); the new bytes to a temporary file in the
+	 * same dir, renamed over the file; read again, and put the backup back unless it is what was
+	 * meant; from a web request (or with $fetch set), one request for the site's root URL, and
+	 * the backup back on a 5xx; one log line.
+	 *
+	 * @param bool $dryRun Only say what would be written
+	 * @param bool $replace The operator chose Replace for the hand-written rules found
+	 * @return array status() plus 'ok', 'done' (refused, nothing, dry run, written, restored),
+	 *   'message', 'messages' (what the operator must know besides), 'text', 'backup',
+	 *   'prefixed' (line numbers), 'directoryIndex' (line numbers), 'kept' (S4 groups left,
+	 *   "first-last"), 'regrouped' (stock conditions that join a hand rule from now on), 'fetch'
+	 *   (the root URL's status code, 0 for no answer, null when not asked), 'restored'
+	 *
+	 */
+	public function write($dryRun = false, $replace = false) {
+		return $this->change( $replace ? 'replace' : 'write', $dryRun );
+	}
+
+	/**
+	 * Take the block and the "# StaticPages-replaced: " prefixes out of the root .htaccess again,
+	 * with the stock DirectoryIndex line a Replace added
+	 *
+	 * Gives back, byte for byte, what the file held before the block came in, hand rules
+	 * included. The same steps as write().
+	 *
+	 * @param bool $dryRun
+	 * @return array See write()
+	 *
+	 */
+	public function remove($dryRun = false) {
+		return $this->change( 'remove', $dryRun );
+	}
+
+	protected function change($mode, $dryRun) {
+		$index = $this->sp->index();
+		$lock = $index->lockName('htaccess');
+		try {
+			$locked = $index->getLock( $lock, self::lockWait );
+		}
+		catch( \Throwable $e ){
+			$locked = false;
+		}
+		if( !$locked ){
+			$result = $this->outcome( $this->status(), $mode, $dryRun );
+			$result['message'] = 'The .htaccess lock could not be taken (another request is changing the file, or the database is not there): nothing was written.';
+			return $result;
+		}
+		try {
+			return $this->changeLocked( $mode, $dryRun );
+		}
+		finally {
+			try {
+				$index->releaseLock($lock);
+			}
+			catch( \Throwable $e ){
+			}
+		}
+	}
+
+	protected function changeLocked($mode, $dryRun) {
+		list($status, $bytes) = $this->read();
+		$result = $this->outcome( $status, $mode, $dryRun );
+
+		$plan = $mode === 'remove' ? $this->planRemove( $status, $bytes ) : $this->planWrite( $status, $bytes, $mode === 'replace' );
+		foreach( $plan['info'] as $key => $value ) $result[$key] = $value;
+		$result['messages'] = $plan['messages'];
+		if( $plan['refuse'] !== '' ){
+			$result['message'] = $plan['refuse'];
+			return $result;
+		}
+		$text = $plan['text'];
+		$result['text'] = $text;
+
+		if( $text === $bytes ){
+			$result['ok'] = true;
+			$result['done'] = 'nothing';
+			$result['message'] = $mode === 'remove' ? 'The .htaccess holds no StaticPages block and no prefixed line: nothing to do.' : 'The StaticPages block in the .htaccess is up to date: nothing to do.';
+			return $result;
+		}
+		if( $dryRun ){
+			$result['ok'] = true;
+			$result['done'] = 'dry run';
+			$result['message'] = 'Dry run: the .htaccess would get the text shown, nothing was written.';
+			return $result;
+		}
+
+		$path = $status['file'];
+		$backup = $this->backup( $path, $bytes );
+		if( $backup === '' ){
+			$result['message'] = 'No backup of the .htaccess could be made: nothing was written.';
+			return $result;
+		}
+		$result['backup'] = basename($backup);
+		$this->pruneBackups($path);
+
+		if( !$this->replaceFile( $path, $text ) ){
+			$result['message'] = 'The new .htaccess could not be written: the file is unchanged, the backup ' . $result['backup'] . ' was made.';
+			$this->sp->logDrain( "htaccess: could not write $path, unchanged" );
+			return $result;
+		}
+
+		//read again: the file must be what was meant
+		list($after, $afterBytes) = $this->read();
+		if( is_callable($this->reread) ) $after = call_user_func( $this->reread, $after );
+		$why = $this->verify( $mode, $after, $afterBytes, $text );
+		if( $why === '' ){
+			$code = $this->loopback();
+			$result['fetch'] = $code;
+			if( $code >= 500 && $code <= 599 ) $why = "the site's root URL answered $code";
+			else if( $code === 0 ) $this->sp->logDrain( "htaccess: the check request for the site's root URL got no answer, the new $path stays" );
+		}
+		if( $why !== '' ){
+			$back = $this->replaceFile( $path, $bytes ) && @file_get_contents($path) === $bytes;
+			$result['restored'] = $back;
+			$result['done'] = 'restored';
+			$result['message'] = $back
+				? "The new .htaccess was not kept: $why. The backup " . $result['backup'] . ' was put back.'
+				: "The new .htaccess was not kept: $why. The backup " . $result['backup'] . ' could NOT be put back: restore it by hand.';
+			$this->sp->logDrain( "htaccess: $path written and " . ( $back ? 'put back from ' : 'NOT put back from ' ) . $result['backup'] . ": $why" );
+			return $result;
+		}
+
+		$what = array(
+			'write' => $status['state'] === 'outdated' ? 'the StaticPages block was rewritten' : 'the StaticPages block was added',
+			'replace' => count($result['prefixed']) . ' hand-written lines were commented out with the prefix "' . trim(self::replacedPrefix) . '"' . ( count($result['directoryIndex']) ? ', the stock DirectoryIndex line added after ' . count($result['directoryIndex']) . ' hand-written one' . ( count($result['directoryIndex']) > 1 ? 's' : '' ) : '' ) . ' and the StaticPages block written',
+			'remove' => 'the StaticPages block and the prefixes were taken out',
+			);
+		$result['ok'] = true;
+		$result['done'] = 'written';
+		$result['message'] = ucfirst( $what[$mode] ) . '; the backup is ' . $result['backup'] . '.';
+		$this->sp->logDrain( "htaccess: $path: " . $what[$mode] . ', backup ' . $result['backup'] . ( count($result['messages']) ? '. ' . implode( ' ', $result['messages'] ) : '' ) );
+		return $result;
+	}
+
+	protected function outcome(array $status, $mode, $dryRun) {
+		//what change() returns: the status read, and what came of it
+		return array_merge( $status, array(
+			'mode' => $mode,
+			'dryRun' => (bool) $dryRun,
+			'ok' => false,
+			'done' => 'refused',
+			'message' => '',
+			'messages' => array(),
+			'backup' => '',
+			'prefixed' => array(),
+			'directoryIndex' => array(),
+			'kept' => array(),
+			'regrouped' => array(),
+			'fetch' => null,
+			'restored' => false,
+			) );
+	}
+
+	/**
+	 * What write() would give the file: array('refuse' => why or '', 'text', 'info', 'messages')
+	 *
+	 * @param array $status
+	 * @param string|null $bytes
+	 * @param bool $replace
+	 * @return array
+	 *
+	 */
+	protected function planWrite(array $status, $bytes, $replace) {
+		$plan = array( 'refuse' => '', 'text' => null, 'info' => array(), 'messages' => array() );
+		$state = $status['state'];
+
+		if( !in_array( $state, array('candidate', 'absent', 'current', 'outdated'), true ) ){
+			$plan['refuse'] = "Nothing was written: the state of the .htaccess is $state. " . $status['reason'];
+			return $plan;
+		}
+		if( $state === 'current' ){
+			$plan['text'] = $bytes;
+			return $plan;
+		}
+		$lines = $this->lines($bytes);
+		$edits = array();
+
+		if( $state === 'candidate' ){
+			if( !$replace ){
+				$plan['refuse'] = 'Nothing was written: the .htaccess holds hand-written rules that look like StaticPages rules. Choose Replace or Keep for them first.';
+				return $plan;
+			}
+			$at = $status['blockLines'] ? $status['blockLines'][0] : $status['pageNameLine'];
+			$eol = $status['eol'];
+			$prefixed = array();
+			$kept = array();
+			$directoryIndex = array();
+
+			foreach( $status['candidates'] as $group ){
+				$span = $group['start'] === $group['end'] ? (string) $group['start'] : $group['start'] . '-' . $group['end'];
+
+				//by the request method only (the shape of a gate script that sends stored
+				//copies): never commented out, and the block goes below it
+				if( $group['signatures'] === array('S4') ){
+					if( $group['end'] >= $at ){
+						$plan['refuse'] = "Nothing was written: the hand-written rules on lines $span are conditioned on the request method only, which Replace leaves in place, and they lie below the place the StaticPages block goes (line $at), where the block would answer before them. Move them above that line, or choose Keep.";
+						return $plan;
+					}
+					$kept[] = $span;
+					continue;
+				}
+
+				//a hand DirectoryIndex naming the copy first: prefixed, and the stock line
+				//written right after it, else Apache's default would never offer index.php
+				if( $group['signatures'] === array('S3') ){
+					$n = $group['start'];
+					$text = $lines[$n]['text'];
+					if( $this->isStockLine($text) || strpos( $text, self::replacedPrefix ) === 0 ) continue;
+					preg_match( '/^[ \t]*/', $text, $indent );
+					$edits[] = array( $lines[$n]['offset'], 0, self::replacedPrefix );
+					$edits[] = array( $lines[$n]['offset'] + strlen($text), 0, $eol . $indent[0] . self::stockDirectoryIndex );
+					$directoryIndex[] = $n;
+					continue;
+				}
+
+				foreach( $group['lines'] as $n => $text ){
+					if( $this->isStockLine($text) || strpos( $text, self::replacedPrefix ) === 0 ) continue;
+					$edits[] = array( $lines[$n]['offset'], 0, self::replacedPrefix );
+					$prefixed[$n] = true;
+				}
+			}
+
+			//a stock condition kept in a group now joins the next rule left standing: rule 19 in
+			//the stock layout, a hand rule where the site put one in between [decided by user,
+			//step 4: Replace goes ahead and says so]
+			$regrouped = array();
+			foreach( $status['candidates'] as $group ){
+				if( $group['signatures'] === array('S4') || $group['signatures'] === array('S3') ) continue;
+				foreach( $group['lines'] as $n => $text ){
+					if( isset($prefixed[$n]) ) continue;
+					$directive = $this->directive($text);
+					if( !$directive || $directive[0] !== 'rewritecond' ) continue;
+					$rule = null;
+					for( $m = $n + 1; $m <= count($lines); $m++ ){
+						if( isset($prefixed[$m]) ) continue;
+						if( $status['blockLines'] && $m >= $status['blockLines'][0] && $m <= $status['blockLines'][1] ) continue;
+						$d = $this->directive( $lines[$m]['text'] );
+						if( $d && $d[0] === 'rewriterule' ){
+							$rule = $m;
+							break;
+						}
+					}
+					if( $rule !== null && $this->isStockLine( $lines[$rule]['text'] ) ) continue;
+					$regrouped[] = array( 'line' => $n, 'text' => $text, 'ruleLine' => $rule, 'rule' => $rule === null ? '' : $lines[$rule]['text'] );
+					$plan['messages'][] = $rule === null
+						? "The stock condition on line $n stays and is followed by no rule."
+						: "The stock condition on line $n stays and from now on belongs to the hand-written rule on line $rule, not to a stock rule: a rule the heuristic does not count was written between it and the stock rule 19.";
+				}
+			}
+
+			$plan['info'] = array( 'prefixed' => array_keys($prefixed), 'kept' => $kept, 'directoryIndex' => $directoryIndex, 'regrouped' => $regrouped );
+			if( count($kept) ) $plan['messages'][] = 'The hand-written rules on lines ' . implode( ', ', $kept ) . ' are conditioned on the request method only and were left in place.';
+			if( count($directoryIndex) ) $plan['messages'][] = 'The hand-written DirectoryIndex line on line ' . implode( ', ', $directoryIndex ) . ' was commented out, and the stock line "' . self::stockDirectoryIndex . '" added after it.';
+		}
+
+		$edits[] = $this->blockEdit( $lines, $status );
+		$text = $this->applyEdits( $bytes, $edits );
+
+		//a condition left standing right above the block would join the block's first rule
+		$dangling = $this->conditionAboveBlock($text);
+		if( $dangling ){
+			$plan['refuse'] = "Nothing was written: the RewriteCond on line $dangling would stand right above the StaticPages block, with no rule between them, and so join the block's first rule.";
+			return $plan;
+		}
+
+		$plan['text'] = $text;
+		return $plan;
+	}
+
+	protected function planRemove(array $status, $bytes) {
+		$plan = array( 'refuse' => '', 'text' => null, 'info' => array(), 'messages' => array() );
+		$state = $status['state'];
+		if( !in_array( $state, array('candidate', 'absent', 'current', 'outdated'), true ) ){
+			$plan['refuse'] = "Nothing was changed: the state of the .htaccess is $state. " . $status['reason'];
+			return $plan;
+		}
+
+		$lines = $this->lines($bytes);
+		$edits = array();
+		$block = $status['blockLines'];
+		if( $block ){
+			//the block and the line end write() gave it
+			list($first, $last) = $block;
+			$from = $lines[$first]['offset'];
+			$to = isset( $lines[$last + 1] ) ? $lines[$last + 1]['offset'] : strlen($bytes);
+			$edits[] = array( $from, $to - $from, '' );
+		}
+
+		$prefixed = array();
+		$directoryIndex = array();
+		$skip = 0;
+		foreach( $lines as $n => $line ){
+			if( $n === $skip ) continue;
+			if( $block && $n >= $block[0] && $n <= $block[1] ) continue;
+			if( strpos( $line['text'], self::replacedPrefix ) !== 0 ) continue;
+			$edits[] = array( $line['offset'], strlen(self::replacedPrefix), '' );
+			$prefixed[] = $n;
+			//the stock DirectoryIndex line a Replace wrote right after a hand one
+			$rest = substr( $line['text'], strlen(self::replacedPrefix) );
+			if( preg_match( '/^\s*DirectoryIndex\s/i', $rest ) && isset( $lines[$n + 1] ) && trim( $lines[$n + 1]['text'] ) === self::stockDirectoryIndex ){
+				$from = $line['offset'] + strlen( $line['text'] );
+				$to = $lines[$n + 1]['offset'] + strlen( $lines[$n + 1]['text'] );
+				$edits[] = array( $from, $to - $from, '' );
+				$directoryIndex[] = $n + 1;
+				$skip = $n + 1;
+			}
+		}
+
+		$plan['info'] = array( 'prefixed' => $prefixed, 'directoryIndex' => $directoryIndex );
+		$plan['text'] = $this->applyEdits( $bytes, $edits );
+		return $plan;
+	}
+
+	protected function verify($mode, array $after, $afterBytes, $text) {
+		//'' when the file read back is what was meant
+		if( $afterBytes !== $text ) return 'the file read back does not hold the bytes written';
+		$lines = $this->lines($afterBytes);
+		if( $mode === 'remove' ){
+			if( !in_array( $after['state'], array('candidate', 'absent'), true ) || $after['blockLines'] ) return 'the file read back is ' . $after['state'];
+			foreach( $lines as $line ) if( strpos( $line['text'], self::replacedPrefix ) === 0 ) return 'a prefixed line is left';
+			return '';
+		}
+		if( $after['state'] === 'current' ) return '';
+		//on Replace, groups conditioned on the request method only stay candidates
+		if( $mode === 'replace' && $after['state'] === 'candidate' && $this->blockIsCurrent( $lines, $after ) ){
+			foreach( $after['candidates'] as $group ) if( $group['signatures'] !== array('S4') ) return 'hand-written rules are left on lines ' . $group['start'] . '-' . $group['end'];
+			return '';
+		}
+		return 'the file read back is ' . $after['state'] . ', not current';
+	}
+
+	protected function conditionAboveBlock($text) {
+		//the line of an active RewriteCond that no RewriteRule stands between and the block's
+		//first line, or 0
+		$lines = $this->lines($text);
+		$begin = 0;
+		foreach( $lines as $n => $line ) if( trim( $line['text'] ) === self::markerBegin ){
+			$begin = $n;
+			break;
+		}
+		for( $n = $begin - 1; $n > 0; $n-- ){
+			$t = trim( $lines[$n]['text'] );
+			if( preg_match( '#^<IfModule\s+(mod_rewrite(\.c)?|rewrite_module)\s*>#i', $t ) ) return 0;
+			$directive = $this->directive($t);
+			if( !$directive ) continue;
+			if( $directive[0] === 'rewriterule' ) return 0;
+			if( $directive[0] === 'rewritecond' ) return $n;
+		}
+		return 0;
+	}
+
+	protected function backup($path, $bytes) {
+		//<file>.sp-<YmdHis>.bak next to the file, never over an existing one: a counter for a
+		//second backup within the same second. '' when none could be made
+		$stamp = date('YmdHis');
+		for( $n = 1; $n <= 99; $n++ ){
+			$backup = $path . '.sp-' . $stamp . ( $n > 1 ? "-$n" : '' ) . '.bak';
+			if( file_exists($backup) || is_link($backup) ) continue;
+			$handle = @fopen( $backup, 'xb' );
+			if( !$handle ) return '';
+			$ok = @fwrite( $handle, $bytes ) === strlen($bytes);
+			@fclose($handle);
+			if( $ok ) return $backup;
+			@unlink($backup);
+			return '';
+		}
+		return '';
+	}
+
+	/**
+	 * The backups of the file, newest first: name => array(YmdHis, counter)
+	 *
+	 * #pw-internal
+	 *
+	 * @param string $path
+	 * @return array
+	 *
+	 */
+	public function backups($path = '') {
+		if( $path === '' ) $path = $this->filePath();
+		$dir = dirname($path);
+		$pattern = '/^' . preg_quote( basename($path) . '.sp-', '/' ) . '(\d{14})(?:-(\d{1,2}))?\.bak$/';
+		$found = array();
+		foreach( (array) @scandir($dir) as $name ){
+			if( !preg_match( $pattern, (string) $name, $m ) ) continue;
+			if( is_link("$dir/$name") || !is_file("$dir/$name") ) continue;
+			$found[$name] = array( $m[1], isset($m[2]) ? (int) $m[2] : 1 );
+		}
+		uasort( $found, function($a, $b) { return $a[0] === $b[0] ? $b[1] - $a[1] : strcmp( $b[0], $a[0] ); } );
+		return $found;
+	}
+
+	protected function pruneBackups($path) {
+		//only names of the backup pattern, plain files, next to the file
+		$dir = dirname($path);
+		foreach( array_slice( array_keys( $this->backups($path) ), self::keepBackups ) as $name ) @unlink("$dir/$name");
+	}
+
+	protected function replaceFile($path, $bytes) {
+		//a temporary file in the same dir with the original's permissions, renamed over it
+		$tmp = $path . '.sp-' . getmypid() . '-' . bin2hex( random_bytes(4) ) . '.tmp';
+		try {
+			if( @file_put_contents( $tmp, $bytes ) !== strlen($bytes) ) return false;
+			$perms = @fileperms($path);
+			if( $perms !== false ) @chmod( $tmp, $perms & 0777 );
+			return @rename( $tmp, $path );
+		}
+		finally {
+			clearstatcache();
+			if( file_exists($tmp) ) @unlink($tmp);
+		}
+	}
+
+	protected function loopback() {
+		//the status code of the site's root URL, 0 for no answer, null when not asked: from a
+		//web request only, or through the injected $fetch
+		$fetch = $this->fetch;
+		if( $fetch === null ){
+			if( PHP_SAPI === 'cli' ) return null;
+			$fetch = function($url) {
+				$http = $this->wire( new WireHttp() );
+				$http->setTimeout( self::fetchTimeout );
+				return $http->status($url);
+			};
+		}
+		$url = (string) $this->wire()->config->urls->httpRoot;
+		try {
+			return (int) call_user_func( $fetch, $url );
+		}
+		catch( \Throwable $e ){
+			return 0;
+		}
+	}
+
+	/**
+	 * Whether a line is one the stock htaccess.txt also holds
+	 *
+	 * Compared trimmed, blanks collapsed, case ignored; a commented-out stock directive counts
+	 * uncommented as well (an optional section switched on). See stockLineKeys.
+	 *
+	 * #pw-internal
+	 *
+	 * @param string $text
+	 * @return bool
+	 *
+	 */
+	public function isStockLine($text) {
+		static $keys = null;
+		if( $keys === null ) $keys = array_flip( preg_split( '/\s+/', trim(self::stockLineKeys) ) );
+		return isset( $keys[ $this->lineKey($text) ] );
+	}
+
+	/** #pw-internal */
+	public function lineKey($text) {
+		return substr( md5( strtolower( preg_replace( '/[ \t]+/', ' ', trim( (string) $text ) ) ) ), 0, 12 );
+	}
+
+	/**
+	 * The keys of every line of a stock .htaccess text, sorted: what stockLineKeys holds for
+	 * htaccess.txt of 3.0.274 (the smoke test compares them)
+	 *
+	 * #pw-internal
+	 *
+	 * @param string $stock
+	 * @return array
+	 *
+	 */
+	public function stockKeysOf($stock) {
+		$keys = array();
+		foreach( $this->lines($stock) as $line ){
+			$keys[ $this->lineKey( $line['text'] ) ] = true;
+			if( preg_match( '/^\s*#+\s*(' . self::optionalDirectives . ')\s(.*)$/i', $line['text'], $m ) ) $keys[ $this->lineKey( $m[1] . ' ' . $m[2] ) ] = true;
+		}
+		//keys of digits only came back as integers from array_keys()
+		$keys = array_map( 'strval', array_keys($keys) );
+		sort( $keys, SORT_STRING );
+		return $keys;
 	}
 
 	/** #pw-internal */

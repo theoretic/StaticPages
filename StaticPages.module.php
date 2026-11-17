@@ -18,7 +18,7 @@ parts, each in its own file next to this one and created when first asked for:
   StaticPagesWiper.php      deleting static files: by the index, by the manifest, by a disk scan
   StaticPagesTracker.php    tracked path changes
   StaticPagesMigration.php  bringing an older install up to date
-  StaticPagesHtaccess.php   the rules for the root .htaccess
+  StaticPagesHtaccess.php   the root .htaccess: the rules, reading the file, writing the block
 
 Hooks stay registered on this class: site code looks them up by their toObject.
 */
@@ -792,6 +792,35 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	 */
 	public function htaccessStatus(){
 		return $this->htaccess()->status();
+	}
+
+	/**
+	 * Write the StaticPages block into the root .htaccess, after a backup
+	 *
+	 * For deploy scripts. Writes from the states absent and outdated; with $replace also from
+	 * candidate: the hand-written rules found are commented out with a prefix, never deleted.
+	 * See StaticPagesHtaccess::write().
+	 *
+	 * @param bool $dryRun Only say what would be written
+	 * @param bool $replace Replace the hand-written rules found
+	 * @return array
+	 *
+	 */
+	public function writeHtaccess( $dryRun = false, $replace = false ){
+		return $this->htaccess()->write($dryRun, $replace);
+	}
+
+	/**
+	 * Take the StaticPages block and the prefixes of a Replace out of the root .htaccess again
+	 *
+	 * See StaticPagesHtaccess::remove().
+	 *
+	 * @param bool $dryRun
+	 * @return array
+	 *
+	 */
+	public function removeHtaccess( $dryRun = false ){
+		return $this->htaccess()->remove($dryRun);
 	}
 
 	public function defaultNonStaticDirs(){
