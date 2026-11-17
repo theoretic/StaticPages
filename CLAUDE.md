@@ -16,6 +16,7 @@ before elegance.
 | `StaticPagesWiper.php` | Deleting: by index, by manifest, by scan (PHP, `find`, PowerShell), dry run, protected dirs, `insideRoot()` |
 | `StaticPagesTracker.php` | Tracked path hashes |
 | `StaticPagesMigration.php` | Lazy migration of older installs (`configVersion`) and adoption of unrecorded files |
+| `StaticPagesHtaccess.php` | The root `.htaccess`: the rule generator (`rules()`, `apacheBlock()`: settings and `$config` in, text out, no disk, no database) |
 | `StaticPages.config.php` | Config array. Included whenever core builds module info (refresh, install, cleared info cache): never touch the module from here (0.6.3 and 0.8.0 looped until memory ran out); defaults that need the module are filled in by `hookConfigInputfields()` |
 | `StaticPages.info.php` | Module info, semver string |
 | `tests/smoke.php` | CLI smoke test against a Bridge sandbox |

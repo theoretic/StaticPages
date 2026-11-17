@@ -207,6 +207,120 @@ check('header skip: other cookie', $p->headerSkip(array('Set-Cookie: region=eu; 
 check('header skip: Vary Accept-Encoding is fine', $p->headerSkip(array('Vary: Accept-Encoding')) === '');
 check('header skip: Vary Accept-Language', strpos($p->headerSkip(array('Vary: Accept-Encoding, Accept-Language')), 'accept-language') !== false);
 
+////  .htaccess rules (0.10.0)
+
+//the generator: settings and $config in, text out. Nothing calls it outside these checks yet,
+//the reader and the writer arrive later. $config values are set here and put back at the end
+$h = $sp->htaccess();
+$sessionAtStart = array($config->sessionName, $config->sessionNameSecure, $config->sessionChallenge);
+function sessionConfig($name, $secure, $challenge) {
+	global $config;
+	$config->sessionName = $name;
+	$config->sessionNameSecure = $secure;
+	$config->sessionChallenge = $challenge;
+}
+sessionConfig('wire', '', true);
+$sp->set('staticFile', 'index.html');
+
+$block = $h->apacheBlock();
+$lines = explode("\n", $block);
+check('htaccess block starts with # BEGIN StaticPages and ends with # END StaticPages, each once', strpos($block, "# BEGIN StaticPages\n") === 0 && substr($block, -strlen("\n# END StaticPages")) === "\n# END StaticPages" && substr_count($block, '# BEGIN StaticPages') === 1 && substr_count($block, '# END StaticPages') === 1, $block);
+check('htaccess block holds only LF line ends', strpos($block, "\r") === false);
+check('htaccess block: two calls with the same settings return identical strings', $h->apacheBlock() === $block && $sp->htaccess()->apacheBlock() === $block);
+$rest = array_values(array_filter($lines, fn($l) => strpos(ltrim($l), '#') !== 0));
+$bad = array_filter($rest, fn($l) => !preg_match('/^\s*Rewrite(Cond|Rule)\s/', $l));
+check('htaccess block: every line that is no comment is a RewriteCond or a RewriteRule', count($rest) > 0 && !count($bad), json_encode(array_values($bad)));
+check('htaccess block: the last line that is no comment is a RewriteRule, no condition is left for the stock rule 19', count($rest) && preg_match('/^\s*RewriteRule\s/', end($rest)), (string) end($rest));
+check('htaccess block names the static file name escaped, index\\.html', strpos($block, 'index\\.html') !== false && strpos($block, 'index.html') === false, $block);
+check('htaccess block: rules() is the rule list as data, every rule with conditions', count($h->rules()['rules']) === 3 && !count(array_filter($h->rules()['rules'], fn($r) => !count($r['conds']))));
+
+$sp->set('staticFile', 'cache.htm');
+$cacheBlock = $h->apacheBlock();
+check('htaccess block with static file name cache.htm names cache\\.htm and no index.html', strpos($cacheBlock, 'cache\\.htm') !== false && strpos($cacheBlock, 'index.html') === false && strpos($cacheBlock, 'index\\.html') === false, $cacheBlock);
+$sp->set('staticFile', 'my-cache.htm');
+$dashBlock = $h->apacheBlock();
+check('htaccess block: a name holding regex metacharacters is escaped (my\\-cache\\.htm), never as written', strpos($dashBlock, 'my\\-cache\\.htm') !== false && strpos($dashBlock, 'my-cache.htm') === false && $h->escape('a.b-c') === 'a\\.b\\-c', $dashBlock);
+$sp->set('staticFile', '*');
+$starBlock = $h->apacheBlock();
+$starRules = $h->rules();
+check('htaccess block with an invalid static file name (*) holds no Rewrite line, the markers and a comment', strpos($starBlock, 'Rewrite') === false && !count($starRules['rules']) && count($starRules['notes']) === 1 && strpos($starBlock, "# BEGIN StaticPages\n") === 0 && substr($starBlock, -strlen('# END StaticPages')) === '# END StaticPages' && count(explode("\n", $starBlock)) === 4, $starBlock);
+$sp->set('staticFile', 'index.html');
+
+//Non-static directories is never read: unsaved it is a walk of the site root and a page query
+@mkdir("$tmpRoot/sp-ht-a/b", 0777, true);
+@mkdir("$tmpRoot/sp-ht-api", 0777, true);
+$dirsPopulated = $sp->wiper()->defaultNonStaticDirs();
+rrmdir("$tmpRoot/sp-ht-a");
+rrmdir("$tmpRoot/sp-ht-api");
+$dirsEmpty = $sp->wiper()->defaultNonStaticDirs();
+$same = array();
+foreach(array('saved' => "site\nvendor", 'hostile' => "a b\n\"q\"\n'q'\n\$1\n%{HTTP_HOST}\n..\\x\nRewriteRule .* - [F]\n/") as $label => $value) {
+	$sp->set('nonStaticDirs', $value);
+	$same[$label] = $h->apacheBlock() === $block;
+}
+$sp->remove('nonStaticDirs');
+$rootEmpty = files($tmpRoot) === '';
+$database->queryLog(true);
+$emptyRootBlock = $h->apacheBlock();
+$queriesEmpty = count($database->queryLog());
+@mkdir("$tmpRoot/sp-ht-a/b", 0777, true);
+file_put_contents("$tmpRoot/sp-ht-a/b/index.html", 'copy');
+@mkdir("$tmpRoot/sp-ht-api", 0777, true);
+file_put_contents("$tmpRoot/sp-ht-api/index.php", '<?php');
+file_put_contents("$tmpRoot/index.html", 'home');
+$populatedRootBlock = $h->apacheBlock();
+$queriesPopulated = count($database->queryLog());
+$database->queryLog(false);
+//the counter counts: the same window around one query
+$database->queryLog(true);
+$database->prepare('SELECT 1')->execute();
+$queriesControl = count($database->queryLog());
+$database->queryLog(false);
+check('htaccess block is the same whatever Non-static directories holds: saved, never saved, hostile lines', !in_array(false, $same, true) && $emptyRootBlock === $block, json_encode($same));
+check('htaccess block is the same on an empty and on a populated root (whose default Non-static directories differ)', $rootEmpty && $populatedRootBlock === $emptyRootBlock && $dirsPopulated !== $dirsEmpty, json_encode(array($rootEmpty, $dirsEmpty, $dirsPopulated)));
+check('building the htaccess block runs no query, Non-static directories never saved', $queriesEmpty === 0 && $queriesPopulated === 0 && $queriesControl > 0, "$queriesEmpty, $queriesPopulated, control $queriesControl");
+rrmdir("$tmpRoot/sp-ht-a");
+rrmdir("$tmpRoot/sp-ht-api");
+@unlink("$tmpRoot/index.html");
+$sp->set('nonStaticDirs', "site\nvendor");
+
+//the login cookie: only with a challenge cookie, only plain names
+check('loginCookies: the challenge cookie of the plain and the secure session name', $h->loginCookies() === array('wire_challenge', 'wires_challenge'), json_encode($h->loginCookies()));
+check('htaccess block with sessionChallenge on names <sessionName>_challenge', strpos($block, 'wire_challenge') !== false && strpos($block, 'wires_challenge') !== false, $block);
+sessionConfig('sp-site', 'spsecure', true);
+$named = $h->apacheBlock();
+check('htaccess block names a configured secure session name, escaped', strpos($named, 'sp\\-site_challenge') !== false && strpos($named, 'spsecure_challenge') !== false && strpos($named, 'wire') === false, $named);
+sessionConfig('wire', '', false);
+$noCookieBlock = $h->apacheBlock();
+$notes = array();
+check('htaccess block with sessionChallenge off names no cookie', strpos($noCookieBlock, '_challenge') === false && strpos($noCookieBlock, 'HTTP_COOKIE') === false && $h->loginCookies($notes) === array() && count($notes) === 1, $noCookieBlock);
+sessionConfig('wi.re', '', true);
+$notes = array();
+check('htaccess block with a session name holding a character outside [A-Za-z0-9_-] names no cookie', $h->apacheBlock() === $noCookieBlock && $h->loginCookies($notes) === array() && count($notes) === 1);
+sessionConfig('wire', 'wi.res', true);
+check('...the same for the secure session name: both names or none', $h->apacheBlock() === $noCookieBlock);
+
+//hostile values for every setting the generator reads: each is left out, the block equals the
+//one built without it, so not even a newline gets through
+$hostile = array('a b', 'a"b', "a'b", 'a$1', 'a%{HTTP_HOST}', "a\nRewriteRule .* - [F]", "a\r\nb", 'a\\.b', 'a\\', 'a;b', 'a)|(x', 'a/../b', '');
+$leaks = array();
+sessionConfig('wire', '', true);
+foreach($hostile as $value) {
+	$sp->set('staticFile', ($value === '' ? '' : "$value.html"));
+	if($h->apacheBlock() !== $starBlock) $leaks[] = "staticFile " . json_encode($value);
+}
+$sp->set('staticFile', 'index.html');
+foreach($hostile as $value) {
+	sessionConfig($value, '', true);
+	if($h->apacheBlock() !== $noCookieBlock) $leaks[] = "sessionName " . json_encode($value);
+	sessionConfig('wire', $value === '' ? 'x y' : $value, true);
+	if($h->apacheBlock() !== $noCookieBlock) $leaks[] = "sessionNameSecure " . json_encode($value);
+}
+check('htaccess block: no hostile value of Static file name, sessionName or sessionNameSecure reaches it', !count($leaks), implode('; ', $leaks));
+
+sessionConfig($sessionAtStart[0], $sessionAtStart[1], $sessionAtStart[2]);
+$sp->set('staticFile', 'index.html');
+
 ////  fixture
 
 $home = $pages->get('/');

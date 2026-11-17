@@ -18,6 +18,7 @@ parts, each in its own file next to this one and created when first asked for:
   StaticPagesWiper.php      deleting static files: by the index, by the manifest, by a disk scan
   StaticPagesTracker.php    tracked path changes
   StaticPagesMigration.php  bringing an older install up to date
+  StaticPagesHtaccess.php   the rules for the root .htaccess
 
 Hooks stay registered on this class: site code looks them up by their toObject.
 */
@@ -26,13 +27,14 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	//real properties, not config keys: WireData's magic __get/__set has no business here
 
-	//the parts, see index(), queue(), publisher(), wiper(), tracker(), migration()
+	//the parts, see index(), queue(), publisher(), wiper(), tracker(), migration(), htaccess()
 	private $index = null;
 	private $queue = null;
 	private $publisher = null;
 	private $wiper = null;
 	private $tracker = null;
 	private $migration = null;
+	private $htaccess = null;
 
 	private $adminRequest = false;
 
@@ -272,6 +274,22 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->migration = $this->wire(new StaticPagesMigration($this));
 		}
 		return $this->migration;
+	}
+
+	/**
+	 * The rules for the root .htaccess
+	 *
+	 * #pw-internal
+	 *
+	 * @return StaticPagesHtaccess
+	 *
+	 */
+	public function htaccess() {
+		if( $this->htaccess === null ){
+			require_once(__DIR__ . '/StaticPagesHtaccess.php');
+			$this->htaccess = $this->wire(new StaticPagesHtaccess($this));
+		}
+		return $this->htaccess;
 	}
 
 ////  hooks
