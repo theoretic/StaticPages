@@ -137,7 +137,8 @@ class StaticPagesHtaccess extends Wire {
 	/**
 	 * Test seams of the writer: $fetch, a callable($url) giving the root URL's status code,
 	 * asked in place of a WireHttp request (and then under CLI too); $reread, a callable(array
-	 * $status) giving the status the writer judges after its write
+	 * $status, string &$bytes) giving the status the writer judges after its write (it may change
+	 * the bytes read back, taken by reference)
 	 *
 	 * #pw-internal
 	 *
@@ -752,6 +753,9 @@ class StaticPagesHtaccess extends Wire {
 	 * candidate only by the request method (S4): the block must then go below it, else Replace is
 	 * refused [decided by user, step 4]. A hand DirectoryIndex line naming the copy first (S3) is
 	 * prefixed and the stock DirectoryIndex line written right after it [decided by user, step 4].
+	 * Refused as well: a rule written like a stock line (so kept) whose hand conditions would be
+	 * prefixed, and any write that would leave an active RewriteCond right above the block,
+	 * where it would join the block's first rule [decided by user, step 4].
 	 *
 	 * Steps: the lock; read and refuse unless the state allows it; a dry run stops here; a backup
 	 * (.htaccess.sp-<YmdHis>.bak, the five newest kept); the new bytes to a temporary file in the
@@ -857,7 +861,10 @@ class StaticPagesHtaccess extends Wire {
 
 		//read again: the file must be what was meant
 		list($after, $afterBytes) = $this->read();
-		if( is_callable($this->reread) ) $after = call_user_func( $this->reread, $after );
+		if( is_callable($this->reread) ){
+			$reread = $this->reread;
+			$after = $reread( $after, $afterBytes );
+		}
 		$why = $this->verify( $mode, $after, $afterBytes, $text );
 		if( $why === '' ){
 			$code = $this->loopback();
@@ -969,10 +976,23 @@ class StaticPagesHtaccess extends Wire {
 					continue;
 				}
 
+				$conds = array();
 				foreach( $group['lines'] as $n => $text ){
 					if( $this->isStockLine($text) || strpos( $text, self::replacedPrefix ) === 0 ) continue;
 					$edits[] = array( $lines[$n]['offset'], 0, self::replacedPrefix );
 					$prefixed[$n] = true;
+					$directive = $this->directive($text);
+					if( $directive && $directive[0] === 'rewritecond' ) $conds[] = $n;
+				}
+
+				//the group's rule written like a stock line stays, so it would lose the hand
+				//conditions above it and apply to requests they kept from it: refused [decided
+				//by user, step 4]
+				$end = $group['end'];
+				$rule = $this->directive( $lines[$end]['text'] );
+				if( count($conds) && $rule && $rule[0] === 'rewriterule' && !isset($prefixed[$end]) ){
+					$plan['refuse'] = 'Nothing was written: the rule on line ' . $end . ' is written like a line of the stock .htaccess, which Replace never comments out, but the condition' . ( count($conds) > 1 ? 's' : '' ) . ' on line' . ( count($conds) > 1 ? 's ' : ' ' ) . implode( ', ', $conds ) . ' above it would be: the rule would then apply to requests ' . ( count($conds) > 1 ? 'they' : 'it' ) . ' kept from it. Change these lines by hand, or choose Keep.';
+					return $plan;
 				}
 			}
 
@@ -1072,8 +1092,12 @@ class StaticPagesHtaccess extends Wire {
 		if( $afterBytes !== $text ) return 'the file read back does not hold the bytes written';
 		$lines = $this->lines($afterBytes);
 		if( $mode === 'remove' ){
-			if( !in_array( $after['state'], array('candidate', 'absent'), true ) || $after['blockLines'] ) return 'the file read back is ' . $after['state'];
-			foreach( $lines as $line ) if( strpos( $line['text'], self::replacedPrefix ) === 0 ) return 'a prefixed line is left';
+			//no block, not even one of its marker lines, and no prefixed line
+			foreach( $lines as $line ){
+				$t = trim( $line['text'] );
+				if( $t === self::markerBegin || $t === self::markerEnd ) return 'a StaticPages marker line is left';
+				if( strpos( $line['text'], self::replacedPrefix ) === 0 ) return 'a prefixed line is left';
+			}
 			return '';
 		}
 		if( $after['state'] === 'current' ) return '';

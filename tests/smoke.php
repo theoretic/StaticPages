@@ -653,7 +653,11 @@ function htPut($file, $bytes) {
 	clearstatcache();
 }
 function htBackups($tmpRoot) {
-	return array_values(array_filter(scandir($tmpRoot), fn($n) => strpos($n, '.htaccess.sp-') === 0));
+	return array_values(array_filter(scandir($tmpRoot), fn($n) => preg_match('/^\.htaccess\.sp-.*\.bak$/', $n)));
+}
+//temporary files of the writer: never deleted by the tests, so that a leftover one shows
+function htTmp($tmpRoot) {
+	return array_values(array_filter(scandir($tmpRoot), fn($n) => substr($n, -4) === '.tmp'));
 }
 function htClean($tmpRoot) {
 	foreach(htBackups($tmpRoot) as $n) @unlink("$tmpRoot/$n");
@@ -839,6 +843,34 @@ $listing = files($tmpRoot);
 $r = $h->write(false, true);
 check('htaccess Replace: a condition that would stand right above the block is refused, nothing written', !$r['ok'] && strpos($r['message'], 'right above the StaticPages block') !== false && file_get_contents($htFile) === $fixture && files($tmpRoot) === $listing, $r['message']);
 htClean($tmpRoot);
+//[decided by user, step 4] the same refusal for a plain write: a hand condition with no
+//signature right above # PW-PAGENAME would join the block's first rule
+list($fixture) = htHand($stock, '# PW-PAGENAME', array('RewriteCond %{HTTP_HOST} ^(www\.)?example\.com$ [NC]'));
+htPut($htFile, $fixture);
+$listing = files($tmpRoot);
+$st = $h->status()['state'];
+$r = $h->write();
+check('htaccess write, absent: a hand condition right above the place of the block is refused, nothing written', $st === 'absent' && !$r['ok'] && strpos($r['message'], 'line 439 would stand right above the StaticPages block') !== false && file_get_contents($htFile) === $fixture && files($tmpRoot) === $listing, $r['message']);
+htClean($tmpRoot);
+
+//[decided by user, step 4] a hand rule written like a stock line is kept by Replace: when its
+//hand conditions would be prefixed it would apply to every request, so Replace is refused
+$bad = array();
+$stockText = array(
+	'a rule written like the stock rule 19' => array('RewriteCond %{REQUEST_FILENAME} -d', 'RewriteRule ^(.*)$ index.php?it=$1 [L,QSA]'),
+	'a rule written like a stock optional rule' => array('RewriteCond %{REQUEST_FILENAME}/index.html -f', 'RewriteRule .* - [F,L]'),
+);
+foreach($stockText as $label => $lines) {
+	list($fixture) = htHand($stock, '# PW-PAGENAME', $lines);
+	htPut($htFile, $fixture);
+	$listing = files($tmpRoot);
+	$st = $h->status();
+	$r = $h->write(false, true);
+	$d = $h->write(true, true);
+	if($st['state'] !== 'candidate' || !$h->isStockLine($lines[1]) || $r['ok'] || $d['ok'] || strpos($r['message'], 'the rule on line 440 is written like a line of the stock .htaccess') === false || strpos($r['message'], 'condition on line 439 above it') === false || file_get_contents($htFile) !== $fixture || files($tmpRoot) !== $listing) $bad[] = "$label: " . htSummary($st) . " {$r['message']}";
+	htClean($tmpRoot);
+}
+check('htaccess Replace: a rule written like a stock line whose hand conditions would be prefixed is refused with the reason, also in a dry run; nothing written', !count($bad), implode('; ', $bad));
 
 //states that may not be written: refused, naming the state, the bytes and the listing unchanged
 $bad = array();
@@ -921,10 +953,11 @@ foreach(array('500' => 500, '200' => 200, 'throwing' => null) as $label => $code
 		return $code;
 	};
 	$r = $h->write();
-	$results[$label] = array($r, (string) file_get_contents($htFile));
+	$results[$label] = array($r, (string) file_get_contents($htFile), htTmp($tmpRoot));
 	htClean($tmpRoot);
 }
 $h->fetch = null;
+check('htaccess write: no temporary file is left after a check request answered 500, 200, or none', $results['500'][2] === array() && $results['200'][2] === array() && $results['throwing'][2] === array(), json_encode(array_column($results, 2)));
 list($r, $bytes) = $results['500'];
 check('htaccess write: a check request answered 500 puts the backup back, and the result says so', !$r['ok'] && $r['done'] === 'restored' && $r['restored'] && $r['fetch'] === 500 && $bytes === $stock && strpos($r['message'], 'answered 500') !== false && strpos($r['message'], 'was put back') !== false && strpos(logText($tmp), 'put back from') !== false, $r['message']);
 check('htaccess write: a check request answered 200 keeps the new file; one that throws keeps it too and is logged', $results['200'][0]['ok'] && $results['200'][0]['fetch'] === 200 && $results['200'][1] === $withBlock && $results['throwing'][0]['ok'] && $results['throwing'][0]['fetch'] === 0 && $results['throwing'][1] === $withBlock && strpos(logText($tmp), 'got no answer') !== false && count($asked) === 3 && $asked[0] === (string) $config->urls->httpRoot, json_encode(array($results['throwing'][0]['message'], $asked)));
@@ -934,10 +967,24 @@ htPut($htFile, $stock);
 $h->reread = function(array $status) { $status['state'] = 'outdated'; return $status; };
 $r = $h->write();
 $h->reread = null;
-check('htaccess write: a re-read that is not current (forced) puts the backup back', !$r['ok'] && $r['restored'] && file_get_contents($htFile) === $stock && strpos($r['message'], 'outdated, not current') !== false, $r['message']);
+check('htaccess write: a re-read that is not current (forced) puts the backup back, no temporary file left', !$r['ok'] && $r['restored'] && file_get_contents($htFile) === $stock && strpos($r['message'], 'outdated, not current') !== false && htTmp($tmpRoot) === array(), $r['message']);
 htClean($tmpRoot);
 
-check('htaccess writer: no temporary file is left, the temporary root is empty again', files($tmpRoot) === '' && !count(glob("$tmpRoot/{,.}*.tmp", GLOB_BRACE)), files($tmpRoot));
+//remove(): judged by what the file holds, not its state: no block, no prefixed line
+htPut($htFile, $withBlock);
+$h->reread = function(array $status) { $status['state'] = 'unrecognised'; return $status; };
+$r = $h->remove();
+$h->reread = null;
+check('htaccess remove: the re-read is judged by its bytes (no marker line, no prefixed line), whatever state it is given', $r['ok'] && $r['done'] === 'written' && file_get_contents($htFile) === $stock, $r['message']);
+htClean($tmpRoot);
+htPut($htFile, $withBlock);
+$h->reread = function(array $status, &$bytes) { $bytes = "# StaticPages-replaced: x\n" . $bytes; return $status; };
+$r = $h->remove();
+$h->reread = null;
+check('htaccess remove: a file read back that still holds a prefixed line puts the backup back, no temporary file left', !$r['ok'] && $r['restored'] && file_get_contents($htFile) === $withBlock && htTmp($tmpRoot) === array(), $r['message']);
+htClean($tmpRoot);
+
+check('htaccess writer: no temporary file is left, the temporary root is empty again', files($tmpRoot) === '' && htTmp($tmpRoot) === array(), files($tmpRoot));
 
 ////  fixture
 
