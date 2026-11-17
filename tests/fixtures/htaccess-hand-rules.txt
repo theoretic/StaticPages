@@ -1,0 +1,173 @@
+# Hand-written rule groups in the shapes found in the root .htaccess of local ProcessWire sites,
+# anonymised: host names, directory and script names replaced. Not an .htaccess of its own:
+# tests/smoke.php splices each section into htaccess-301.txt and checks what the reader makes of it.
+#
+# A section starts with a line "#### <name> | <where> | <candidates> | <routes>":
+#   where       before: inserted immediately before the "# PW-PAGENAME" line
+#               after: inserted immediately after the "# END-PW-PAGENAME" line (each such section
+#               starts with a rule that carries no signature: the stock 16A condition above it
+#               belongs to that rule)
+#   candidates  the expected candidate groups, "<first>-<last>:<signatures>" (signatures joined
+#               by +), line numbers counted within the section (its first line after the header
+#               is 1), or "none"
+#   routes      the lines within the section holding a root file route, or "none"
+
+#### document-root-prefix | before | 6-11:S1+S4,15-19:S4 | 3
+RewriteRule ^(?:stats|hosted)(/|$) - [L]
+RewriteRule ^sitemap/?$ /sitemap.xml [R=301,L]
+RewriteRule ^sitemap\.xml$ index.php?it=/sitemap/ [L,QSA]
+RewriteRule ^(.*/)?index\.[0-9a-f]{32}\.html$ - [R=404,L]
+# Plain StaticPages file
+RewriteCond %{REQUEST_METHOD} ^(GET|HEAD)$
+RewriteCond %{QUERY_STRING} ^$
+RewriteCond %{HTTP_COOKIE} !(^|;\s*)wires?_challenge=
+RewriteCond %{REQUEST_URI} ^/((?:[-_.a-zA-Z0-9]+/)*)$
+RewriteCond %{DOCUMENT_ROOT}/%1index.html -f
+RewriteRule ^ %1index.html [L]
+# No plain file: a gate script sends a protected copy or hands over to ProcessWire
+RewriteCond %{ENV:REDIRECT_STATUS} ^$
+RewriteRule ^gate\.php$ - [R=404,L]
+RewriteCond %{REQUEST_METHOD} ^(GET|HEAD)$
+RewriteCond %{QUERY_STRING} ^$
+RewriteCond %{HTTP_COOKIE} !(^|;\s*)wires?_challenge=
+RewriteCond %{REQUEST_URI} ^/((?:[-_.a-zA-Z0-9]+/)*)$
+RewriteRule ^ gate.php [L]
+
+#### home-per-country-host | after | 3-11:S1+S4,13-15:S2,17-22:S1+S4,24-25:S2,27-33:S1+S4,35-37:S2 | none
+RewriteRule ^(api|assets|admin|stats|favicon\.ico|robots\.txt)/ - [L]
+# The home page of a country host, from the copy under /<country>/
+RewriteCond %{REQUEST_METHOD} ^(GET|HEAD)$
+RewriteCond %{HTTP_COOKIE} !(^|;\s*)wires?_challenge= [NC]
+RewriteCond %{REQUEST_URI} ^/?$ [NC]
+# a query string of tracking parameters only
+RewriteCond %{QUERY_STRING} ^((utm_[a-z_]+|gclid|fbclid)=[^&]*(&|$))*$ [NC]
+# the country from the host name
+RewriteCond %{HTTP_HOST} \.([a-z]{2})$ [NC]
+RewriteCond %{DOCUMENT_ROOT}/%1/index.html -f
+RewriteRule ^$ /%1/index.html [L]
+
+RewriteCond %{REQUEST_URI} ^/?$ [NC]
+RewriteCond %{HTTP_HOST} \.([a-z]{2})$ [NC]
+RewriteRule ^$ /index.php [L,QSA]
+
+RewriteCond %{REQUEST_METHOD} ^(GET|HEAD)$
+RewriteCond %{HTTP_COOKIE} !(^|;\s*)wires?_challenge= [NC]
+RewriteCond %{REQUEST_URI} ^/?$ [NC]
+RewriteCond %{QUERY_STRING} ^((utm_[a-z_]+|gclid|fbclid)=[^&]*(&|$))*$ [NC]
+RewriteCond %{DOCUMENT_ROOT}/index.html -f
+RewriteRule ^$ /index.html [L]
+
+RewriteCond %{REQUEST_URI} ^/?$ [NC]
+RewriteRule ^$ /index.php [L,QSA]
+
+RewriteCond %{REQUEST_METHOD} ^(GET|HEAD)$
+RewriteCond %{HTTP_COOKIE} !(^|;\s*)wires?_challenge= [NC]
+RewriteCond %{HTTP_HOST} !\.example\.?(:\d+)?$ [NC]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteCond %{QUERY_STRING} ^((utm_[a-z_]+|gclid|fbclid)=[^&]*(&|$))*$ [NC]
+RewriteCond %{REQUEST_FILENAME}/index.html -f
+RewriteRule ^(.+)/$ /$1/index.html [L]
+
+RewriteCond %{REQUEST_URI} "^/~?[-_.a-zA-Z0-9/]*$"
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]
+
+#### language-host-tree | after | 7-10:S1,12-13:S2,16-17:S2,19-22:S1,24-25:S2,27-30:S1,32-34:S2 | none
+RewriteCond %{HTTP_HOST} ^preview\. [NC]
+RewriteRule ^robots\.txt$ /robots-closed.txt [L]
+RewriteRule ^sitemap\.xml$ /map-script.php [L]
+RewriteRule ^(api|stats)/ - [L]
+RewriteRule ^(favicon\.ico|robots\.txt)$ - [L]
+# The second language's host: its copies live under /lang2/
+RewriteCond %{HTTP_HOST} ^(www\.)?example\.com$ [NC]
+RewriteCond %{QUERY_STRING} ^$
+RewriteCond %{DOCUMENT_ROOT}/lang2%{REQUEST_URI}index.html -f
+RewriteRule ^(.*)$ /lang2%{REQUEST_URI}index.html [L]
+
+RewriteCond %{HTTP_HOST} ^(www\.)?example\.com$ [NC]
+RewriteRule ^$ /index.php [L,QSA]
+
+# everything else on that host goes to ProcessWire
+RewriteCond %{HTTP_HOST} ^(www\.)?example\.com$ [NC]
+RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]
+
+RewriteCond %{REQUEST_URI} ^/?$ [NC]
+RewriteCond %{QUERY_STRING} ^$
+RewriteCond %{DOCUMENT_ROOT}/index.html -f
+RewriteRule ^$ /index.html [L]
+
+RewriteCond %{REQUEST_URI} ^/?$ [NC]
+RewriteRule ^$ /index.php [L,QSA]
+
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteCond %{QUERY_STRING} ^$
+RewriteCond %{REQUEST_FILENAME}/index.html -f
+RewriteRule ^(.+)/$ /$1/index.html [L]
+
+RewriteCond %{REQUEST_URI} !^/(site|wire|vendor|tests|tools)/
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]
+
+#### index-url-redirect | before | 2-4:S1,5-6:S1,11-14:S1,17-18:S2,21-24:S1,27-28:S2 | none
+# index.html is not a URL of its own: a request naming it is sent to its directory
+RewriteCond %{HTTP_HOST} !\.test(:\d+)?$ [NC]
+RewriteCond %{THE_REQUEST} \s/+((?:[^?\s]*/)?)index\.html[?\s] [NC]
+RewriteRule ^ https://%{HTTP_HOST}/%1 [R=301,L]
+RewriteCond %{THE_REQUEST} \s/+((?:[^?\s]*/)?)index\.html[?\s] [NC]
+RewriteRule ^ http://%{HTTP_HOST}/%1 [R=301,L]
+
+RewriteRule ^(api|assets|admin|stats|favicon\.ico|robots\.txt)/ - [L]
+
+# Home page
+RewriteCond %{REQUEST_URI} ^/?$ [NC]
+RewriteCond %{QUERY_STRING} ^$
+RewriteCond %{DOCUMENT_ROOT}/index.html -f
+RewriteRule ^$ /index.html [L]
+
+# Home page with a query string
+RewriteCond %{REQUEST_URI} ^/?$ [NC]
+RewriteRule ^$ /index.php [L,QSA]
+
+# Directory, no query string, the copy exists
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteCond %{QUERY_STRING} ^$
+RewriteCond %{REQUEST_FILENAME}/index.html -f
+RewriteRule ^(.+)/$ /$1/index.html [L]
+
+# Directory with a query string or without a copy
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]
+
+#### exceptions-first | after | 4-7:S1,9-10:S2,13-16:S1,19-21:S2 | none
+RewriteRule ^api/ - [L]
+RewriteRule ^(favicon\.ico|robots\.txt)$ - [L]
+
+RewriteCond %{REQUEST_URI} ^/?$
+RewriteCond %{QUERY_STRING} ^$
+RewriteCond %{DOCUMENT_ROOT}/index.html -f
+RewriteRule ^$ /index.html [L]
+
+RewriteCond %{REQUEST_URI} ^/?$
+RewriteRule ^$ /index.php [L,QSA]
+
+# Directory holding a copy
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteCond %{QUERY_STRING} ^$
+RewriteCond %{REQUEST_FILENAME}/index.html -f
+RewriteRule ^(.+)/$ /$1/index.html [L]
+
+# Any other directory, except the system ones, to ProcessWire
+RewriteCond %{REQUEST_URI} !^/(site|wire|vendor|tests|tools)/
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]
+
+#### slash-redirect-alone | before | none | none
+# A directory requested without its trailing slash: one redirect to the slashed URL
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteCond %{HTTP_HOST} !\.test(:\d+)?$ [NC]
+RewriteRule ^(.*[^/])$ https://%{HTTP_HOST}/$1/ [R=301,L]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^(.*[^/])$ http://%{HTTP_HOST}/$1/ [R=301,L]
+
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^(.+[^/])$ /$1/ [R=301,L]

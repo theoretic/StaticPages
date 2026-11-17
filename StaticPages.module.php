@@ -346,6 +346,76 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( !$form instanceof InputfieldWrapper ) return;
 		$field = $form->getChildByName('nonStaticDirs');
 		if( $field && trim( (string) $field->attr('value') ) === '' ) $field->attr( 'value', implode( "\n", $this->defaultNonStaticDirs() ) );
+		$this->addHtaccessStatus($form);
+	}
+
+	private function addHtaccessStatus(InputfieldWrapper $form){
+		//what the root .htaccess holds: read here, never from StaticPages.config.php. Names
+		//starting with "_" are neither stored by ProcessModule nor config keys. Whatever the file
+		//holds, the form still builds
+		$modules = $this->wire()->modules;
+		$sanitizer = $this->wire()->sanitizer;
+		$e = function($text) use ($sanitizer) { return $sanitizer->entities( (string) $text ); };
+
+		$status = null;
+		try {
+			$status = $this->htaccessStatus();
+		}
+		catch( \Throwable $t ){
+			$html = '<p>' . $e( sprintf( $this->_('The .htaccess could not be checked: %s'), $t->getMessage() ) ) . '</p>';
+		}
+
+		if( $status ){
+			$says = array(
+				'none' => $this->_('There is no .htaccess in the site root: the web server is not Apache, or its rules are kept elsewhere. StaticPages never creates one. The block below shows what the rules do.'),
+				'locked' => $this->_('StaticPages cannot change the .htaccess.'),
+				'damaged' => $this->_('The StaticPages block in the .htaccess is damaged. Nothing is written until it is mended by hand.'),
+				'unrecognised' => $this->_('The .htaccess is not recognised as ProcessWire\'s. Nothing is written.'),
+				'candidate' => $this->_('The .htaccess holds hand-written rules that look like StaticPages rules. Nothing is written without your choice.'),
+				'absent' => $this->_('The .htaccess has no StaticPages block yet.'),
+				'current' => $this->_('The StaticPages block in the .htaccess is up to date.'),
+				'outdated' => $this->_('The StaticPages block in the .htaccess differs from the one these settings generate.'),
+				);
+			$state = $status['state'];
+			$html = '<p><strong>' . $e( sprintf( $this->_('State: %s'), $state ) ) . '</strong> ' . $e( isset($says[$state]) ? $says[$state] : '' ) . '</p>';
+			$html .= '<p>' . $e( $status['reason'] ) . ' <small>' . $e( $status['file'] ) . '</small></p>';
+
+			$numbered = function(array $lines) use ($e) {
+				$out = array();
+				foreach( $lines as $n => $text ) $out[] = str_pad( (string) $n, 5, ' ', STR_PAD_LEFT ) . '  ' . $text;
+				return '<pre>' . $e( implode( "\n", $out ) ) . '</pre>';
+			};
+			if( count($status['candidates']) ){
+				$html .= '<p>' . $e( $this->_('Hand-written rules found (S1 names the static file, S2 hands requests to index.php beside the stock rule, S3 serves the static file through DirectoryIndex, S4 depends on the request method):') ) . '</p>';
+				foreach( $status['candidates'] as $group ){
+					$html .= '<p>' . $e( sprintf( $this->_('Lines %1$d to %2$d, %3$s'), $group['start'], $group['end'], implode( ', ', $group['signatures'] ) ) ) . '</p>';
+					$html .= $numbered( $group['comments'] + $group['lines'] );
+				}
+				if( count($status['related']) ){
+					$html .= '<p>' . $e( $this->_('Also commented out, never a reason by itself:') ) . '</p>' . $numbered( $status['related'] );
+				}
+			}
+			foreach( $status['routes'] as $route ){
+				$html .= '<p>' . $e( sprintf( $this->_('Line %1$d routes /%2$s to ProcessWire: a root file route, left as it is.'), $route['line'], $route['name'] ) ) . '</p>';
+			}
+			foreach( $status['notes'] as $note ) $html .= '<p>' . $e($note) . '</p>';
+		}
+
+		$f = $modules->get('InputfieldMarkup');
+		$f->attr( 'name', '_htaccess' );
+		$f->label = $this->_('Root .htaccess');
+		$f->value = $html;
+		$static = $form->getChildByName('_static');
+		$static ? $form->insertAfter( $f, $static ) : $form->add($f);
+
+		if( !$status ) return;
+		$block = $modules->get('InputfieldMarkup');
+		$block->attr( 'name', '_htaccessBlock' );
+		$block->label = $this->_('The StaticPages block');
+		$block->description = $this->_('What StaticPages keeps in the root .htaccess, immediately before the "# PW-PAGENAME" line, with these settings.');
+		$block->collapsed = Inputfield::collapsedYes;
+		$block->value = '<pre>' . $e( $status['block'] ) . '</pre>';
+		$form->insertAfter( $block, $f );
 	}
 
 	public function hookBeforeSaveConfig($event) {
@@ -709,6 +779,19 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//see StaticPagesTracker::checkTrackedPaths(). Public so a deploy script can close the
 		//gap admin only checking leaves: $modules->get('StaticPages')->checkTrackedPaths(true);
 		return $this->tracker()->checkTrackedPaths($force);
+	}
+
+	/**
+	 * What the root .htaccess holds: its state, the hand-written rules found, the block
+	 *
+	 * Reads the file, writes nothing. For deploy scripts and the settings form. See
+	 * StaticPagesHtaccess::status().
+	 *
+	 * @return array
+	 *
+	 */
+	public function htaccessStatus(){
+		return $this->htaccess()->status();
 	}
 
 	public function defaultNonStaticDirs(){

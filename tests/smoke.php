@@ -332,6 +332,303 @@ check('htaccess block: no hostile value of Static file name, sessionName or sess
 sessionConfig($sessionAtStart[0], $sessionAtStart[1], $sessionAtStart[2]);
 $sp->set('staticFile', 'index.html');
 
+////  .htaccess reader (0.10.0)
+
+//the reader: the file's bytes in, a state out, nothing written. The fixtures are core's stock
+//htaccess.txt of 3.0.274 and anonymised hand-written rule groups in the shapes local sites use
+//(tests/fixtures); every .htaccess below is written to the temporary root only
+$stock = (string) file_get_contents(__DIR__ . '/fixtures/htaccess-301.txt');
+$htFile = "$tmpRoot/.htaccess";
+$stockLines = $h->lines($stock);
+check('htaccess fixture: the stock htaccess.txt of 3.0.274, LF only, split on LF alone (its UTF-8 16B line stays one line)', sha1($stock) === 'ee1e1981b48c5ef603bfe99a54487297a778f9f4' && strpos($stock, "\r") === false && count($stockLines) === substr_count($stock, "\n") + 1 && trim($stockLines[439]['text']) === '# PW-PAGENAME' && strpos($stockLines[453]['text'], 'æåäßöü') !== false && trim($stockLines[445]['text']) === 'RewriteCond %{REQUEST_URI} "^/~?[-_.a-zA-Z0-9/]*$"');
+
+//$add inserted as lines before (or after) the one line whose trim is $marker
+function htInsert($text, $marker, array $add, $after = false) {
+	$lines = explode("\n", $text);
+	$at = null;
+	foreach($lines as $i => $l) if(trim($l) === $marker) { $at = $i; break; }
+	array_splice($lines, $after ? $at + 1 : $at, 0, $add);
+	return implode("\n", $lines);
+}
+function htDrop($text, callable $drop) {
+	return implode("\n", array_filter(explode("\n", $text), fn($l) => !$drop($l)));
+}
+function htSummary(array $r) {
+	$c = array();
+	foreach($r['candidates'] as $g) $c[] = $g['start'] . '-' . $g['end'] . ':' . implode('+', $g['signatures']);
+	return $r['state'] . ' ' . implode(',', $c);
+}
+function htStatus(StaticPagesHtaccess $h, $file, $bytes) {
+	file_put_contents($file, $bytes);
+	clearstatcache();
+	return $h->status();
+}
+function crlf($text) {
+	return str_replace("\n", "\r\n", $text);
+}
+//"1-4:S1,6-7:S2" counted from line $first on, as absolute line numbers
+function htSpans($spec, $first) {
+	if($spec === '' || $spec === 'none') return '';
+	$out = array();
+	foreach(explode(',', $spec) as $part) {
+		list($range, $sig) = explode(':', $part);
+		list($a, $b) = explode('-', $range);
+		$out[] = ($a + $first - 1) . '-' . ($b + $first - 1) . ':' . $sig;
+	}
+	return implode(',', $out);
+}
+$twins = array();
+
+@unlink($htFile);
+$r = $h->status();
+check('htaccess status: no file gives none, and none is created', $r['state'] === 'none' && $h->filePath() === "$tmpRoot/.htaccess" && !file_exists($htFile) && $r['text'] === null, json_encode(array($r['state'], $h->filePath())));
+
+$block = $h->apacheBlock();
+$blockCount = count(explode("\n", $block));
+$database->queryLog(true);
+$before = files($tmpRoot);
+file_put_contents($htFile, $stock);
+touch($htFile, time() - 100);
+clearstatcache();
+$mtime = filemtime($htFile);
+$r = $h->status();
+clearstatcache();
+$readerQueries = count($database->queryLog());
+$database->queryLog(false);
+check('htaccess status: the stock file gives absent, no candidate, no route', $r['state'] === 'absent' && !$r['candidates'] && !$r['routes'] && $r['pageNameLine'] === 439 && $r['eol'] === "\n", htSummary($r));
+check('htaccess status writes nothing and runs no query: the dir listing, the bytes and the mtime are unchanged', files($tmpRoot) === '/.htaccess' && $before === '' && file_get_contents($htFile) === $stock && filemtime($htFile) === $mtime && $readerQueries === 0, files($tmpRoot) . " $readerQueries");
+$at = strpos($stock, "\n  # PW-PAGENAME\n") + 1;
+check('absent: the previewed text is the fixture with the block inserted immediately before the # PW-PAGENAME line, no other byte changed', $r['text'] === substr($stock, 0, $at) . $block . "\n" . substr($stock, $at) && substr($r['text'], 0, $at) === substr($stock, 0, $at) && substr($r['text'], $at + strlen($block) + 1) === substr($stock, $at));
+$withBlock = $r['text'];
+$stockCrlf = crlf($stock);
+$rc = htStatus($h, $htFile, $stockCrlf);
+$atc = strpos($stockCrlf, "\r\n  # PW-PAGENAME\r\n") + 2;
+check('absent, CRLF fixture: the inserted lines end in CRLF, no lone LF, no other byte changed', $rc['state'] === 'absent' && $rc['eol'] === "\r\n" && $rc['text'] === substr($stockCrlf, 0, $atc) . crlf($block) . "\r\n" . substr($stockCrlf, $atc) && !preg_match('/(?<!\r)\n/', $rc['text']));
+
+$r = htStatus($h, $htFile, $withBlock);
+check('htaccess status: the fixture with the generated block gives current', $r['state'] === 'current' && $r['blockLines'] === array(439, 438 + $blockCount) && $r['text'] === $withBlock, htSummary($r) . ' ' . json_encode($r['blockLines']));
+$pos = strpos($withBlock, '# The home page');
+$changed = substr_replace($withBlock, 't', $pos + 2, 1);
+$r = htStatus($h, $htFile, $changed);
+check('one byte changed inside the block gives outdated; the preview puts the generated block back and changes nothing else', strlen($changed) === strlen($withBlock) && $r['state'] === 'outdated' && $r['text'] === $withBlock, htSummary($r));
+$r = $h->classify(crlf($changed));
+check('outdated, CRLF fixture: the preview is the CRLF file with the generated block, no lone LF', $r['state'] === 'outdated' && $r['text'] === crlf($withBlock));
+$sp->set('staticFile', 'cache.htm');
+$r = $h->classify($withBlock);
+check('a block written for another Static file name gives outdated', $r['state'] === 'outdated' && strpos($r['text'], 'cache\\.htm') !== false, htSummary($r));
+$sp->set('staticFile', 'index.html');
+$twins += array('stock' => $stock, 'with block' => $withBlock, 'changed block' => $changed);
+
+$damaged = array(
+	'a BEGIN without its END' => htInsert($stock, '# PW-PAGENAME', array('# BEGIN StaticPages')),
+	'two blocks' => htInsert($withBlock, '# END-PW-PAGENAME', explode("\n", $block), true),
+	'END before BEGIN' => htInsert($stock, '# PW-PAGENAME', array('# END StaticPages', '# BEGIN StaticPages')),
+);
+$unrecognised = array(
+	'no START PROCESSWIRE line' => htDrop($stock, fn($l) => strpos($l, 'START PROCESSWIRE HTACCESS DIRECTIVES') !== false),
+	'no # PW-PAGENAME line' => htDrop($stock, fn($l) => trim($l) === '# PW-PAGENAME'),
+	'two # PW-PAGENAME lines' => htInsert($stock, '# PW-PAGENAME', array('  # PW-PAGENAME')),
+);
+foreach(array('damaged' => $damaged, 'unrecognised' => $unrecognised) as $state => $set) {
+	foreach($set as $label => $text) {
+		$r = htStatus($h, $htFile, $text);
+		check("htaccess status: $label gives $state, no preview", $r['state'] === $state && $r['text'] === null, htSummary($r) . ' ' . $r['reason']);
+		$twins["$state: $label"] = $text;
+	}
+}
+
+file_put_contents($htFile, $stock);
+@chmod($htFile, 0444);
+clearstatcache();
+if(is_writable($htFile)) {
+	echo "skip a read-only .htaccess gives locked: this platform cannot make a read-only file\n";
+} else {
+	$r = $h->status();
+	check('htaccess status: a read-only file gives locked, no preview', $r['state'] === 'locked' && $r['text'] === null && !$r['candidates'], $r['state']);
+}
+@chmod($htFile, 0666);
+@unlink($htFile);
+@mkdir($htFile);
+$r = $h->status();
+check('htaccess status: a directory in place of the file gives locked', $r['state'] === 'locked', $r['state']);
+@rmdir($htFile);
+
+//signatures: each rule added to the stock fixture before # PW-PAGENAME (line 439 on)
+$hand = array(
+	//README.md:312-316 at 26a2af1
+	'the README\'s first rule' => array(array('# A directory holding a static file, requested without a query string: serve the file.', 'RewriteCond %{REQUEST_FILENAME} -d', 'RewriteCond %{QUERY_STRING} ^$', 'RewriteCond %{REQUEST_FILENAME}/index.html -f', 'RewriteRule ^(.+)/$ /$1/index.html [L]'), '2-5:S1'),
+	//README.md:318-320
+	'the README\'s second rule' => array(array('# A directory with a query string, or with no static file in it yet: hand it to PW.', 'RewriteCond %{REQUEST_FILENAME} -d', 'RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]'), '2-3:S2'),
+	//README.md:330-337
+	'the README\'s home pair' => array(array('RewriteCond %{REQUEST_URI} ^/?$', 'RewriteCond %{QUERY_STRING} ^$', 'RewriteCond %{DOCUMENT_ROOT}/index.html -f', 'RewriteRule ^$ /index.html [L]', '', 'RewriteCond %{REQUEST_URI} ^/?$', 'RewriteRule ^$ /index.php [L,QSA]'), '1-4:S1,6-7:S2'),
+	'a %{DOCUMENT_ROOT}/%1index.html rule' => array(array('RewriteCond %{REQUEST_URI} ^/((?:[-_.a-zA-Z0-9]+/)*)$', 'RewriteCond %{DOCUMENT_ROOT}/%1index.html -f', 'RewriteRule ^ %1index.html [L]'), '1-3:S1'),
+	'a per-host home rule' => array(array('RewriteCond %{HTTP_HOST} ^(www\.)?example\.nl$ [NC]', 'RewriteRule ^$ /nl/index.html [L]'), '1-2:S1'),
+);
+$withIndex = function($name, $lines) use ($stock) {
+	return $name === 'DirectoryIndex'
+		? htInsert($stock, 'DirectoryIndex index.php index.html index.htm', $lines, true)
+		: htInsert($stock, '# PW-PAGENAME', $lines);
+};
+$hand['DirectoryIndex'] = array(array('DirectoryIndex index.html index.php'), '1-1:S3');
+$bad = array();
+foreach($hand as $label => list($lines, $spec)) {
+	$first = $label === 'DirectoryIndex' ? 171 : 439;
+	$text = $withIndex($label, $lines);
+	$r = htStatus($h, $htFile, $text);
+	$want = 'candidate ' . htSpans($spec, $first);
+	$exact = true;
+	foreach($r['candidates'] as $g) foreach($g['lines'] as $n => $l) if($l !== $lines[$n - $first]) $exact = false;
+	if(htSummary($r) !== $want || !$exact) $bad[] = "$label: " . htSummary($r) . " (want $want)";
+	$twins["signature: $label"] = $text;
+}
+check('htaccess heuristic: the README\'s rules, a %{DOCUMENT_ROOT}/%1index.html rule, a per-host home rule and DirectoryIndex index.html are candidates with exactly their group\'s lines', !count($bad), implode('; ', $bad));
+
+//the same rules written for another Static file name: those naming index.html are not candidates then
+$sp->set('staticFile', 'cache.htm');
+$bad = array();
+foreach($hand as $label => list($lines, $spec)) {
+	$first = $label === 'DirectoryIndex' ? 171 : 439;
+	$mine = array_map(fn($l) => str_replace('index.html', 'cache.htm', $l), $lines);
+	$r = $h->classify($withIndex($label, $mine));
+	if(htSummary($r) !== 'candidate ' . htSpans($spec, $first)) $bad[] = "$label for cache.htm: " . htSummary($r);
+	$r = $h->classify($withIndex($label, $lines));
+	$left = implode(',', array_filter(explode(',', $spec), fn($s) => substr($s, -3) === ':S2'));
+	if(htSummary($r) !== ($left === '' ? 'absent ' : 'candidate ' . htSpans($left, $first))) $bad[] = "$label for index.html: " . htSummary($r);
+}
+$sp->set('staticFile', 'index.html');
+check('htaccess heuristic with Static file name cache.htm: the rules written for cache.htm are candidates, those naming index.html are not', !count($bad), implode('; ', $bad));
+
+//not candidates
+$bad = array();
+foreach($hand as $label => list($lines, $spec)) {
+	$r = $h->classify($withIndex($label, array_map(fn($l) => $l === '' ? '' : "# $l", $lines)));
+	if(htSummary($r) !== 'absent ') $bad[] = "$label: " . htSummary($r);
+}
+check('htaccess heuristic: each of those rules commented out is no candidate', !count($bad), implode('; ', $bad));
+//sections 9A, 9B, 13A to 13C, 14, 15B, 16B, 18 and 20 of htaccess.txt (@htaccessVersion 301)
+$optional = array(array(213, 214), array(219, 220), array(335, 338), array(342, 343), array(347, 348), array(358, 361), array(434, 436), array(453, 453), array(476, 477), array(490, 490));
+$lines = explode("\n", $stock);
+$uncommented = 0;
+foreach($optional as list($a, $b)) for($n = $a; $n <= $b; $n++) {
+	if(!preg_match('/^(\s*)# (Rewrite(Cond|Rule) .*)$/', $lines[$n - 1], $m)) continue;
+	$lines[$n - 1] = $m[1] . $m[2];
+	$uncommented++;
+}
+$allOptional = implode("\n", $lines);
+$r = $h->classify($allOptional);
+check('htaccess heuristic: the stock file with every optional Rewrite section uncommented (9A, 9B, 13A to 13C, 14, 15B, 16B, 18, 20) holds no candidate; its DirectoryIndex and rule 19 neither', $uncommented === 23 && htSummary($r) === 'absent ' && !$r['routes'], "$uncommented " . htSummary($r));
+$twins['every optional section'] = $allOptional;
+$route = htInsert($stock, '# PW-PAGENAME', array('RewriteRule ^sitemap\.xml$ index.php?it=/sitemap/ [L,QSA]'));
+$r = $h->classify($route);
+check('htaccess heuristic: a root file route before # PW-PAGENAME is no candidate, it is reported as a route', htSummary($r) === 'absent ' && count($r['routes']) === 1 && $r['routes'][0]['line'] === 439 && $r['routes'][0]['name'] === 'sitemap.xml', json_encode($r['routes']));
+$twins['root file route'] = $route;
+
+//[decided by user, step 3] S4: a group conditioned on the request method; S2: any hand rule to
+//index.php beside stock's own; a directory slash redirect alone is no candidate
+$method = htInsert($stock, '# PW-PAGENAME', array('RewriteCond %{REQUEST_METHOD} ^(GET|HEAD)$', 'RewriteCond %{REQUEST_URI} ^/((?:[-_.a-zA-Z0-9]+/)*)$', 'RewriteRule ^ gate.php [L]'));
+$r = $h->classify($method);
+check('htaccess heuristic: a hand rule conditioned on the request method is a candidate (S4), whatever it names', htSummary($r) === 'candidate 439-441:S4', htSummary($r));
+$lines = explode("\n", $stock);
+$lines[307] = preg_replace('/^(\s*)# /', '$1', $lines[307]);
+$lines[308] = preg_replace('/^(\s*)# /', '$1', $lines[308]);
+$r = $h->classify(implode("\n", $lines));
+check('htaccess heuristic: the stock section 11E method block, uncommented, is a candidate too (S4, a false positive costs a warning)', htSummary($r) === 'candidate 308-309:S4', htSummary($r));
+$toPhp = htInsert($stock, '# PW-PAGENAME', array('RewriteCond %{HTTP_HOST} ^(www\.)?example\.com$ [NC]', 'RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]', 'RewriteCond %{HTTP_HOST} ^(www\.)?example\.org$ [NC]', 'RewriteRule ^(.*)$ index.php?it=$1 [L,QSA]', 'RewriteCond %{HTTP_HOST} ^(www\.)?example\.net$ [NC]', 'RewriteRule  ^(.*)$  /index.php?it=$1  [L,QSA]'));
+$r = $h->classify($toPhp);
+check('htaccess heuristic: a hand rule to index.php without -d or ^$ is a candidate (S2); one written like stock rule 19 or 20 is not', htSummary($r) === 'candidate 439-440:S2', htSummary($r));
+$slash = htInsert($stock, '# PW-PAGENAME', array('RewriteCond %{REQUEST_FILENAME} -d', 'RewriteRule ^(.+[^/])$ /$1/ [R=301,L]'));
+check('htaccess heuristic: a directory slash redirect alone is no candidate', htSummary($h->classify($slash)) === 'absent ');
+$twins += array('S4 method' => $method, 'S2 to index.php' => $toPhp, 'slash redirect' => $slash);
+
+//a group's lines run from its first RewriteCond to its RewriteRule, comments between included
+$spans = array('RewriteCond %{REQUEST_FILENAME} -d', '# between the conditions', 'RewriteCond %{QUERY_STRING} ^$', '', 'RewriteCond %{REQUEST_FILENAME}/index.html -f', 'RewriteRule ^(.+)/$ /$1/index.html [L]', '# between the groups', 'RewriteCond %{REQUEST_FILENAME} -d', 'RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]');
+$text = htInsert($stock, '# PW-PAGENAME', $spans);
+$r = $h->classify($text);
+check('htaccess heuristic: a group runs from its first RewriteCond to its RewriteRule, comments and blank lines between included, and never into the next group', htSummary($r) === 'candidate 439-444:S1,446-447:S2' && array_keys($r['candidates'][0]['lines']) === range(439, 444) && $r['candidates'][0]['lines'][440] === '# between the conditions' && !isset($r['candidates'][1]['lines'][445]), htSummary($r));
+$twins['spans'] = $text;
+//placed after # END-PW-PAGENAME, a hand rule takes the stock 16A condition above it: mod_rewrite
+//gives every condition to the next rule, so its group starts on that stock line
+$text = htInsert($stock, '# END-PW-PAGENAME', $hand['the README\'s first rule'][0], true);
+$r = $h->classify($text);
+check('htaccess heuristic: a hand rule right after # END-PW-PAGENAME is a group starting at the stock 16A condition (line 445)', htSummary($r) === 'candidate 445-460:S1' && trim($r['candidates'][0]['lines'][445]) === 'RewriteCond %{REQUEST_URI} "^/~?[-_.a-zA-Z0-9/]*$"', htSummary($r));
+$twins['after END-PW-PAGENAME'] = $text;
+
+//rule groups in the shapes local sites hold, anonymised (Q4 of sprint b-c-file-types)
+$sections = array();
+$name = null;
+foreach(explode("\n", (string) file_get_contents(__DIR__ . '/fixtures/htaccess-hand-rules.txt')) as $line) {
+	if(strpos($line, '#### ') === 0) {
+		$parts = array_map('trim', explode('|', substr($line, 5)));
+		$name = $parts[0];
+		$sections[$name] = array('where' => $parts[1], 'candidates' => $parts[2], 'routes' => $parts[3], 'lines' => array());
+	} else if($name !== null) {
+		$sections[$name]['lines'][] = $line;
+	}
+}
+$bad = array();
+foreach($sections as $name => $s) {
+	while(count($s['lines']) && trim(end($s['lines'])) === '') array_pop($s['lines']);
+	$after = $s['where'] === 'after';
+	$first = $after ? 456 : 439;
+	$text = $after ? htInsert($stock, '# END-PW-PAGENAME', $s['lines'], true) : htInsert($stock, '# PW-PAGENAME', $s['lines']);
+	$r = $h->classify($text);
+	$want = $s['candidates'] === 'none' ? 'absent ' : 'candidate ' . htSpans($s['candidates'], $first);
+	$routes = implode(',', array_map(fn($x) => $x['line'] - $first + 1, $r['routes']));
+	if(htSummary($r) !== $want || $routes !== ($s['routes'] === 'none' ? '' : $s['routes'])) $bad[] = "$name: " . htSummary($r) . " routes $routes (want $want)";
+	$twins["sites: $name"] = $text;
+}
+check('htaccess heuristic: the anonymised rule groups of local sites give exactly the expected candidates and routes (' . count($sections) . ' fixtures)', count($sections) === 6 && !count($bad), implode('; ', $bad));
+
+//a CRLF copy of each fixture gives the same state and candidates as its LF twin
+$bad = array();
+foreach($twins as $label => $text) {
+	$lf = $h->classify($text);
+	$cr = $h->classify(crlf($text));
+	if(htSummary($lf) !== htSummary($cr) || json_encode($lf['candidates']) !== json_encode($cr['candidates']) || json_encode($lf['routes']) !== json_encode($cr['routes'])) $bad[] = $label;
+}
+check('htaccess status: a CRLF copy of each fixture gives the same state, candidates and routes as its LF twin (' . count($twins) . ' fixtures)', count($twins) >= 20 && !count($bad), implode('; ', $bad));
+
+//the settings form: built under the install's own root, where core finds the module's config
+//file (see "config file and module info" below); the part reads a fixture on the temporary root
+$form = null;
+$formRoot = $config->paths->root;
+$formFixture = htInsert($stock, '# PW-PAGENAME', array_merge($hand['the README\'s first rule'][0], array('RewriteCond %{HTTP_USER_AGENT} "<script>x</script>"', 'RewriteCond %{REQUEST_FILENAME} -d', 'RewriteRule ^(.+)$ index.php?it=$1 [L,QSA]')));
+file_put_contents($htFile, $formFixture);
+$sp->htaccess()->file = $htFile;
+$config->paths->root = "$root/";
+$values = array();
+foreach(array('candidate' => $htFile, 'none' => "$tmpRoot/sp-ht-none/.htaccess", 'locked' => "$tmpRoot/sp-ht-dir") as $label => $file) {
+	if($label === 'locked') @mkdir("$file", 0777, true);
+	$sp->htaccess()->file = $file;
+	$form = $modules->getModuleConfigInputfields('StaticPages');
+	$f = $form ? $form->getChildByName('_htaccess') : null;
+	$b = $form ? $form->getChildByName('_htaccessBlock') : null;
+	$values[$label] = array($f ? (string) $f->value : '', $b ? (string) $b->value : '');
+}
+//without index tables: the index part answers "no tables" as after a failed check
+$tablesReady = new \ReflectionProperty(StaticPagesIndex::class, 'tablesReady');
+$tablesReady->setAccessible(true);
+$tablesAtStart = $tablesReady->getValue($sp->index());
+$tablesReady->setValue($sp->index(), false);
+$sp->htaccess()->file = $htFile;
+$form = $modules->getModuleConfigInputfields('StaticPages');
+$f = $form ? $form->getChildByName('_htaccess') : null;
+$values['no tables'] = array($f ? (string) $f->value : '', $sp->index()->ensureTables() === false);
+$tablesReady->setValue($sp->index(), $tablesAtStart);
+$config->paths->root = $formRoot;
+$sp->htaccess()->file = '';
+@rmdir("$tmpRoot/sp-ht-dir");
+$encoded = $wire->sanitizer->entities($block);
+list($v, $vb) = $values['candidate'];
+check('the settings form holds the .htaccess state, the candidates with their line numbers and the block', strpos($v, 'State: candidate') !== false && strpos($v, '  440  RewriteCond %{REQUEST_FILENAME} -d') !== false && strpos($v, '  443  RewriteRule ^(.+)/$ /$1/index.html [L]') !== false && strpos($v, 'Lines 440 to 443, S1') !== false && strpos($v, 'Lines 444 to 446, S2') !== false && strpos($vb, $encoded) !== false, substr($v, 0, 600));
+check('the settings form encodes what the file holds: no markup from the .htaccess reaches the page', strpos($v, '<script>') === false && strpos($v, '&lt;script&gt;') !== false && strpos($encoded, '&quot;') !== false);
+check('the settings form builds without a .htaccess (none) and with a directory in its place (locked)', strpos($values['none'][0], 'State: none') !== false && strpos($values['locked'][0], 'State: locked') !== false && strpos($values['none'][1], $encoded) !== false, json_encode(array(substr($values['none'][0], 0, 120), substr($values['locked'][0], 0, 120))));
+check('the settings form builds without index tables and still shows the .htaccess state', strpos($values['no tables'][0], 'State: candidate') !== false && $values['no tables'][1] === true, substr($values['no tables'][0], 0, 120));
+check('htaccessStatus() is the reader\'s status() of the root .htaccess', $sp->htaccessStatus()['state'] === 'candidate' && $sp->htaccessStatus()['file'] === $htFile);
+
+@unlink($htFile);
+check('the .htaccess checks leave the temporary root empty', files($tmpRoot) === '', files($tmpRoot));
+
 ////  fixture
 
 $home = $pages->get('/');
