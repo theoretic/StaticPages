@@ -233,6 +233,17 @@ check('htaccess block: every line that is no comment is a RewriteCond or a Rewri
 check('htaccess block: the last line that is no comment is a RewriteRule, no condition is left for the stock rule 19', count($rest) && preg_match('/^\s*RewriteRule\s/', end($rest)), (string) end($rest));
 check('htaccess block names the static file name escaped, index\\.html', strpos($block, 'index\\.html') !== false && strpos($block, 'index.html') === false, $block);
 check('htaccess block: rules() is the rule list as data, every rule with conditions', count($h->rules()['rules']) === 3 && !count(array_filter($h->rules()['rules'], fn($r) => !count($r['conds']))));
+//a dir requested without its trailing slash is left to mod_dir: rewritten, it got a 301 to
+//"<dir>/?it=<dir>" on Apache 2.4 (probe of step 2)
+$slashOnly = array();
+foreach($h->rules()['rules'] as $r) if($r['pattern'] !== '^$') $slashOnly[] = $r['pattern'] . ' ' . (int) (preg_match('#' . $r['pattern'] . '#', 'a/b/') === 1 && preg_match('#' . $r['pattern'] . '#', 'a/b') === 0 && preg_match('#' . $r['pattern'] . '#', '') === 0);
+check('htaccess block: every rule but the home rule matches a path with its trailing slash only', count($slashOnly) === 2 && $slashOnly === array_filter($slashOnly, fn($s) => substr($s, -2) === ' 1'), json_encode($slashOnly));
+//the rule handing an existing dir to ProcessWire refuses what the stock 16A condition refuses
+//(a dir named x@y/ gets the stock 403) [decided by user, step 2]: the stock line, word for word
+$toPw = array_values(array_filter($h->rules()['rules'], fn($r) => strpos($r['target'], 'index.php?it=') === 0));
+$guard = count($toPw) === 1 ? array_values(array_filter($toPw[0]['conds'], fn($c) => $c[0] === '%{REQUEST_URI}')) : array();
+$guardRe = count($guard) === 1 ? '#' . trim($guard[0][1], '"') . '#' : '';
+check('htaccess block: the rule to ProcessWire carries the stock 16A condition, which lets /a/b/ and /~u/a/ through and refuses /x@y/ and /a!/', count($guard) === 1 && in_array('RewriteCond %{REQUEST_URI} "^/~?[-_.a-zA-Z0-9/]*$"', $lines, true) && preg_match($guardRe, '/a/b/') === 1 && preg_match($guardRe, '/~u/a/') === 1 && preg_match($guardRe, '/x@y/') === 0 && preg_match($guardRe, '/a!/') === 0, json_encode($guard));
 
 $sp->set('staticFile', 'cache.htm');
 $cacheBlock = $h->apacheBlock();

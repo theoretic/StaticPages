@@ -25,10 +25,12 @@ are matched against the path below the .htaccess dir, substitutions are relative
 stock rule 19):
   - a GET or HEAD request without a query string and without the login cookie, for the home
     page or a directory holding a copy, gets the copy
-  - any other request for an existing directory goes to ProcessWire with the "it" value the
-    stock rule 19 passes, unless the directory holds an index.php of its own: then it, and the
-    home page with it, gets what the stock file answers
-  - everything else is left to the stock rules
+  - any other request for an existing directory, with its trailing slash, goes to ProcessWire
+    with the "it" value the stock rule 19 passes, unless the directory holds an index.php of
+    its own (then it, and the home page with it, gets what the stock file answers) or the URL
+    holds a character the stock 16A condition refuses (then it gets the stock 403)
+  - everything else is left to the stock rules (a directory requested without its trailing
+    slash gets mod_dir's 301 to the slashed form, as without the block)
 A missing or outdated block may only cost speed, never correctness: without a rule a request
 reaches PHP.
 */
@@ -41,6 +43,10 @@ class StaticPagesHtaccess extends Wire {
 
 	//what a value taken from a setting or $config must match before it is put into a rule
 	const plainNamePattern = '/^[A-Za-z0-9_-]+$/';
+
+	//the stock 16A condition's pattern, quotes included, as htaccess.txt (@htaccessVersion 301)
+	//writes it: the URLs ProcessWire accepts
+	const stockPageNameCond = '"^/~?[-_.a-zA-Z0-9/]*$"';
 
 	/** @var StaticPages */
 	protected $sp;
@@ -111,14 +117,25 @@ class StaticPagesHtaccess extends Wire {
 
 		//the stock rules answer an existing dir from disk: DirectoryIndex would serve the copy
 		//to a POST, a query string and a logged in user, and Options -Indexes a 403 to a dir
-		//holding no copy. Exactly the stock rule 19, so ProcessWire gets the same "it"
+		//holding no copy. The stock rule 19's substitution, so ProcessWire gets the same "it".
+		//Only with the trailing slash: for a dir requested without it mod_dir answers the
+		//rewritten request with a 301 to "<dir>/?it=<dir>" (seen in the probe of step 2); left
+		//alone, the stock answer is mod_dir's plain 301 to "<dir>/", and that request then
+		//meets the rules of this block.
+		//Only for a URL the stock 16A condition lets through, the same line as stock :445: a
+		//dir named outside ProcessWire's page name characters gets what the stock file gives it
+		//(a 403), not ProcessWire [decided by user, step 2]. The stock condition rather than its
+		//class in the pattern: it tests the whole REQUEST_URI, the path of a ProcessWire
+		//installed in a subdirectory included, as 16A does. A site that switched to the UTF-8
+		//alternative 16B keeps the stock answer for a dir with such a name
 		$rules[] = array(
-			'comment' => 'Any other request for an existing directory without an index file of its own goes to ProcessWire.',
+			'comment' => 'Any other request for an existing directory, with its trailing slash, a URL the stock 16A condition accepts and without an index file of its own, goes to ProcessWire.',
 			'conds' => array(
+				array( '%{REQUEST_URI}', self::stockPageNameCond ),
 				array( '%{REQUEST_FILENAME}', '-d' ),
 				array( '%{REQUEST_FILENAME}/index.php', '!-f' ),
 				),
-			'pattern' => '^(.*)$',
+			'pattern' => '^(.+/)$',
 			'target' => 'index.php?it=$1',
 			'flags' => '[L,QSA]',
 			);
