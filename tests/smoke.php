@@ -1640,6 +1640,23 @@ function htClearPending(StaticPages $sp) {
 	$sp->wire()->modules->configs->saveConfig($sp, 'htaccessNotice', null);
 	$sp->remove('htaccessNotice');
 }
+//onUninstall() as ___uninstall() runs it, then the flag taken back: core would delete the
+//module's row (and the flag with it), this script goes on with the module installed
+function htUninstall(StaticPages $sp) {
+	try {
+		return $sp->htaccess()->onUninstall();
+	} finally {
+		$sp->markUninstalling(false);
+	}
+}
+//the uninstall flag as stored in the module's row right now, null for none
+function htFlagStored(StaticPages $sp) {
+	$query = $sp->wire()->database->prepare('SELECT data FROM modules WHERE class=:class');
+	$query->bindValue(':class', 'StaticPages');
+	$query->execute();
+	$data = json_decode((string) $query->fetchColumn(), true);
+	return is_array($data) && isset($data['uninstalling']) ? $data['uninstalling'] : null;
+}
 //the static-pages log lines written since $before that name the .htaccess
 function htLogSince($tmp, $before) {
 	return array_values(array_filter(explode("\n", substr(logText($tmp), strlen($before))), fn($l) => stripos($l, 'htaccess') !== false));
@@ -1882,13 +1899,13 @@ $replaced = (string) file_get_contents($htFile);
 $x = publish($sp, $A, array($D->id));
 $recorded = tagsOf($sp, "$Pdir/a/index.html");
 $backups = count(htBackups($tmpRoot));
-$out = $h->onUninstall();
+$out = htUninstall($sp);
 $tables = $database->query("SHOW TABLES LIKE 'static\\_pages\\_%'")->fetchAll(\PDO::FETCH_COLUMN);
 check('onUninstall() after a Replace: the copy deleted by the index, the candidate fixture given back, one more backup holding the replaced file, the index tables still there', is_file($copy) === false && count($recorded) > 0 && $out['copies']['files'] >= 1 && file_get_contents($htFile) === $candidateFixture && count(htBackups($tmpRoot)) === $backups + 1 && $out['htaccess']['backup'] !== '' && file_get_contents("$tmpRoot/{$out['htaccess']['backup']}") === $replaced && count($tables) === 3, json_encode(array($out['copies'], $out['htaccess']['message'], $tables)));
 htClean($tmpRoot);
 htPut($htFile, $candidateFixture);
 $listing = files($tmpRoot);
-$out = $h->onUninstall();
+$out = htUninstall($sp);
 check('onUninstall() with a candidate never replaced: the .htaccess unchanged, no backup', file_get_contents($htFile) === $candidateFixture && files($tmpRoot) === $listing && $out['htaccess']['done'] === 'nothing', $out['htaccess']['message']);
 htClean($tmpRoot);
 //[R1] without index tables the manifest's copies go; with neither, nothing is scanned for
@@ -1898,19 +1915,107 @@ $tablesReady->setValue($sp->index(), false);
 file_put_contents($copy, 'listed in the manifest');
 @unlink($sp->manifestPath());
 $sp->publisher()->logStaticFile($copy);
-$out = $h->onUninstall();
+$out = htUninstall($sp);
 $byManifest = !is_file($copy) && $out['copies'] !== null && $out['copies']['files'] === 1;
 @unlink($sp->manifestPath());
 @mkdir("$tmpRoot$Pdir/a", 0777, true);
 file_put_contents($copy, 'recorded nowhere');
 $log0 = logText($tmp);
-$out = $h->onUninstall();
+$out = htUninstall($sp);
 $tablesReady->setValue($sp->index(), $tablesAtStart);
 check('onUninstall() without index tables deletes what the manifest lists; with neither tables nor manifest it scans for nothing: an unrecorded copy stays', $byManifest && is_file($copy) && $out['copies'] === null && strpos(substr(logText($tmp), strlen($log0)), 'neither index tables nor a manifest') !== false);
 rrmdir("$tmpRoot$Pdir");
-$out = $h->onUninstall();
+$out = htUninstall($sp);
 check('onUninstall() without a .htaccess: nothing created, the refusal logged', !file_exists($htFile) && $out['htaccess']['state'] === 'none' && strpos(logText($tmp), 'uninstall: htaccess: Nothing was changed: the state of the .htaccess is none') !== false);
 htForget($tmp);
+
+//[decided by user, step 6 second doubt (a2)] the uninstall flag before anything is changed, the
+//block out before the copies go, nothing cached while it runs (the writer's check request
+//included), no block written back by the check after the uninstalling request
+check('___uninstall() takes the flag back when dropping the tables throws; ready() removes a stale flag on admin requests', strpos($uninstallBody, 'markUninstalling(false)') > strpos($uninstallBody, 'dropTables()') && strpos($uninstallBody, 'throw $e') !== false && preg_match('/function ready\(\) \{(.*?)\n\t\}/s', $moduleSource, $m) && strpos($m[1], 'clearStaleUninstalling()') !== false);
+$uninstallRun = new \ReflectionProperty(StaticPages::class, 'uninstallRun');
+$uninstallRun->setAccessible(true);
+$copyD = $tmpRoot . $wire->pages->get($D->id)->path . 'index.html';
+foreach(array('admin', 'cli') as $as) {
+	htClean($tmpRoot);
+	htForget($tmp);
+	htPut($htFile, $withBlock);
+	$baseline = files($tmpRoot);
+	publish($sp, $A, array($D->id));
+	$before = (string) @file_get_contents($copy);
+	$seen = array();
+	//the check request remove() makes from a web request: what it sees, and two renders while the
+	//uninstall runs, one by a request that loaded the config after the flag (the check request
+	//itself), one by a request that loaded it before
+	$h->fetch = $as === 'cli' ? null : function($url) use ($sp, $A, $D, $copy, $copyD, $htFile, $uninstallRun, $guest, $superuser, &$seen) {
+		clearstatcache();
+		//the check request is a visitor's
+		$sp->wire()->users->setCurrentUser($guest);
+		$seen['flag'] = htFlagStored($sp);
+		$seen['blockGone'] = strpos((string) file_get_contents($htFile), StaticPagesHtaccess::markerBegin) === false;
+		$seen['copyStill'] = is_file($copy);
+		publish($sp, $A, array(), '<html><body>check request</body></html>');
+		$seen['after'] = (string) @file_get_contents($copy);
+		$uninstallRun->setValue($sp, false);
+		$flag = $sp->get('uninstalling');
+		$sp->remove('uninstalling');
+		publish($sp, $D, array(), '<html><body>loaded before the flag</body></html>');
+		$seen['early'] = is_file($copyD);
+		$seen['earlyRows'] = count(tagsOf($sp, substr($copyD, strlen($sp->rootPath()))));
+		$uninstallRun->setValue($sp, true);
+		$sp->set('uninstalling', $flag);
+		$sp->wire()->users->setCurrentUser($superuser);
+		return 200;
+	};
+	$log0 = logText($tmp);
+	$out = htAs($sp, $as, fn() => $sp->htaccess()->onUninstall());
+	$h->fetch = null;
+	$flagAfter = htFlagStored($sp);
+	$stillMarked = $sp->uninstalling();
+	htShutdown($sp, $as);
+	clearstatcache();
+	$logged = substr(logText($tmp), strlen($log0));
+	$ok = file_get_contents($htFile) === $stock && !is_file($copy) && !is_file($copyD) && preg_replace('~ /\.htaccess\.sp-[^ ]+\.bak~', '', files($tmpRoot)) === $baseline && !htStamps($tmp) && strpos($logged, 'block was added') === false && $out['copies']['files'] >= 1 && is_numeric($flagAfter) && $stillMarked;
+	if($as === 'admin') $ok = $ok && is_numeric($seen['flag']) && $seen['blockGone'] && $seen['copyStill'] && $seen['after'] === $before && $seen['early'] === false && $seen['earlyRows'] === 0 && substr_count($logged, 'the module is being uninstalled') === 2;
+	check("an uninstall from " . ($as === 'admin' ? 'a superuser\'s admin request' : 'a CLI run') . ': the flag stored first and kept in the module\'s row, the block out before the copies go, ' . ($as === 'admin' ? 'the check request and a render that loaded the config before the flag write nothing, ' : '') . 'the check after the request writes no block back and no stamp; no copy and no unrecorded file left', $ok, json_encode(array($seen, $out['copies'], $flagAfter, $stillMarked, files($tmpRoot), htStamps($tmp))));
+	$sp->markUninstalling(false);
+	publish($sp, $A, array($D->id));
+	check("after an uninstall from " . ($as === 'admin' ? 'an admin request' : 'a CLI run') . ' that core would complete by deleting the module\'s row: the flag lives in that row only; taken back, it is gone and pages are cached again', htFlagStored($sp) === null && !$sp->uninstalling() && !$sp->uninstalling(true) && is_file($copy) && !$uninstallRun->getValue($sp) && !$h->uninstallRun);
+	unpublishA($sp, $tmpRoot, $Pdir);
+}
+htClean($tmpRoot);
+htForget($tmp);
+
+//a flag left by an uninstall that died halfway counts for uninstallingMaxAge only, and an admin
+//request removes it then
+$modules->configs->saveConfig($sp, 'uninstalling', time());
+$sp->set('uninstalling', time());
+publish($sp, $A, array($D->id));
+$fresh = array($sp->uninstalling(), $sp->uninstalling(true), is_file($copy), htAs($sp, 'admin', fn() => $sp->clearStaleUninstalling()), htFlagStored($sp) !== null);
+$stale = time() - StaticPages::uninstallingMaxAge - 5;
+$modules->configs->saveConfig($sp, 'uninstalling', $stale);
+$sp->set('uninstalling', $stale);
+$log0 = logText($tmp);
+publish($sp, $A, array($D->id));
+$old = array($sp->uninstalling(), $sp->uninstalling(true), is_file($copy));
+$removed = htAs($sp, 'admin', fn() => $sp->clearStaleUninstalling());
+check('an uninstall flag stops caching while fresh (and stays); once older than uninstallingMaxAge it counts no more, pages are cached again, and an admin request removes it with a log line', $fresh === array(true, true, false, false, true) && $old === array(false, false, true) && $removed === true && htFlagStored($sp) === null && $sp->get('uninstalling') === null && strpos(substr(logText($tmp), strlen($log0)), 'the flag of an uninstall that did not complete was removed') !== false, json_encode(array($fresh, $old, $removed)));
+unpublishA($sp, $tmpRoot, $Pdir);
+
+//without index tables (the manifest): a render that loaded its config before the flag was
+//stored writes, finds the flag in the module's row, and takes its file back
+$tablesAtStart = $tablesReady->getValue($sp->index());
+$tablesReady->setValue($sp->index(), false);
+@unlink($sp->manifestPath());
+$modules->configs->saveConfig($sp, 'uninstalling', time());
+$sp->remove('uninstalling');
+$log0 = logText($tmp);
+publish($sp, $A, array($D->id));
+$manifestCase = array(is_file($copy), is_dir("$tmpRoot$Pdir/a"), substr_count(substr(logText($tmp), strlen($log0)), 'the module is being uninstalled'));
+$sp->markUninstalling(false);
+$tablesReady->setValue($sp->index(), $tablesAtStart);
+@unlink($sp->manifestPath());
+check('without index tables, a render that loaded the config before the uninstall flag writes nothing that stays: the file and its dir are taken back, the skip logged', $manifestCase === array(false, false, 1) && htFlagStored($sp) === null, json_encode($manifestCase));
 htClearPending($sp);
 $h->using(null);
 check('the .htaccess manager checks leave no .htaccess, no backup and no temporary file on the temporary root', !file_exists($htFile) && !htBackups($tmpRoot) && !htTmp($tmpRoot));

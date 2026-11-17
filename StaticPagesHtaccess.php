@@ -159,6 +159,10 @@ class StaticPagesHtaccess extends Wire {
 	//nothing either, the next request's does [R4]
 	protected $dryRunSave = false;
 
+	//this request ran onUninstall(): the check after its response writes nothing (the block it
+	//took out would otherwise come back as "absent"). Public for the tests, which go on after one
+	public $uninstallRun = false;
+
 	/** @var StaticPages */
 	protected $sp;
 
@@ -1373,6 +1377,8 @@ class StaticPagesHtaccess extends Wire {
 	 */
 	public function check() {
 		if( $this->dryRunSave ) return null;
+		//this request uninstalled the module: the block it took out stays out
+		if( $this->uninstallRun ) return null;
 		if( is_file( $this->stampPath() ) ) return null;
 		$this->sp->queue()->finishResponse();
 		return $this->act( '', false, true );
@@ -1414,12 +1420,15 @@ class StaticPagesHtaccess extends Wire {
 	}
 
 	/**
-	 * Before the tables are dropped: the static copies deleted by what recorded them, then the
-	 * block and the prefixes of a Replace taken out [decided by user, Q13 (a), R1]
+	 * Before the tables are dropped: the uninstall flag stored, the block and the prefixes of a
+	 * Replace taken out, then the static copies deleted by what recorded them [decided by user,
+	 * Q13 (a), R1; step 6 second doubt (a2)]
 	 *
-	 * The copies go by the index tables, or by the manifest where there are none; never by a scan
-	 * (wipeCaches() would fall back to one). Each half is caught and logged, so the uninstall
-	 * completes. The root file originals come back here too once there are root files (step 10b).
+	 * The flag (StaticPages::markUninstalling()) keeps every request from caching from then on,
+	 * and the check after this request's response from writing the block back. The copies go by
+	 * the index tables, or by the manifest where there are none; never by a scan (wipeCaches()
+	 * would fall back to one). Each half is caught and logged, so the uninstall completes. The
+	 * root file originals come back here too once there are root files (step 10b).
 	 *
 	 * #pw-internal
 	 *
@@ -1429,6 +1438,24 @@ class StaticPagesHtaccess extends Wire {
 	public function onUninstall() {
 		$out = array( 'copies' => null, 'htaccess' => null );
 		$sp = $this->sp;
+
+		//first the flag: from now on no request caches, the check request remove() makes among
+		//them, and renders already running are refused by the generation [decided by user, step 6
+		//second doubt (a2)]. This request's own check after the response writes nothing
+		$this->uninstallRun = true;
+		$sp->markUninstalling(true);
+		$sp->queue()->bumpGen();
+
+		//the block out before the copies go: once the copies are gone the old rules hand every
+		//request to PHP, and a render then has nothing left to be refused by but the flag
+		try {
+			$out['htaccess'] = $result = $this->remove();
+			//a written remove() logs its own line
+			if( $result['done'] !== 'written' ) $sp->logDrain( 'uninstall: htaccess: ' . $result['message'] );
+		}
+		catch( \Throwable $e ){
+			$sp->logDrain( 'uninstall: htaccess: ' . $e->getMessage() );
+		}
 
 		try {
 			$wiper = $sp->wiper();
@@ -1442,15 +1469,6 @@ class StaticPagesHtaccess extends Wire {
 		}
 		catch( \Throwable $e ){
 			$sp->logDrain( 'uninstall: the static copies could not be deleted: ' . $e->getMessage() );
-		}
-
-		try {
-			$out['htaccess'] = $result = $this->remove();
-			//a written remove() logs its own line
-			if( $result['done'] !== 'written' ) $sp->logDrain( 'uninstall: htaccess: ' . $result['message'] );
-		}
-		catch( \Throwable $e ){
-			$sp->logDrain( 'uninstall: htaccess: ' . $e->getMessage() );
 		}
 
 		return $out;

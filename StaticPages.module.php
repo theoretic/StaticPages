@@ -49,6 +49,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	//set by noCache(): false, true, or the reason given as a string. Lives as long as the request
 	private $noCache = false;
 
+	//this request uninstalls the module, see markUninstalling(): it caches nothing more, and the
+	//.htaccess check after its response writes nothing (StaticPagesHtaccess::check())
+	private $uninstallRun = false;
+
 	//the dependency index, see StaticPagesIndex::ensureTables()
 	const tableFiles = 'static_pages_files';
 	const tableTags = 'static_pages_tags';
@@ -98,6 +102,11 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	//the layout of the stored module config. Raised with every change older installs have to
 	//be brought through, see StaticPagesMigration
 	const configVersion = 1;
+
+	//seconds an uninstall flag keeps every request from caching, see uninstalling(): an
+	//uninstall that died halfway (a fatal error, a timeout) leaves the flag in the config of a
+	//still installed module, which caches again after this long
+	const uninstallingMaxAge = 3600;
 
 	//the tags holding a CSRF token in the @atispro/core markup, one regex per line: the
 	//<meta name=csrf-token> pair and <input rel=csrf>. See StaticPagesPublisher::stripCsrf()
@@ -170,6 +179,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 		try {
 			$this->showPendingNotices();
+			$this->clearStaleUninstalling();
 		}
 		catch( \Throwable $e ){
 			$this->error( 'StaticPages notices: ' . $e->getMessage() );
@@ -190,15 +200,23 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	}
 
 	public function ___uninstall() {
-		//the static copies by the index and the block out of the root .htaccess, before the
-		//tables go [decided by user, Q13 (a)]. onUninstall() catches its own failures
+		//the block out of the root .htaccess and the static copies by the index, before the
+		//tables go [decided by user, Q13 (a)]. onUninstall() catches its own failures and stores
+		//the uninstall flag first, see markUninstalling(); core deletes the module's row, and the
+		//flag with it, once this returns. An uninstall that throws takes the flag back first
 		try {
 			$this->htaccess()->onUninstall();
 		}
 		catch( \Throwable $e ){
 			$this->logDrain( 'uninstall: ' . $e->getMessage() );
 		}
-		$this->index()->dropTables();
+		try {
+			$this->index()->dropTables();
+		}
+		catch( \Throwable $e ){
+			$this->markUninstalling(false);
+			throw $e;
+		}
 	}
 
 	public function ___upgrade($fromVersion, $toVersion) {
@@ -643,6 +661,14 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			return;
 		}
 
+		//an uninstall is running: a file written now would outlive the index that records it
+		//(the .htaccess writer's own check request is one such render). The config this request
+		//loaded; asked again from the database once the file is recorded, below
+		if( $this->uninstalling() ){
+			$this->logSkip( $page, 'the module is being uninstalled' );
+			return;
+		}
+
 		//a name the wipes could not match safely is a name nothing is written under either
 		$staticFile = $this->staticFileName();
 		if( $staticFile === '' ){
@@ -703,11 +729,26 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 				$this->publisher()->unpublish($path, $dirExisted ? '' : $dir);
 				$this->logSkip( $page, 'content changed while rendering' );
 			}
+			//an uninstall stored its flag after this request loaded its config: its wipe may have
+			//run before this record. Asked of the module's row now, after the record: a flag
+			//stored later than this question comes before that wipe, which then finds the record
+			else if( $this->uninstalling(true) ){
+				$this->publisher()->unpublish($path, $dirExisted ? '' : $dir);
+				$this->index()->dropIndexRows( array( md5($relative) ) );
+				$this->logSkip( $page, 'the module is being uninstalled' );
+			}
 			return;
 		}
 
 		//no index tables (no CREATE privilege, say): the manifest, and every save wipes it all
 		$this->publisher()->logStaticFile($path);
+
+		//as above, for the manifest: the uninstall's wipe reads it after storing its flag
+		if( $this->uninstalling(true) ){
+			$this->publisher()->unpublish($path, $dirExisted ? '' : $dir);
+			$this->logSkip( $page, 'the module is being uninstalled' );
+			return;
+		}
 
 		//something new is on disk again, the next save has to wipe it
 		$this->queue()->noteCached();
@@ -887,6 +928,91 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$this->wire()->modules->configs->saveConfig( $this, 'htaccessNotice', null );
 		$this->remove('htaccessNotice');
 		return $shown;
+	}
+
+	/**
+	 * Store or take back the uninstall flag
+	 *
+	 * Stored by StaticPagesHtaccess::onUninstall() before anything is changed or deleted: from
+	 * then on every request refuses to cache (see uninstalling()), the check request of the
+	 * .htaccess writer and a visitor's request alike, so no copy is written after the wipe that
+	 * no index would record any more. It lives in the module's config row only, past the config
+	 * hooks like indexSchema: core deletes that row once ___uninstall() returns, and the flag
+	 * with it. Also marks this request: the .htaccess check after its response writes nothing.
+	 *
+	 * #pw-internal
+	 *
+	 * @param bool $on
+	 *
+	 */
+	public function markUninstalling($on = true){
+		$this->uninstallRun = (bool) $on;
+		if( !$on ) $this->htaccess()->uninstallRun = false;
+		$value = $on ? time() : null;
+		try {
+			$this->wire()->modules->configs->saveConfig( $this, 'uninstalling', $value );
+		}
+		catch( \Throwable $e ){
+			$this->logDrain( 'uninstall: the flag could not be ' . ( $on ? 'stored' : 'taken back' ) . ': ' . $e->getMessage() );
+		}
+		if( $on ) $this->set('uninstalling', $value);
+		else $this->remove('uninstalling');
+	}
+
+	/**
+	 * Whether an uninstall of the module is running (or this request ran one)
+	 *
+	 * Without $fresh, the config this request was loaded with: no query. With $fresh, the module's
+	 * row as it is now, one query: what a render asks after recording its file, since a request
+	 * may have loaded its config before the flag was stored. No row at all counts as uninstalling.
+	 * A flag older than uninstallingMaxAge is ignored: an uninstall that died halfway never keeps
+	 * an installed module from caching for good (an admin request removes it, see ready()).
+	 *
+	 * #pw-internal
+	 *
+	 * @param bool $fresh
+	 * @return bool
+	 *
+	 */
+	public function uninstalling($fresh = false){
+		if( $this->uninstallRun ) return true;
+		$value = $this->get('uninstalling');
+		if( $fresh ){
+			try {
+				$query = $this->wire()->database->prepare( 'SELECT data FROM modules WHERE class=:class LIMIT 1' );
+				$query->bindValue( ':class', $this->className(), \PDO::PARAM_STR );
+				$query->execute();
+				$data = $query->fetchColumn();
+				$query->closeCursor();
+			}
+			catch( \Throwable $e ){
+				//the safe side: nothing is cached while the row cannot be read
+				return true;
+			}
+			if( $data === false ) return true;
+			$data = $data === '' || $data === null ? array() : json_decode( (string) $data, true );
+			$value = is_array($data) && isset($data['uninstalling']) ? $data['uninstalling'] : null;
+		}
+		return is_numeric($value) && (int) $value > time() - self::uninstallingMaxAge;
+	}
+
+	/**
+	 * Remove an uninstall flag left by an uninstall that died halfway, once it no longer counts
+	 *
+	 * Called from ready() on admin requests: a property read when there is none.
+	 *
+	 * #pw-internal
+	 *
+	 * @return bool Whether a flag was removed
+	 *
+	 */
+	public function clearStaleUninstalling(){
+		$value = $this->get('uninstalling');
+		if( $value === null || $this->uninstalling() ) return false;
+		$this->wire()->modules->configs->saveConfig( $this, 'uninstalling', null );
+		$this->remove('uninstalling');
+		$this->logDrain( 'uninstall: the flag of an uninstall that did not complete was removed, caching again' );
+		return true;
 	}
 
 	private function migrate(){
