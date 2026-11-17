@@ -9,12 +9,16 @@ namespace ProcessWire;
 
 /*
 The rules that tell Apache to answer a request from a static copy, and (from 0.10.0 on) the
-block of them kept in the site's root .htaccess. Three layers, each testable alone:
+block of them kept in the site's root .htaccess. Three layers, each testable alone, and when
+they run:
 
   the generator  settings in, text out: rules(), apacheBlock(). Reads the module's settings
                  and $config only, never the disk and never the database
   the reader     the file in, a state out, nothing written
   the writer     splices the one marked block in, after a backup
+  the manager    when the writer runs: on install, after a superuser's admin request or a CLI
+                 run (a stamp keeps that to three stat() calls while nothing changed), on a
+                 settings save (the operator's Replace or Keep), on uninstall
 
 The block goes immediately before the stock "# PW-PAGENAME" line: inside mod_rewrite, after
 the access rules, ahead of the 16A condition. Anywhere later its rules would take the stock
@@ -148,6 +152,9 @@ class StaticPagesHtaccess extends Wire {
 	public $fetch = null;
 	public $reread = null;
 
+	//the settings a save is storing, see using(); null: the module's own properties
+	protected $settings = null;
+
 	/** @var StaticPages */
 	protected $sp;
 
@@ -171,8 +178,8 @@ class StaticPagesHtaccess extends Wire {
 	public function rules() {
 		$notes = array();
 
-		//validated by staticFileName() already: a plain name, or ''
-		$name = $this->sp->staticFileName();
+		//validated as staticFileName() validates: a plain name, or ''
+		$name = $this->fileName();
 		if( $name === '' ){
 			$notes[] = 'The Static file name setting is not a plain file name: no rules are generated.';
 			return array( 'rules' => array(), 'notes' => $notes );
@@ -528,7 +535,7 @@ class StaticPagesHtaccess extends Wire {
 	 *
 	 */
 	public function ruleGroups(array $lines, $block = null) {
-		$name = $this->sp->staticFileName();
+		$name = $this->fileName();
 		$candidates = array();
 		$routes = array();
 		$run = null;
@@ -769,7 +776,8 @@ class StaticPagesHtaccess extends Wire {
 	 *   'message', 'messages' (what the operator must know besides), 'text', 'backup',
 	 *   'prefixed' (line numbers), 'directoryIndex' (line numbers), 'kept' (S4 groups left,
 	 *   "first-last"), 'regrouped' (stock conditions that join a hand rule from now on), 'fetch'
-	 *   (the root URL's status code, 0 for no answer, null when not asked), 'restored'
+	 *   (the root URL's status code, 0 for no answer, null when not asked), 'restored', 'busy'
+	 *   (the lock was not taken: nothing was read for the decision, try again later)
 	 *
 	 */
 	public function write($dryRun = false, $replace = false) {
@@ -802,6 +810,7 @@ class StaticPagesHtaccess extends Wire {
 		}
 		if( !$locked ){
 			$result = $this->outcome( $this->status(), $mode, $dryRun );
+			$result['busy'] = true;
 			$result['message'] = 'The .htaccess lock could not be taken (another request is changing the file, or the database is not there): nothing was written.';
 			return $result;
 		}
@@ -911,6 +920,7 @@ class StaticPagesHtaccess extends Wire {
 			'regrouped' => array(),
 			'fetch' => null,
 			'restored' => false,
+			'busy' => false,
 			) );
 	}
 
@@ -1262,6 +1272,298 @@ class StaticPagesHtaccess extends Wire {
 		//for a regex; in a test string or a substitution mod_rewrite reads a backslash as
 		//"the next character as it is", so the same text works there
 		return preg_quote( (string) $value );
+	}
+
+////  when the manager runs: install, after an admin or CLI request, a settings save, uninstall
+
+	/**
+	 * Read the settings from an array instead of the module's properties
+	 *
+	 * Modules::saveConfig() does not update the loaded module: a settings save hands the array it
+	 * stores here, and the part keeps reading it for the rest of the request, so the check after
+	 * the response sees what was saved, not the values the request started with. null goes back
+	 * to the module's properties.
+	 *
+	 * #pw-internal
+	 *
+	 * @param array|null $data
+	 * @return $this
+	 *
+	 */
+	public function using(?array $data = null) {
+		$this->settings = $data;
+		return $this;
+	}
+
+	protected function fileName() {
+		//what the generator and the heuristic call the static file
+		if( $this->settings === null ) return $this->sp->staticFileName();
+		return $this->sp->plainFileName( isset($this->settings['staticFile']) ? $this->settings['staticFile'] : 'index.html' );
+	}
+
+	protected function keep() {
+		//the hash Keep stored for the candidates, see keepHash()
+		$keep = $this->settings === null ? $this->sp->get('htaccessKeep') : ( isset($this->settings['htaccessKeep']) ? $this->settings['htaccessKeep'] : '' );
+		return is_string($keep) ? $keep : '';
+	}
+
+	/**
+	 * What Keep stores for the candidates of a status: a hash of their text, line numbers left out
+	 * (lines moved by an edit elsewhere in the file are still the rules kept); '' for none
+	 *
+	 * #pw-internal
+	 *
+	 * @param array $status
+	 * @return string
+	 *
+	 */
+	public function keepHash(array $status) {
+		if( empty($status['candidates']) ) return '';
+		$texts = array();
+		foreach( $status['candidates'] as $group ) $texts[] = implode( "\n", $group['lines'] );
+		return md5( implode( "\n\n", $texts ) );
+	}
+
+	/**
+	 * The stamp the lazy check compares: a file whose name is the hash of what the state of the
+	 * file depends on, so that comparing it costs three stat() calls (the .htaccess, this part's
+	 * file, the stamp) and no read. Inputs: the file's path, its mtime and size (or its absence),
+	 * this part's mtime (a module update), the generated block (every setting the generator
+	 * reads), the static file name (the heuristic), the hash Keep stored
+	 *
+	 * #pw-internal
+	 *
+	 * @return string
+	 *
+	 */
+	public function stampPath() {
+		clearstatcache();
+		$path = $this->filePath();
+		$stat = @stat($path);
+		$inputs = array(
+			$path,
+			$stat ? $stat['mtime'] . ':' . $stat['size'] : 'none',
+			(int) @filemtime(__FILE__),
+			$this->apacheBlock(),
+			$this->fileName(),
+			$this->keep(),
+			);
+		return $this->wire()->config->paths->cache . 'StaticPages/htaccess-' . md5( serialize($inputs) ) . '.seen';
+	}
+
+	/**
+	 * The lazy check, run by StaticPages::shutdownDrain() after a superuser's admin request and
+	 * in a CLI run, never after a visitor's request
+	 *
+	 * With the stamp unchanged nothing is read. Otherwise, the response finished first: absent
+	 * and outdated get the block [decided by user; Q3], a candidate a warning, once per change of
+	 * the candidates and never for the ones Keep was chosen for, the other states one log line
+	 * when first seen. The notices are kept in the module config until a superuser's next admin
+	 * page shows them [decided by user, step 5 doubt (a)].
+	 *
+	 * #pw-internal
+	 *
+	 * @return array|null null when the stamp was unchanged, else see act()
+	 *
+	 */
+	public function check() {
+		if( is_file( $this->stampPath() ) ) return null;
+		$this->sp->queue()->finishResponse();
+		return $this->act( '', false, true );
+	}
+
+	/**
+	 * When the module is installed: what the lazy check does, whatever the stamp says
+	 *
+	 * #pw-internal
+	 *
+	 * @return array See act()
+	 *
+	 */
+	public function onInstall() {
+		return $this->act( '', false, false );
+	}
+
+	/**
+	 * After a save of the module's whole config, with the array stored
+	 *
+	 * The operator's choice for hand-written rules ($action 'replace' or 'keep', a one shot value
+	 * never stored) is acted on here; without one the save does what the lazy check does (an
+	 * outdated block is rewritten: a changed Static file name changes the block). With $dryRun
+	 * nothing is written and the new text goes to the static-pages log. Keep's hash was stored by
+	 * the save itself, see StaticPages::hookBeforeSaveConfig().
+	 *
+	 * #pw-internal
+	 *
+	 * @param array $data The config being stored
+	 * @param string $action '', 'replace' or 'keep'
+	 * @param bool $dryRun
+	 * @return array See act()
+	 *
+	 */
+	public function onSave(array $data, $action = '', $dryRun = false) {
+		$this->using($data);
+		return $this->act( $action, $dryRun, false );
+	}
+
+	/**
+	 * Before the tables are dropped: the static copies deleted by what recorded them, then the
+	 * block and the prefixes of a Replace taken out [decided by user, Q13 (a), R1]
+	 *
+	 * The copies go by the index tables, or by the manifest where there are none; never by a scan
+	 * (wipeCaches() would fall back to one). Each half is caught and logged, so the uninstall
+	 * completes. The root file originals come back here too once there are root files (step 10b).
+	 *
+	 * #pw-internal
+	 *
+	 * @return array 'copies' (the wipe's counts, or null), 'htaccess' (remove()'s result, or null)
+	 *
+	 */
+	public function onUninstall() {
+		$out = array( 'copies' => null, 'htaccess' => null );
+		$sp = $this->sp;
+
+		try {
+			$wiper = $sp->wiper();
+			if( $sp->index()->ensureTables() ) $out['copies'] = $wiper->wipeIndexed(null);
+			else if( is_file( $sp->manifestPath() ) ) $out['copies'] = $wiper->wipeCachesManifest();
+			if( $out['copies'] !== null ){
+				$sp->queue()->bumpGen();
+				$sp->logDrain( 'uninstall: ' . $wiper->describeWipe( $out['copies'] ) );
+			}
+			else $sp->logDrain( 'uninstall: neither index tables nor a manifest, no static copy deleted' );
+		}
+		catch( \Throwable $e ){
+			$sp->logDrain( 'uninstall: the static copies could not be deleted: ' . $e->getMessage() );
+		}
+
+		try {
+			$out['htaccess'] = $result = $this->remove();
+			//a written remove() logs its own line
+			if( $result['done'] !== 'written' ) $sp->logDrain( 'uninstall: htaccess: ' . $result['message'] );
+		}
+		catch( \Throwable $e ){
+			$sp->logDrain( 'uninstall: htaccess: ' . $e->getMessage() );
+		}
+
+		return $out;
+	}
+
+	/**
+	 * Read the file, act, tell, stamp
+	 *
+	 * @param string $action '', 'replace' or 'keep'
+	 * @param bool $dryRun
+	 * @param bool $later The notices are kept for a superuser's next admin page (after the
+	 *   response, or in a CLI run), else added to this request's notices
+	 * @return array 'state' (as read first), 'result' (write()'s, or null), 'notices' (list of
+	 *   array('type', 'text')), 'stamped' (bool)
+	 *
+	 */
+	protected function act($action, $dryRun, $later) {
+		$status = $this->status();
+		$state = $status['state'];
+		$result = null;
+		$notices = array();
+		$log = array();
+		//automatic outcomes nobody asked for are told once per change, see the reported key
+		$once = $action === '';
+
+		if( $action === 'keep' ){
+			if( $state === 'candidate' ){
+				$notices[] = array( 'message', sprintf( $this->_('StaticPages: the hand-written rules in the root .htaccess (lines %s) are kept. Nothing was written, and there is no warning about them again until they change.'), $this->spans($status) ) );
+				$log[] = 'htaccess: Keep chosen for the hand-written rules on lines ' . $this->spans($status) . ', nothing written';
+			}
+			else $notices[] = array( 'message', sprintf( $this->_('StaticPages: the root .htaccess holds no hand-written rules to keep (state %s). Nothing was written.'), $state ) );
+		}
+		else if( $action === 'replace' || $state === 'absent' || $state === 'outdated' ){
+			$result = $this->write( $dryRun, $action === 'replace' );
+			$messages = trim( $result['message'] . ' ' . implode( ' ', $result['messages'] ) );
+			if( $result['done'] === 'written' ) $notices[] = array( 'message', 'StaticPages, root .htaccess: ' . $messages );
+			else if( $result['done'] === 'dry run' ){
+				$notices[] = array( 'message', 'StaticPages, root .htaccess: ' . $messages . ' ' . $this->_('The new text is in the static-pages log.') );
+				$log[] = 'htaccess dry run: ' . $messages;
+				foreach( $this->lines( (string) $result['text'] ) as $n => $line ) $log[] = "htaccess dry run: $n: " . $line['text'];
+			}
+			else if( $result['done'] !== 'nothing' ){
+				//refused (the writer logs nothing then) or restored (it logged)
+				$notices[] = array( 'warning', 'StaticPages, root .htaccess: ' . $messages );
+				if( $result['done'] === 'refused' ) $log[] = 'htaccess: ' . $messages;
+			}
+		}
+		else if( $state !== 'current' && $state !== 'candidate' ){
+			//none, locked, damaged, unrecognised: shown on the settings form
+			$log[] = 'htaccess: ' . $state . ': ' . $status['reason'];
+		}
+
+		//hand-written rules found, or left by a Replace (groups that depend on the request method
+		//only): a warning, until Keep is chosen for them
+		$final = $result && $result['done'] === 'written' ? $this->status() : $status;
+		$keepHash = $this->keepHash($final);
+		if( $action !== 'keep' && $final['state'] === 'candidate' && $keepHash !== $this->keep() ){
+			$notices[] = array( 'warning', sprintf(
+				$this->_('StaticPages: the root .htaccess holds hand-written rules that look like StaticPages rules (lines %1$s). Nothing was written for them. Choose Replace or Keep under "Hand-written rules found" in the module settings: %2$s'),
+				$this->spans($final),
+				$this->wire()->config->urls->admin . 'module/edit?name=' . $this->sp->className()
+				) );
+			$log[] = 'htaccess: hand-written rules that look like StaticPages rules on lines ' . $this->spans($final) . ', nothing written for them until Replace or Keep is chosen in the settings';
+		}
+
+		//what was told, so that an unchanged outcome is not told again when only the stamp moved
+		//(the file touched, a setting saved that the block does not depend on)
+		$reported = $this->wire()->config->paths->cache . 'StaticPages/htaccess.reported';
+		$key = md5( implode( "\n", array( $state, $result ? $result['done'] . ' ' . $result['message'] : '', $keepHash, $this->keep() ) ) );
+		if( $once && ( $result === null || $result['done'] === 'refused' ) && (string) @file_get_contents($reported) === $key ){
+			$notices = array();
+			$log = array();
+		}
+
+		foreach( $log as $line ) $this->sp->logDrain($line);
+		$this->tell( $notices, $later );
+
+		//a dry run wrote nothing, so the next check does it; a lock held by another request is
+		//tried again. Otherwise the stamp, from the stats after whatever happened: a refused or a
+		//restored write is not tried again until something changes
+		$stamped = false;
+		if( !$dryRun && !( $result && $result['busy'] ) && $this->sp->trackedHashDir() !== '' ){
+			foreach( (array) glob( $this->wire()->config->paths->cache . 'StaticPages/htaccess-*.seen' ) as $old ) if( is_string($old) && is_file($old) ) @unlink($old);
+			$stamped = @touch( $this->stampPath() );
+			@file_put_contents( $reported, $key, LOCK_EX );
+		}
+
+		return array( 'state' => $state, 'result' => $result, 'notices' => $notices, 'stamped' => $stamped );
+	}
+
+	protected function spans(array $status) {
+		//"440-443, 444-446"
+		$at = array();
+		foreach( $status['candidates'] as $group ) $at[] = $group['start'] === $group['end'] ? (string) $group['start'] : $group['start'] . '-' . $group['end'];
+		return implode( ', ', $at );
+	}
+
+	protected function tell(array $notices, $later) {
+		//now: this request's notices (a settings save redirects, core carries them to the next
+		//page). Later: kept in the module config, past the config hooks like indexSchema, until
+		//StaticPages::showPendingNotices() shows them on a superuser's admin page
+		if( !count($notices) ) return;
+		if( !$later ){
+			foreach( $notices as $notice ) $notice[0] === 'warning' ? $this->sp->warning( $notice[1] ) : $this->sp->message( $notice[1] );
+			return;
+		}
+		$pending = $this->sp->get('htaccessNotice');
+		if( !is_array($pending) ) $pending = array();
+		foreach( $notices as $notice ){
+			$item = array( 'type' => $notice[0], 'text' => $notice[1] );
+			if( !in_array( $item, $pending, true ) ) $pending[] = $item;
+		}
+		$pending = array_values( array_slice( $pending, -10 ) );
+		try {
+			$this->wire()->modules->configs->saveConfig( $this->sp, 'htaccessNotice', $pending );
+			$this->sp->set( 'htaccessNotice', $pending );
+		}
+		catch( \Throwable $e ){
+			$this->sp->logDrain( 'htaccess: the notice for the next admin page could not be stored: ' . $e->getMessage() );
+		}
 	}
 
 }

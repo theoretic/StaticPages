@@ -1009,6 +1009,12 @@ function cleanup() {
 	$wire->modules->configs->saveConfig('StaticPages', $configAtStart);
 	//the restored config may say the migration is pending; this process ran it on the temp root
 	$sp->set('configVersion', StaticPages::configVersion);
+	//the module's own .htaccess check after this CLI run would read the temporary root after it
+	//is gone, recreate its cache dir and log there: this run stands for a visitor's request now
+	$cli = new \ReflectionProperty(StaticPages::class, 'cli');
+	$cli->setAccessible(true);
+	$cli->setValue($sp, false);
+	$sp->htaccess()->using(null);
 }
 register_shutdown_function(function() {
 	global $cleanedUp, $fails, $tmp;
@@ -1574,6 +1580,302 @@ $pages->save($x);
 $sp->drain();
 check('the next save removes the adopted files', !is_file("$tmpRoot$Pdir/old/index.html") && !is_file("$tmpRoot/index.html") && is_file("$tmpRoot/landing/index.html"));
 
+////  .htaccess manager (0.10.0)
+
+//when the manager runs: install, the check after a superuser's admin request or a CLI run, a
+//settings save, uninstall. Every .htaccess is a fixture on the temporary root; StaticPages' own
+//___install() and ___uninstall() are never called (they create and drop the install's tables):
+//what they do about the .htaccess and the copies is in onInstall() and onUninstall()
+$h = $sp->htaccess();
+$h->file = '';
+$h->fetch = null;
+$h->reread = null;
+$h->using(null);
+$moduleSource = (string) file_get_contents((new \ReflectionClass($sp))->getFileName());
+$installBody = preg_match('/function ___install\(\) \{(.*?)\n\t\}/s', $moduleSource, $m) ? $m[1] : '';
+$uninstallBody = preg_match('/function ___uninstall\(\) \{(.*?)\n\t\}/s', $moduleSource, $m) ? $m[1] : '';
+$testSource = (string) file_get_contents(__FILE__);
+check('___install() calls onInstall(), ___uninstall() calls onUninstall() before dropTables(); this script calls neither hook method', strpos($installBody, '$this->htaccess()->onInstall()') !== false && strpos($uninstallBody, '$this->htaccess()->onUninstall()') !== false && strpos($uninstallBody, 'dropTables()') > strpos($uninstallBody, 'onUninstall()') && !preg_match('/->(___)?(un)?install\(\s*\)/', $testSource) && !preg_match('/->(un)?install\(\s*[\'"]StaticPages/', $testSource));
+
+//the module's shutdown, as after a superuser's admin request ('admin'), an editor's ('editor'),
+//a visitor's ('front') or a CLI run ('cli'): the SAPI and the admin flag are properties the test
+//sets, the user is switched for the call
+$cliFlag = new \ReflectionProperty(StaticPages::class, 'cli');
+$cliFlag->setAccessible(true);
+$adminFlag = new \ReflectionProperty(StaticPages::class, 'adminRequest');
+$adminFlag->setAccessible(true);
+$userAtStart = $wire->user;
+$superuser = $wire->users->get($config->superUserPageID);
+$guest = $wire->users->getGuestUser();
+function htAs(StaticPages $sp, $as, callable $fn) {
+	global $wire, $cliFlag, $adminFlag, $superuser, $guest, $userAtStart;
+	$cliFlag->setValue($sp, $as === 'cli');
+	$adminFlag->setValue($sp, $as === 'admin' || $as === 'editor');
+	$wire->users->setCurrentUser($as === 'admin' ? $superuser : $guest);
+	try {
+		return $fn();
+	} finally {
+		$cliFlag->setValue($sp, true);
+		$adminFlag->setValue($sp, false);
+		$wire->users->setCurrentUser($userAtStart);
+	}
+}
+function htShutdown(StaticPages $sp, $as) {
+	return htAs($sp, $as, fn() => $sp->shutdownDrain());
+}
+function htStamps($tmp) {
+	clearstatcache();
+	return array_map('basename', (array) glob("$tmp/cache/StaticPages/htaccess-*.seen"));
+}
+function htForget($tmp) {
+	foreach((array) glob("$tmp/cache/StaticPages/htaccess-*.seen") as $f) @unlink($f);
+	@unlink("$tmp/cache/StaticPages/htaccess.reported");
+	clearstatcache();
+}
+function htPending(StaticPages $sp) {
+	$p = $sp->wire()->modules->getConfig('StaticPages', 'htaccessNotice');
+	return is_array($p) ? $p : array();
+}
+function htClearPending(StaticPages $sp) {
+	$sp->wire()->modules->configs->saveConfig($sp, 'htaccessNotice', null);
+	$sp->remove('htaccessNotice');
+}
+//the static-pages log lines written since $before that name the .htaccess
+function htLogSince($tmp, $before) {
+	return array_values(array_filter(explode("\n", substr(logText($tmp), strlen($before))), fn($l) => stripos($l, 'htaccess') !== false));
+}
+function htNoticeTexts($wire, $from) {
+	$out = array();
+	foreach(array_slice(iterator_to_array($wire->notices), $from) as $n) $out[] = get_class($n) . ': ' . $n->text;
+	return $out;
+}
+function htSave(StaticPages $sp, array $set, array $unset = array()) {
+	$modules = $sp->wire()->modules;
+	$data = $modules->getConfig('StaticPages');
+	foreach($set as $k => $v) $data[$k] = $v;
+	foreach($unset as $k) unset($data[$k]);
+	$modules->saveConfig('StaticPages', $data);
+	return $modules->getConfig('StaticPages');
+}
+$settingsUrl = $config->urls->admin . 'module/edit?name=StaticPages';
+htClean($tmpRoot);
+htForget($tmp);
+htClearPending($sp);
+
+//onInstall(): absent gets the block; candidate and no file get nothing
+htPut($htFile, $stock);
+$r = $h->onInstall();
+check('onInstall(), absent: the block is written, after one backup', $r['state'] === 'absent' && $r['result']['done'] === 'written' && file_get_contents($htFile) === $withBlock && count(htBackups($tmpRoot)) === 1, json_encode(array($r['state'], $r['result']['message'] ?? '')));
+htClean($tmpRoot);
+list($candidateFixture, $candidateLines) = htHand($stock, '# PW-PAGENAME', $readme);
+htPut($htFile, $candidateFixture);
+$listing = files($tmpRoot);
+$n0 = count($wire->notices);
+$r = $h->onInstall();
+check('onInstall(), candidate: nothing written, nothing created in the root, a warning naming the settings page', $r['state'] === 'candidate' && $r['result'] === null && file_get_contents($htFile) === $candidateFixture && files($tmpRoot) === $listing && !htBackups($tmpRoot) && count($r['notices']) === 1 && strpos($r['notices'][0][1], $settingsUrl) !== false && !htPending($sp), json_encode($r['notices']));
+htClean($tmpRoot);
+$listing = files($tmpRoot);
+$r = $h->onInstall();
+check('onInstall(), no .htaccess: nothing written, none created', $r['state'] === 'none' && $r['result'] === null && !file_exists($htFile) && files($tmpRoot) === $listing && !$r['notices']);
+htForget($tmp);
+
+//the check after a superuser's admin request: absent gets the block, one notice kept for the
+//next admin page, one log line, one backup; a second one reads nothing
+htPut($htFile, $stock);
+$log0 = logText($tmp);
+htShutdown($sp, 'admin');
+$pending = htPending($sp);
+$lines = htLogSince($tmp, $log0);
+$stamps = htStamps($tmp);
+check('admin shutdown, absent: the block is written, one backup, one log line, one notice kept for the next admin page, one stamp', file_get_contents($htFile) === $withBlock && count(htBackups($tmpRoot)) === 1 && count($lines) === 1 && strpos($lines[0], 'the StaticPages block was added') !== false && count($pending) === 1 && $pending[0]['type'] === 'message' && strpos($pending[0]['text'], 'block was added') !== false && count($stamps) === 1, json_encode(array($lines, $pending, $stamps)));
+$stampFile = "$tmp/cache/StaticPages/{$stamps[0]}";
+touch($stampFile, time() - 50);
+clearstatcache();
+$stampTime = filemtime($stampFile);
+//a byte changed inside the block, the size and the mtime kept: read, it would be outdated
+$htTime = filemtime($htFile);
+$changed = str_replace('# The home page, from its copy.', '# The home page, from its copY.', $withBlock);
+htPut($htFile, $changed);
+touch($htFile, $htTime);
+clearstatcache();
+$log0 = logText($tmp);
+htShutdown($sp, 'admin');
+clearstatcache();
+check('admin shutdown again, nothing changed by mtime or size: the stamp is the same file, untouched; the .htaccess is not read (a same-size edit inside the block stays), no backup, no log line, no new notice', htStamps($tmp) === $stamps && filemtime($stampFile) === $stampTime && file_get_contents($htFile) === $changed && count(htBackups($tmpRoot)) === 1 && !htLogSince($tmp, $log0) && count(htPending($sp)) === 1, json_encode(htStamps($tmp)));
+htPut($htFile, $withBlock);
+
+//the kept notice: not for an editor, not for an ajax request; shown once to a superuser, cleared
+$n0 = count($wire->notices);
+$editor = htAs($sp, 'editor', fn() => $sp->showPendingNotices());
+$config->ajax = true;
+$ajax = htAs($sp, 'admin', fn() => $sp->showPendingNotices());
+$config->ajax = false;
+$keptFor = count(htPending($sp));
+$shown = htAs($sp, 'admin', fn() => $sp->showPendingNotices());
+$texts = htNoticeTexts($wire, $n0);
+$again = htAs($sp, 'admin', fn() => $sp->showPendingNotices());
+check('the kept notice is not shown to a non-superuser nor on an ajax request, and stays; shown once to a superuser, then cleared from the stored config', $editor === 0 && $ajax === 0 && $keptFor === 1 && $shown === 1 && count($texts) === 1 && strpos($texts[0], 'NoticeMessage') !== false && strpos($texts[0], 'block was added') !== false && $again === 0 && !htPending($sp) && !array_key_exists('htaccessNotice', $modules->getConfig('StaticPages')) && $sp->get('htaccessNotice') === null, json_encode(array($editor, $ajax, $keptFor, $shown, $texts)));
+htClean($tmpRoot);
+htForget($tmp);
+
+//Q3 [decided by user]: the module's own block edited by hand is rewritten by the check
+htPut($htFile, str_replace('# END StaticPages', "# a hand edit\n# END StaticPages", $withBlock));
+$log0 = logText($tmp);
+htShutdown($sp, 'admin');
+$lines = htLogSince($tmp, $log0);
+$pending = htPending($sp);
+check('admin shutdown, outdated (the block edited by hand): rewritten, one backup, one log line, one notice kept', file_get_contents($htFile) === $withBlock && count(htBackups($tmpRoot)) === 1 && count($lines) === 1 && strpos($lines[0], 'the StaticPages block was rewritten') !== false && count($pending) === 1 && strpos($pending[0]['text'], 'block was rewritten') !== false, json_encode(array($lines, $pending)));
+htClean($tmpRoot);
+htForget($tmp);
+htClearPending($sp);
+
+//a visitor's request and an editor's: nothing read, nothing written, no stamp
+htPut($htFile, $stock);
+$listing = files($tmpRoot);
+htShutdown($sp, 'front');
+htShutdown($sp, 'editor');
+check('front-end and editor shutdowns: no stamp created, the absent fixture not written, no backup, no notice kept', !htStamps($tmp) && file_get_contents($htFile) === $stock && files($tmpRoot) === $listing && !htPending($sp));
+
+//a CLI run does what a superuser's admin request does, and keeps the notice too
+htShutdown($sp, 'cli');
+check('CLI shutdown, absent: the block is written and the notice kept for a superuser\'s next admin page', file_get_contents($htFile) === $withBlock && count(htPending($sp)) === 1 && count(htStamps($tmp)) === 1);
+htClean($tmpRoot);
+htForget($tmp);
+htClearPending($sp);
+
+//candidate: nothing written, one warning naming the settings page, one log line; not again
+htPut($htFile, $candidateFixture);
+$listing = files($tmpRoot);
+$spans = implode(', ', array_map(fn($g) => $g['start'] . '-' . $g['end'], $h->status()['candidates']));
+$log0 = logText($tmp);
+htShutdown($sp, 'admin');
+$lines = htLogSince($tmp, $log0);
+$pending = htPending($sp);
+check('admin shutdown, candidate: nothing written, one warning naming the settings page and the lines, one log line', file_get_contents($htFile) === $candidateFixture && files($tmpRoot) === $listing && count($lines) === 1 && strpos($lines[0], 'nothing written for them until Replace or Keep') !== false && count($pending) === 1 && $pending[0]['type'] === 'warning' && strpos($pending[0]['text'], $settingsUrl) !== false && strpos($pending[0]['text'], "(lines $spans)") !== false, json_encode(array($spans, $lines, $pending)));
+$log0 = logText($tmp);
+htShutdown($sp, 'admin');
+touch($htFile, time() - 30);
+clearstatcache();
+htShutdown($sp, 'admin');
+check('admin shutdown, candidate again, and after the file was touched (its candidates unchanged): no new warning, no log line', count(htPending($sp)) === 1 && !htLogSince($tmp, $log0) && file_get_contents($htFile) === $candidateFixture, json_encode(htLogSince($tmp, $log0)));
+htClearPending($sp);
+
+//Keep: nothing written, the hash stored, no htaccessAction stored; no warning until an edit
+$status = $h->status();
+$stored = htSave($sp, array('htaccessAction' => 'keep'));
+check('settings save with Keep: nothing written, htaccessKeep stored (the candidates\' hash), htaccessAction not stored', file_get_contents($htFile) === $candidateFixture && files($tmpRoot) === $listing && ($stored['htaccessKeep'] ?? '') === $h->keepHash($status) && $h->keepHash($status) !== '' && !array_key_exists('htaccessAction', $stored), json_encode($stored));
+htClearPending($sp);
+htShutdown($sp, 'admin');
+touch($htFile, time() - 20);
+clearstatcache();
+htShutdown($sp, 'admin');
+check('after Keep: the admin shutdowns raise no warning, also after the file was touched', !htPending($sp));
+htPut($htFile, str_replace('RewriteRule ^(.+)/$ /$1/index.html [L]', 'RewriteRule ^(.+)/$ /$1/index.html [L,NC]', $candidateFixture));
+htShutdown($sp, 'admin');
+$pending = htPending($sp);
+check('after Keep, one candidate line edited: the warning comes again', count($pending) === 1 && $pending[0]['type'] === 'warning', json_encode($pending));
+htSave($sp, array(), array('htaccessKeep'));
+htClean($tmpRoot);
+htForget($tmp);
+htClearPending($sp);
+
+//Replace from the settings: what step 4's Replace gives; with Dry run nothing, the text logged
+htPut($htFile, $candidateFixture);
+$expected = $h->write(true, true)['text'];
+$stored = htSave($sp, array('htaccessAction' => 'replace'));
+check('settings save with Replace: the file is what write() with Replace gives, one backup, the state current; htaccessAction not stored', is_string($expected) && file_get_contents($htFile) === $expected && count(htBackups($tmpRoot)) === 1 && $h->status()['state'] === 'current' && !array_key_exists('htaccessAction', $stored));
+htClean($tmpRoot);
+htPut($htFile, $candidateFixture);
+$listing = files($tmpRoot);
+$log0 = logText($tmp);
+$stored = htSave($sp, array('htaccessAction' => 'replace', 'wipeDryRun' => 1));
+$logged = substr(logText($tmp), strlen($log0));
+check('settings save with Replace and Dry run: nothing written, no backup; the log holds the new text line by line; neither box stored checked', file_get_contents($htFile) === $candidateFixture && files($tmpRoot) === $listing && strpos($logged, 'htaccess dry run: ') !== false && strpos($logged, ': # BEGIN StaticPages') !== false && strpos($logged, ': ' . $prefix . 'RewriteRule ^(.+)/$ /$1/index.html [L]') !== false && substr_count($logged, 'htaccess dry run: ') === count(explode("\n", $expected)) + 1 && empty($stored['wipeDryRun']) && !array_key_exists('htaccessAction', $stored), substr($logged, 0, 300));
+htClean($tmpRoot);
+htForget($tmp);
+
+//a saved Static file name rewrites a current block, from the array saved (the loaded module still
+//has the old name)
+htPut($htFile, $withBlock);
+htSave($sp, array('staticFile' => 'cache.htm'));
+$new = (string) file_get_contents($htFile);
+$liveName = $sp->staticFileName();
+check('settings save changing Static file name, current: the block is rewritten to the new name, one backup', strpos($new, 'cache\\.htm') !== false && strpos($new, 'index\\.html') === false && count(htBackups($tmpRoot)) === 1 && $liveName === 'index.html', $liveName);
+$bk = htBackups($tmpRoot);
+htShutdown($sp, 'admin');
+check('the same request\'s shutdown judges by the saved name: no rewrite back to the old one', file_get_contents($htFile) === $new && htBackups($tmpRoot) === $bk);
+htSave($sp, array(), array('staticFile'));
+check('settings save back to the default name: the block of index.html again', file_get_contents($htFile) === $withBlock);
+$h->using(null);
+htClean($tmpRoot);
+htForget($tmp);
+htClearPending($sp);
+
+//[step 4 handed over] Replace leaving a group conditioned on the request method only (the gate
+//shape): still candidate, so the warning stops only by Keep, and comes back on an edit
+list($gateFixture) = htHand($stock, '# PW-PAGENAME', array_merge($gate, $hand['the README\'s first rule'][0]));
+htPut($htFile, $gateFixture);
+$n0 = count($wire->notices);
+htSave($sp, array('htaccessAction' => 'replace'));
+$after = $h->status();
+$texts = htNoticeTexts($wire, $n0);
+$warned = array_values(array_filter($texts, fn($t) => strpos($t, 'NoticeWarning: ') !== false && strpos($t, '(lines 439-441)') !== false));
+check('gate shape: Replace leaves the S4 group, the state stays candidate, and the save warns about lines 439-441 besides saying what was written', $after['state'] === 'candidate' && count($after['candidates']) === 1 && $after['candidates'][0]['signatures'] === array('S4') && count($warned) === 1 && strpos(implode(' ', $texts), 'request method only and were left in place') !== false, json_encode(array(htSummary($after), $texts)));
+htForget($tmp);
+htShutdown($sp, 'admin');
+$pending = htPending($sp);
+check('gate shape: the check after an admin request warns about it too', count($pending) === 1 && $pending[0]['type'] === 'warning' && strpos($pending[0]['text'], '(lines 439-441)') !== false, json_encode($pending));
+htClearPending($sp);
+htSave($sp, array('htaccessAction' => 'keep'));
+htClearPending($sp);
+htShutdown($sp, 'admin');
+$keptPending = htPending($sp);
+$replaced = (string) file_get_contents($htFile);
+htPut($htFile, str_replace('RewriteRule ^ gate.php [L]', 'RewriteRule ^ gate.php [L,NC]', $replaced));
+htShutdown($sp, 'admin');
+$pending = htPending($sp);
+check('gate shape: after Keep no warning; after the gate rule is edited, the warning again', !$keptPending && count($pending) === 1 && $pending[0]['type'] === 'warning', json_encode(array($keptPending, $pending)));
+htSave($sp, array(), array('htaccessKeep'));
+$h->using(null);
+htClean($tmpRoot);
+htForget($tmp);
+htClearPending($sp);
+
+//a failing check is caught and logged, and the drain before it has run
+$x = publish($sp, $A, array($D->id));
+$copy = "$tmpRoot$Pdir/a/index.html";
+$sp->queue()->enqueue(StaticPages::modeAll);
+$log0 = logText($tmp);
+$h->file = array('not a path');
+htShutdown($sp, 'admin');
+$h->file = '';
+check('a failing .htaccess check is caught and logged, the queued drain ran', !is_file($copy) && strpos(substr(logText($tmp), strlen($log0)), 'htaccess check failed') !== false, substr(logText($tmp), strlen($log0), 300));
+htForget($tmp);
+
+//onUninstall() [decided by user, Q13 (a)]: the copies by the index, the block and the prefixes
+//out; the tables stay for ___uninstall() to drop
+htPut($htFile, $candidateFixture);
+$h->write(false, true);
+$replaced = (string) file_get_contents($htFile);
+$x = publish($sp, $A, array($D->id));
+$recorded = tagsOf($sp, "$Pdir/a/index.html");
+$backups = count(htBackups($tmpRoot));
+$out = $h->onUninstall();
+$tables = $database->query("SHOW TABLES LIKE 'static\\_pages\\_%'")->fetchAll(\PDO::FETCH_COLUMN);
+check('onUninstall() after a Replace: the copy deleted by the index, the candidate fixture given back, one more backup holding the replaced file, the index tables still there', is_file($copy) === false && count($recorded) > 0 && $out['copies']['files'] >= 1 && file_get_contents($htFile) === $candidateFixture && count(htBackups($tmpRoot)) === $backups + 1 && $out['htaccess']['backup'] !== '' && file_get_contents("$tmpRoot/{$out['htaccess']['backup']}") === $replaced && count($tables) === 3, json_encode(array($out['copies'], $out['htaccess']['message'], $tables)));
+htClean($tmpRoot);
+htPut($htFile, $candidateFixture);
+$listing = files($tmpRoot);
+$out = $h->onUninstall();
+check('onUninstall() with a candidate never replaced: the .htaccess unchanged, no backup', file_get_contents($htFile) === $candidateFixture && files($tmpRoot) === $listing && $out['htaccess']['done'] === 'nothing', $out['htaccess']['message']);
+htClean($tmpRoot);
+$out = $h->onUninstall();
+check('onUninstall() without a .htaccess: nothing created, the refusal logged', !file_exists($htFile) && $out['htaccess']['state'] === 'none' && strpos(logText($tmp), 'uninstall: htaccess: Nothing was changed: the state of the .htaccess is none') !== false);
+htForget($tmp);
+htClearPending($sp);
+$h->using(null);
+check('the .htaccess manager checks leave no .htaccess, no backup and no temporary file on the temporary root', !file_exists($htFile) && !htBackups($tmpRoot) && !htTmp($tmpRoot));
+
 ////  config hooks
 
 $data = $modules->getConfig('StaticPages');
@@ -1656,17 +1958,18 @@ if($form) foreach($form->children() as $child) {
 		$layout[$name] = true;
 	}
 }
-$layout = array_slice($layout, -7, null, true);
+$layout = array_slice($layout, -8, null, true);
 $expected = array(
 	'_general' => array('priority'),
 	'_static' => array('newDirPermissions', 'staticFile'),
 	'_exclusions' => array('nonStaticDirs', 'nonStaticTemplates', 'trackedPaths', 'noCacheCookies'),
 	'_system' => array('csrfPatterns', 'useShell', 'wipeDryRun', 'logSkips'),
 	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields', 'ignoreTemplates'),
+	'htaccessAction' => true,
 	'forceWipeOnModuleSave' => true,
 	'isEnabled' => true,
 );
-check('the settings form groups fields in fieldsets, two ungrouped at the bottom', $layout === $expected, json_encode($layout));
+check('the settings form groups fields in fieldsets, three ungrouped at the bottom', $layout === $expected, json_encode($layout));
 $stored = array();
 if($form) foreach($form->getAll() as $f) $stored[] = (string) $f->attr('name');
 check('no fieldset name is among the fields a form save stores', $stored && !array_intersect($stored, array_keys(array_filter($expected, 'is_array'))), json_encode($stored));

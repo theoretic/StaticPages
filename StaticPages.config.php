@@ -26,7 +26,7 @@ $nonStaticDirsValue = '';
 
 //Fieldsets are named with a leading "_": ProcessModule never stores such a name, and getAll()
 //leaves wrappers out anyway, so no fieldset ever lands in the stored config. Fields find each
-//other by getChildByName(), which looks inside fieldsets. The two fields at the bottom stay
+//other by getChildByName(), which looks inside fieldsets. The three fields at the bottom stay
 //ungrouped on purpose: one shot actions and the main switch, the last thing before Submit.
 
 $config = array(
@@ -167,7 +167,7 @@ $config = array(
 						'name'					=> 'wipeDryRun',
 						'type'					=> 'checkbox',
 						'label'					=> $this->_('Dry run'),
-						'notes'					=> $this->_('With "Force static pages deletion on module save" (at the bottom) checked: deletes nothing, and writes every file and dir the scan would delete to the static-pages log, with the root dirs it leaves alone. The same from code: $modules->get(\'StaticPages\')->wipeCaches(true, true).'),
+						'notes'					=> $this->_('With "Force static pages deletion on module save" (at the bottom) checked: deletes nothing, and writes every file and dir the scan would delete to the static-pages log, with the root dirs it leaves alone. The same from code: $modules->get(\'StaticPages\')->wipeCaches(true, true). The same for the root .htaccess: a save with this box checked writes nothing to it, and what it would write goes to the log.'),
 						'columnWidth'			=> 33,
 					),
 
@@ -242,6 +242,21 @@ $config = array(
 					),
 
 				),
+			),
+
+			array(
+				'name'					=> 'htaccessAction',
+				'type'					=> 'select',
+				'label'					=> $this->_('Hand-written rules found'),
+				'description'			=> $this->_('What to do with hand-written rules in the root .htaccess that look like StaticPages rules (see "Root .htaccess" above). Acted on once, when the settings are saved; never stored.'),
+				'notes'					=> $this->_('Replace: after a backup (.htaccess.sp-<date>.bak next to it), every hand-written line of those rules is commented out with the prefix "# StaticPages-replaced: " and the StaticPages block is written; nothing is deleted, and uninstalling the module takes the prefix off again. Lines the stock ProcessWire .htaccess also holds, and rules that only depend on the request method, are left as they are. Keep: nothing is written, and there is no warning about these rules again until they change. With "Dry run" checked, Replace writes nothing and the new .htaccess goes to the static-pages log.'),
+				'options'				=> array(
+					''						=> $this->_('Nothing'),
+					'replace'				=> $this->_('Replace them with the StaticPages block'),
+					'keep'					=> $this->_('Keep them'),
+				),
+				'columnWidth'			=> 100,
+				'value'					=> '',
 			),
 
 			array(

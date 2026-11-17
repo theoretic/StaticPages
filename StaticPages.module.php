@@ -38,6 +38,14 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	private $adminRequest = false;
 
+	//a CLI run: the .htaccess check runs after it as after a superuser's admin request. A
+	//property so that the smoke test can stand for a web request under CLI
+	private $cli = PHP_SAPI === 'cli';
+
+	//what a settings save asked of the .htaccess, taken by hookBeforeSaveConfig() before the
+	//one shot values are cleared, acted on by hookAfterSaveConfig()
+	private $htaccessSave = null;
+
 	//set by noCache(): false, true, or the reason given as a string. Lives as long as the request
 	private $noCache = false;
 
@@ -159,14 +167,37 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		catch( \Throwable $e ){
 			$this->error( 'StaticPages path tracking: ' . $e->getMessage() );
 		}
+
+		try {
+			$this->showPendingNotices();
+		}
+		catch( \Throwable $e ){
+			$this->error( 'StaticPages notices: ' . $e->getMessage() );
+		}
 	}
 
 	public function ___install() {
 		//an upgrade has no install step, ensureTables() creates them when first needed as well
 		$this->index()->ensureTables(true);
+		//the root .htaccess: the block goes in when there is none and no hand-written rules
+		//either. Never in the way of the install
+		try {
+			$this->htaccess()->onInstall();
+		}
+		catch( \Throwable $e ){
+			$this->logDrain( 'htaccess on install: ' . $e->getMessage() );
+		}
 	}
 
 	public function ___uninstall() {
+		//the static copies by the index and the block out of the root .htaccess, before the
+		//tables go [decided by user, Q13 (a)]. onUninstall() catches its own failures
+		try {
+			$this->htaccess()->onUninstall();
+		}
+		catch( \Throwable $e ){
+			$this->logDrain( 'uninstall: ' . $e->getMessage() );
+		}
 		$this->index()->dropTables();
 	}
 
@@ -424,10 +455,57 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( $this->configSaveClassName( $event->arguments(0) ) !== $this->className() ) return;
 		$data = $event->arguments(1);
 		if( !is_array($data) ) return;
-		if( empty($data['forceWipeOnModuleSave']) && empty($data['wipeDryRun']) ) return;
-		$data['forceWipeOnModuleSave'] = 0;
-		$data['wipeDryRun'] = 0;
-		$event->arguments(1, $data);
+
+		//the choice for hand-written .htaccess rules is one shot as well, and never stored. Taken
+		//here with the dry run box, before that is cleared; acted on after the save. Keep stores
+		//the hash of the candidates with this very save
+		$changed = array_key_exists( 'htaccessAction', $data );
+		$action = isset($data['htaccessAction']) ? (string) $data['htaccessAction'] : '';
+		if( !in_array( $action, array('replace', 'keep'), true ) ) $action = '';
+		unset( $data['htaccessAction'] );
+		if( $action === 'keep' && $this->htaccessAllowed() ){
+			try {
+				$status = $this->htaccess()->using($data)->status();
+				if( $status['state'] === 'candidate' ){
+					$data['htaccessKeep'] = $this->htaccess()->keepHash($status);
+					$changed = true;
+				}
+			}
+			catch( \Throwable $e ){
+				$this->logDrain( 'htaccess: Keep could not read the file: ' . $e->getMessage() );
+			}
+		}
+		$this->htaccessSave = array( 'action' => $action, 'dryRun' => !empty($data['wipeDryRun']) );
+
+		//the force wipe and its dry run, as before
+		if( !empty($data['forceWipeOnModuleSave']) || !empty($data['wipeDryRun']) ){
+			$data['forceWipeOnModuleSave'] = 0;
+			$data['wipeDryRun'] = 0;
+			$changed = true;
+		}
+		$this->htaccessSave['data'] = $data;
+		if( $changed ) $event->arguments(1, $data);
+	}
+
+	private function htaccessAllowed(){
+		//the root .htaccess is read and written by an admin request or a CLI run only, never by
+		//a visitor's request. isAdminRequest() rather than adminRequest: that one is set only
+		//while the module is enabled, and a disabled module's settings save acts as well
+		return $this->cli || $this->isAdminRequest();
+	}
+
+	private function htaccessOnSave(array $data){
+		$save = $this->htaccessSave;
+		$this->htaccessSave = null;
+		if( !$this->htaccessAllowed() ) return;
+		if( $save && isset($save['data']) ) $data = $save['data'];
+		try {
+			$this->htaccess()->onSave( $data, $save ? $save['action'] : '', $save ? $save['dryRun'] : false );
+		}
+		catch( \Throwable $e ){
+			$this->logDrain( 'htaccess on settings save: ' . $e->getMessage() );
+			$this->error( 'StaticPages, root .htaccess: ' . $e->getMessage() );
+		}
 	}
 
 	public function hookAfterSaveConfig($event) {
@@ -443,6 +521,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->wiper()->warnPageDirsProtected( $event->arguments(1) );
 			$this->publisher()->warnInvalidCsrfPatterns( $event->arguments(1) );
 			$this->warnIgnoredWipeAll( $event->arguments(1) );
+			$this->htaccessOnSave( $event->arguments(1) );
 			if( !$this->wire()->input->post('forceWipeOnModuleSave') ) return;
 			//full disk scan: also catches files the manifest does not know about. With Dry run
 			//checked it only lists them
@@ -763,7 +842,49 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->queue()->finishResponse();
 			$this->migrate();
 		}
-		return $this->queue()->shutdownDrain($this->adminRequest);
+		$this->queue()->shutdownDrain($this->adminRequest);
+
+		//the root .htaccess, after a superuser's admin request or a CLI run: a visitor's request
+		//never reads it and pays nothing, not even a stat(). Three stat() calls while nothing
+		//changed, see StaticPagesHtaccess::check(); the response is finished before anything more
+		if( !$this->cli && !( $this->adminRequest && $this->wire()->user->isSuperuser() ) ) return;
+		try {
+			$this->htaccess()->check();
+		}
+		catch( \Throwable $e ){
+			$this->logDrain( 'htaccess check failed: ' . $e->getMessage() );
+		}
+	}
+
+	/**
+	 * Show what the .htaccess check after an earlier request kept for a superuser
+	 *
+	 * Called from ready() on admin requests. A notice from the check after the response would
+	 * land in a page already sent, so it waits in the module config [decided by user, step 5
+	 * doubt (a)]: shown on the next admin page of a superuser that is no ajax request, then
+	 * cleared. Costs a property read when there is none.
+	 *
+	 * #pw-internal
+	 *
+	 * @return int The number of notices shown
+	 *
+	 */
+	public function showPendingNotices(){
+		$pending = $this->get('htaccessNotice');
+		if( !is_array($pending) || !count($pending) ) return 0;
+		if( !$this->adminRequest || $this->wire()->config->ajax || !$this->wire()->user->isSuperuser() ) return 0;
+		$shown = 0;
+		foreach( $pending as $notice ){
+			if( !is_array($notice) || !isset($notice['text']) ) continue;
+			$type = isset($notice['type']) ? $notice['type'] : 'message';
+			//shown even when this request said the same already: it was kept to be shown
+			$type === 'warning' ? $this->warning( (string) $notice['text'], Notice::allowDuplicate ) : $this->message( (string) $notice['text'], Notice::allowDuplicate );
+			$shown++;
+		}
+		//past the config hooks: bookkeeping, no operator's save
+		$this->wire()->modules->configs->saveConfig( $this, 'htaccessNotice', null );
+		$this->remove('htaccessNotice');
+		return $shown;
 	}
 
 	private function migrate(){
@@ -902,7 +1023,14 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//-name and PowerShell -like as a pattern and the disk as a path: '*', '*.html' or
 		//'../x' would turn a wipe into something else entirely. '' stops caching and every
 		//wipe matching by name. Never saved: index.html, as the config screen offers
-		$name = trim( (string) $this->configValue('staticFile', 'index.html') );
+		return $this->plainFileName( $this->configValue('staticFile', 'index.html') );
+	}
+
+	/** #pw-internal */
+	public function plainFileName($value){
+		//$value trimmed when it is a plain file name, else ''. See staticFileName(); also asked
+		//for the name a settings save is storing, see StaticPagesHtaccess::using()
+		$name = trim( (string) $value );
 		if( !preg_match('/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/', $name) ) return '';
 		return $name;
 	}
