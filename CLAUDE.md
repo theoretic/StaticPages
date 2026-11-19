@@ -30,11 +30,15 @@ Part methods are public so the smoke test can call them. No build step, no compo
 ```bash
 D:/work/sites/modules/PHP-8.5/php -l StaticPages.module.php   # and every other .php
 STATICPAGES_SMOKE_TMP=<a temp dir outside D:/work/sites> \
-  D:/work/sites/modules/PHP-8.5/php tests/smoke.php D:/work/projects/processwire/bridge/sandbox/atispro
+  D:/work/sites/modules/PHP-8.5/php tests/smoke.php D:/work/projects/processwire/modules/StaticPages-sandbox/atispro
 ```
 
-The smoke test tests whichever copy the install loads: swap this repo's files into the
-sandbox's `app/modules/StaticPages` first (back up the original copy, restore it after). It
+The sandbox is `StaticPages-sandbox/atispro` (DB `atispro_bridge_sp`). The smoke test tests
+whichever copy the install loads: swap this repo's files into the sandbox's
+`app/modules/StaticPages` first (back up the original copy, restore it after). A CLI boot with
+them swapped in writes `htaccess-*.seen` and `htaccess.reported` into its cache dir's
+`StaticPages/`, a log line, the block into a stock root `.htaccess` with a backup
+`.htaccess.sp-<YmdHis>.bak` beside it, and `htaccessNotice` into the module's config row. It
 points the site root, cache and log dirs at its temp dir; it refuses webroots and temp dirs
 under `D:/work/sites` or `Z:/home`. A CLI boot needs `$_SERVER['DOCUMENT_ROOT']` (site configs
 read it). PW core: `D:/install/processwire/wire` (3.0.274); read it instead of guessing.
