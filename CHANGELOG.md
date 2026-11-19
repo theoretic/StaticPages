@@ -69,7 +69,8 @@ run a copy of 0.9.1 and meet all this when that copy is updated. This may change
   gone with its row): from then on no request writes a static copy. It then takes the block and
   the `# StaticPages-replaced: ` prefixes out of the `.htaccess` after a backup, which gives
   hand-written rules back byte for byte. Next it deletes the static copies the index (or the
-  manifest) records, and last it drops the tables. Copies nothing recorded stay. An uninstall
+  manifest) records, forgets what the `.htaccess` check stamped and told (a reinstall tells its
+  outcome again), and last it drops the tables. Copies nothing recorded stay. An uninstall
   that throws takes the mark back; one that dies halfway stops caching for an hour at most, and
   the next admin request after that removes the mark.
 

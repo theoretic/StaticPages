@@ -2005,6 +2005,36 @@ check('onUninstall() without index tables deletes what the manifest lists; with 
 rrmdir("$tmpRoot$Pdir");
 $out = htUninstall($sp);
 check('onUninstall() without a .htaccess: nothing created, the refusal logged', !file_exists($htFile) && $out['htaccess']['state'] === 'none' && strpos(logText($tmp), 'uninstall: htaccess: Nothing was changed: the state of the .htaccess is none') !== false);
+//[audit N1.3] an uninstall forgets the stamp and what was told: a reinstall tells its outcome
+//again, the warning of a candidate and the log line of none. Other files of the dir stay
+htForget($tmp);
+htPut($htFile, $candidateFixture);
+$first = $h->onInstall();
+$again = $h->onInstall();
+$cacheDir = "$tmp/cache/StaticPages";
+file_put_contents("$cacheDir/htaccess-decoy.seen", 'not a stamp');
+file_put_contents("$cacheDir/decoy.reported", 'not the record');
+$stampsBefore = htStamps($tmp);
+$reportedBefore = is_file("$cacheDir/htaccess.reported");
+htUninstall($sp);
+clearstatcache();
+$stampsAfter = htStamps($tmp);
+$reportedAfter = is_file("$cacheDir/htaccess.reported");
+$decoysStay = is_file("$cacheDir/htaccess-decoy.seen") && is_file("$cacheDir/decoy.reported");
+$reinstall = $h->onInstall();
+htClean($tmpRoot);
+htForget($tmp);
+$h->onInstall();
+$log0 = logText($tmp);
+$h->onInstall();
+$noneAgain = htLogSince($tmp, $log0);
+htUninstall($sp);
+$log0 = logText($tmp);
+$h->onInstall();
+$noneReinstall = htLogSince($tmp, $log0);
+@unlink("$cacheDir/htaccess-decoy.seen");
+@unlink("$cacheDir/decoy.reported");
+check('onUninstall() deletes the .htaccess stamp and htaccess.reported, nothing else: a reinstall warns about a candidate again and logs none again', count($first['notices']) === 1 && !$again['notices'] && count($stampsBefore) === 2 && $reportedBefore && $stampsAfter === array('htaccess-decoy.seen') && !$reportedAfter && $decoysStay && count($reinstall['notices']) === 1 && $reinstall['notices'][0][0] === 'warning' && !$noneAgain && count($noneReinstall) === 1 && strpos($noneReinstall[0], 'htaccess: none:') !== false, json_encode(array(count($first['notices']), count($again['notices']), $stampsBefore, $stampsAfter, $reportedAfter, $decoysStay, $reinstall['notices'], $noneAgain, $noneReinstall)));
 htForget($tmp);
 
 //[decided by user, step 6 second doubt (a2)] the uninstall flag before anything is changed, the

@@ -1485,7 +1485,7 @@ class StaticPagesHtaccess extends Wire {
 	/**
 	 * Before the tables are dropped: the uninstall flag stored, the block and the prefixes of a
 	 * Replace taken out, then the static copies deleted by what recorded them [decided by user,
-	 * Q13 (a), R1; step 6 second doubt (a2)]
+	 * Q13 (a), R1; step 6 second doubt (a2)], last the stamp and htaccess.reported deleted (forget())
 	 *
 	 * The flag (StaticPages::markUninstalling()) keeps every request from caching from then on,
 	 * and the check after this request's response from writing the block back. The copies go by
@@ -1534,7 +1534,34 @@ class StaticPagesHtaccess extends Wire {
 			$sp->logDrain( 'uninstall: the static copies could not be deleted: ' . $e->getMessage() );
 		}
 
+		//the stamp and what was told go last: a reinstall tells its outcome again [decided by
+		//user, audit N1.3]. Only these files of the module's own cache dir, by their exact names
+		$this->forget();
+
 		return $out;
+	}
+
+	/**
+	 * Delete the stamps (htaccess-<md5>.seen) and the record of what was told (htaccess.reported)
+	 * from the module's cache dir; nothing else, and the dir is not created
+	 *
+	 * #pw-internal
+	 *
+	 * @return int The number of files deleted
+	 *
+	 */
+	public function forget() {
+		$dir = $this->wire()->config->paths->cache . 'StaticPages/';
+		$deleted = 0;
+		if( !is_dir($dir) ) return 0;
+		$files = (array) glob( $dir . 'htaccess-*.seen' );
+		$files[] = $dir . 'htaccess.reported';
+		foreach( $files as $file ){
+			if( !is_string($file) || !preg_match( '/^htaccess(-[0-9a-f]{32}\.seen|\.reported)$/', basename($file) ) ) continue;
+			if( is_file($file) && @unlink($file) ) $deleted++;
+		}
+		clearstatcache();
+		return $deleted;
 	}
 
 	/**
