@@ -246,14 +246,22 @@ class StaticPagesHtaccess extends Wire {
 		//(a 403), not ProcessWire [decided by user, step 2]. The stock condition rather than its
 		//class in the pattern: it tests the whole REQUEST_URI, the path of a ProcessWire
 		//installed in a subdirectory included, as 16A does. A site that switched to the UTF-8
-		//alternative 16B keeps the stock answer for a dir with such a name
+		//alternative 16B keeps the stock answer for a dir with such a name.
+		//A dir holding an index.htm, the third stock DirectoryIndex name, was made by hand (a
+		//landing page, a static mini-site): left to the stock rules, which serve it whatever the
+		//request. Not when the static file itself is named index.htm: then that file is a copy,
+		//and a dir holding one would get it through DirectoryIndex for a POST, a query string and
+		//a logged in user. A hand-made index.html cannot be told from a copy: such a dir needs a
+		//rule of the site's own above the block, see README [decided by user, audit 1, A1.2]
+		$third = array(
+			array( '%{REQUEST_URI}', self::stockPageNameCond ),
+			array( '%{REQUEST_FILENAME}', '-d' ),
+			array( '%{REQUEST_FILENAME}/index.php', '!-f' ),
+			);
+		if( strtolower($name) !== 'index.htm' ) $third[] = array( '%{REQUEST_FILENAME}/index.htm', '!-f' );
 		$rules[] = array(
 			'comment' => 'Any other request for an existing directory, with its trailing slash, a URL the stock 16A condition accepts and without an index file of its own, goes to ProcessWire.',
-			'conds' => array(
-				array( '%{REQUEST_URI}', self::stockPageNameCond ),
-				array( '%{REQUEST_FILENAME}', '-d' ),
-				array( '%{REQUEST_FILENAME}/index.php', '!-f' ),
-				),
+			'conds' => $third,
 			'pattern' => '^(.+/)$',
 			'target' => 'index.php?it=$1',
 			'flags' => '[L,QSA]',

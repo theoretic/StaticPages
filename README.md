@@ -334,6 +334,7 @@ RewriteRule ^(.+/)$ $1index\.html [L]
 RewriteCond %{REQUEST_URI} "^/~?[-_.a-zA-Z0-9/]*$"
 RewriteCond %{REQUEST_FILENAME} -d
 RewriteCond %{REQUEST_FILENAME}/index.php !-f
+RewriteCond %{REQUEST_FILENAME}/index.htm !-f
 RewriteRule ^(.+/)$ index.php?it=$1 [L,QSA]
 # END StaticPages
 ```
@@ -347,10 +348,13 @@ What it does:
   (`<session name>_challenge`, for the http and the https session name) go to ProcessWire, which
   renders the page. The cookie condition is there only while `$config->sessionChallenge` is on, as
   it is by default; without it a logged-in visitor gets the copies too.
-- An existing directory that holds no copy (`/a/` when only `/a/b/` is cached) goes to
-  ProcessWire, where the stock rules would answer 403.
+- Any other request for an existing directory, with its trailing slash, goes to ProcessWire. That
+  covers a directory that holds no copy (`/a/` when only `/a/b/` is cached), where the stock rules
+  would answer 403, and a directory made by hand holding an `index.html`, where they would serve
+  that file: see *Directories made by hand*.
 - A directory that holds an `index.php` of its own (an `/api/` endpoint, a tool dropped into the
-  web root) is left to the stock rules, copy or not.
+  web root) is left to the stock rules, copy or not. So is one holding an `index.htm`, the third
+  name of the stock `DirectoryIndex` line, unless *Static file name* is `index.htm` itself.
 - Everything else (existing files, paths that are no file or directory, URLs the stock 16A
   condition refuses, directories requested without their trailing slash) gets what the stock
   file gives it.
@@ -361,6 +365,33 @@ down it would take the stock conditions of section 17 for itself. Its rules are 
 `.htaccess` directory, so a ProcessWire installed in a subdirectory gets the same answers. *Static
 file name* and the session settings are the values it is made from, and the settings form shows
 it under *The StaticPages block*.
+
+### Directories made by hand
+
+A directory made by hand in the web root (a landing page, a static mini-site, a built front end)
+is served by the stock `DirectoryIndex index.php index.html index.htm`, whatever the request. With
+the block:
+
+- one holding an `index.php` is left alone;
+- one holding an `index.htm` is left alone, unless *Static file name* is `index.htm`;
+- one holding an `index.html` cannot be told from a page's copy. A query string
+  (`?utm_source=…`), a `POST` or the login cookie hands it to ProcessWire, which answers 404 where
+  the stock rules served the file; with *Static file name* other than `index.html`, every request
+  does. The same holds for an `index.htm` when *Static file name* is `index.htm`.
+
+The block is written without asking on a site that has none yet (see below), so check the web
+root for such directories. Each one gets a rule of the site's own above the block, immediately
+before the `# BEGIN StaticPages` line, or before `# PW-PAGENAME` while there is no block yet (the
+module then writes its block below the rule). For `landing/`:
+
+```apache
+# By hand: landing/ is a directory made by hand, served as the stock rules serve it.
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^landing/ - [L]
+```
+
+Its directories, and everything below them, then get the stock answers. A missing path under
+`landing/` still goes to ProcessWire, as on a stock site.
 
 ### When the module writes it
 
@@ -488,14 +519,18 @@ the Apache block for reference. The same behaviour for nginx, an example to add 
   if ($sp = "1/fphd") { rewrite ^ /index.html last; }
   # A page, from its copy, unless its directory holds an index.php of its own.
   if ($sp = "1/fd") { rewrite ^ ${uri}index.html last; }
-  # Any other existing directory, with its trailing slash, without an index.php of its own, goes to ProcessWire.
+  if (-f $document_root${uri}index.htm) { set $sp "${sp}t"; }
+  # Any other existing directory, with its trailing slash, without an index.php or index.htm of its own, goes to ProcessWire.
   if ($sp ~ "^1?/f?d$") { rewrite ^/(.*)$ /index.php?it=$1 last; }
 ```
 
 `$sp` collects what is known about the request: `1` for a guest's `GET` or `HEAD` without a query
 string, `/` for a trailing slash, `f` and `p` for an `index.html` and an `index.php` in that
 directory, `h` for the home page, `d` for an existing directory, `x` for a URL the stock 16A rule
-refuses. With *Static file name* changed, replace `index.html` in it.
+refuses, and, after the copy rules, `t` for an `index.htm` in that directory. With *Static file
+name* changed, replace `index.html` in it; with `index.htm`, leave out the `t` line, as the
+block does. A directory made by hand needs a line of its own, as on Apache (see *Directories made
+by hand* above): `if ($uri ~ "^/landing/") { set $sp "${sp}n"; }` after the `x` line.
 
 Do **not** comment out the `!-d` line of the stock rule 19, as earlier versions of this README
 advised: every directory request would then go to `index.php`, and no static file would ever be
@@ -560,6 +595,7 @@ RewriteCond %{HTTP_HOST} ^(www\.)?example\.com$ [NC]
 RewriteCond %{REQUEST_URI} "^/~?[-_.a-zA-Z0-9/]*$"
 RewriteCond %{REQUEST_FILENAME} -d
 RewriteCond %{REQUEST_FILENAME}/index.php !-f
+RewriteCond %{REQUEST_FILENAME}/index.htm !-f
 RewriteRule ^(.+/)$ index.php?it=$1 [L,QSA]
 # Every other host: the rules of the StaticPages block, as the settings form shows them, without its two marker lines.
 ```

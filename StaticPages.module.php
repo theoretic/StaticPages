@@ -458,6 +458,8 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$static ? $form->insertAfter( $f, $static ) : $form->add($f);
 
 		if( !$status ) return;
+		//hand-made dirs: the block cannot tell their index.html from a copy [decided by user, audit 1, A1.2]
+		$f->notes = $this->_('A directory made by hand in the web root (a landing page, a static mini-site) holding an index.html cannot be told from a copy: the block hands it to ProcessWire for a query string, a POST and a logged-in user. Add a rule of your own above the block for each one, e.g. for landing/: "RewriteCond %{REQUEST_FILENAME} -d" and "RewriteRule ^landing/ - [L]" (README, Directories made by hand). A directory holding an index.htm is left to the stock rules, unless the static file name is index.htm.');
 		$block = $modules->get('InputfieldMarkup');
 		$block->attr( 'name', '_htaccessBlock' );
 		$block->label = $this->_('The StaticPages block');

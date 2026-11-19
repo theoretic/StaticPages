@@ -28,6 +28,13 @@ state the file is in:
 - **A site that chooses the language by host name** must add its own rules before updating
   (README, *Multilingual sites*) and choose *Keep them*. Without them its file is `absent`, and the
   block would serve the second host the other language's copies.
+- **A directory made by hand in the web root** (a landing page, a static mini-site) holding an
+  `index.html` cannot be told from a page's copy: with the block, a query string (`?utm_source=…`),
+  a `POST` or the login cookie hands it to ProcessWire, which answers 404 where the stock rules
+  served the file. On an `absent` site the block is written without asking, so check the web root
+  first, and add a rule of your own above the block for each such directory (README, *Directories
+  made by hand*). A directory holding an `index.htm` is left to the stock rules, unless *Static
+  file name* is `index.htm`.
 
 At the time of this release one site loads the module straight from this repository. The others
 run a copy of 0.9.1 and meet all this when that copy is updated. This may change.
@@ -38,7 +45,7 @@ run a copy of 0.9.1 and meet all this when that copy is updated. This may change
   login cookie go to ProcessWire (the README's old rules served the copy to a `POST` and to a logged-in
   visitor). A
   directory without a copy goes to ProcessWire instead of 403, and a directory with an `index.php`
-  of its own (an `/api/` endpoint) keeps the stock answers. Proven on Apache 2.4 at the web root
+  of its own (an `/api/` endpoint) or an `index.htm` keeps the stock answers. Proven on Apache 2.4 at the web root
   and in a subdirectory.
 - **The check**: after a superuser's admin request and a CLI run, three `stat()` calls while
   nothing changed. A missing block is added, and an outdated one (a module update, a changed

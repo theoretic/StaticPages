@@ -256,6 +256,20 @@ $starBlock = $h->apacheBlock();
 $starRules = $h->rules();
 check('htaccess block with an invalid static file name (*) holds no Rewrite line, the markers and a comment', strpos($starBlock, 'Rewrite') === false && !count($starRules['rules']) && count($starRules['notes']) === 1 && strpos($starBlock, "# BEGIN StaticPages\n") === 0 && substr($starBlock, -strlen('# END StaticPages')) === '# END StaticPages' && count(explode("\n", $starBlock)) === 4, $starBlock);
 $sp->set('staticFile', 'index.html');
+//a dir holding an index.htm, the third stock DirectoryIndex name, was made by hand: the rule to
+//ProcessWire leaves it to the stock rules, unless the static file is index.htm itself [decided by
+//user, audit 1, A1.2]
+$htmGuard = array('%{REQUEST_FILENAME}/index.htm', '!-f');
+$guards = array();
+foreach(array('index.html', 'cache.htm', 'index.htm', 'Index.HTM', 'index.htm.html') as $name) {
+	$sp->set('staticFile', $name);
+	$byRule = array();
+	foreach($h->rules()['rules'] as $r) $byRule[] = (int) in_array($htmGuard, $r['conds'], true);
+	$guards[$name] = implode('', $byRule) . ' ' . substr_count($h->apacheBlock(), "\nRewriteCond %{REQUEST_FILENAME}/index.htm !-f\n");
+}
+$sp->set('staticFile', 'index.html');
+check('htaccess block: the rule to ProcessWire, and only it, carries RewriteCond %{REQUEST_FILENAME}/index.htm !-f, for index.html, cache.htm and index.htm.html', $guards['index.html'] === '001 1' && $guards['cache.htm'] === '001 1' && $guards['index.htm.html'] === '001 1' && in_array('RewriteCond %{REQUEST_FILENAME}/index.htm !-f', $lines, true), json_encode($guards));
+check('htaccess block: with Static file name index.htm (any case) no rule carries the index.htm condition', $guards['index.htm'] === '000 0' && $guards['Index.HTM'] === '000 0', json_encode($guards));
 
 //Non-static directories is never read: unsaved it is a walk of the site root and a page query
 @mkdir("$tmpRoot/sp-ht-a/b", 0777, true);
@@ -614,6 +628,7 @@ $sp->htaccess()->file = $htFile;
 $form = $modules->getModuleConfigInputfields('StaticPages');
 $f = $form ? $form->getChildByName('_htaccess') : null;
 $values['no tables'] = array($f ? (string) $f->value : '', $sp->index()->ensureTables() === false);
+$notesNoTables = $f ? (string) $f->notes : '';
 $tablesReady->setValue($sp->index(), $tablesAtStart);
 $config->paths->root = $formRoot;
 $sp->htaccess()->file = '';
@@ -624,6 +639,7 @@ check('the settings form holds the .htaccess state, the candidates with their li
 check('the settings form encodes what the file holds: no markup from the .htaccess reaches the page', strpos($v, '<script>') === false && strpos($v, '&lt;script&gt;') !== false && strpos($encoded, '&quot;') !== false);
 check('the settings form builds without a .htaccess (none) and with a directory in its place (locked)', strpos($values['none'][0], 'State: none') !== false && strpos($values['locked'][0], 'State: locked') !== false && strpos($values['none'][1], $encoded) !== false, json_encode(array(substr($values['none'][0], 0, 120), substr($values['locked'][0], 0, 120))));
 check('the settings form builds without index tables and still shows the .htaccess state', strpos($values['no tables'][0], 'State: candidate') !== false && $values['no tables'][1] === true, substr($values['no tables'][0], 0, 120));
+check('the settings form tells the operator to add a rule above the block for a directory made by hand', strpos($notesNoTables, 'made by hand') !== false && strpos($notesNoTables, 'RewriteRule ^landing/ - [L]') !== false && strpos($notesNoTables, 'index.htm') !== false, $notesNoTables);
 check('htaccessStatus() is the reader\'s status() of the root .htaccess', $sp->htaccessStatus()['state'] === 'candidate' && $sp->htaccessStatus()['file'] === $htFile);
 
 @unlink($htFile);
@@ -744,6 +760,23 @@ check('htaccess remove, current: gives back the stock fixture byte for byte, aft
 $count = count(htBackups($tmpRoot));
 $r = $h->remove();
 check('htaccess remove, absent: does nothing, no backup', $r['ok'] && $r['done'] === 'nothing' && file_get_contents($htFile) === $stock && count(htBackups($tmpRoot)) === $count, $r['done']);
+htClean($tmpRoot);
+
+//the README's rule for a directory made by hand, above # PW-PAGENAME before the block exists: no
+//candidate, the block goes in below it, and a rewrite of the block keeps it above [A1.2]
+$exclusion = array('# By hand: landing/ is a directory made by hand, served as the stock rules serve it.', 'RewriteCond %{REQUEST_FILENAME} -d', 'RewriteRule ^landing/ - [L]');
+$excluded = htInsert($stock, '# PW-PAGENAME', $exclusion);
+htPut($htFile, $excluded);
+$before = $h->status();
+$r = $h->write();
+$new = (string) file_get_contents($htFile);
+$want = htInsert($excluded, '# PW-PAGENAME', explode("\n", $block));
+check('htaccess write: a hand rule for a directory made by hand above # PW-PAGENAME is no candidate; the block goes in between it and # PW-PAGENAME, nothing else changed', $before['state'] === 'absent' && !$before['candidates'] && $r['ok'] && $r['done'] === 'written' && $new === $want && $h->status()['state'] === 'current', htSummary($before) . ' ' . $r['message']);
+$sp->set('staticFile', 'cache.htm');
+$r = $h->write();
+$sp->set('staticFile', 'index.html');
+$r2 = $h->write();
+check('htaccess write, outdated with the hand rule right above the block: rewritten, the hand rule kept above it', $r['ok'] && $r['done'] === 'written' && $r['state'] === 'outdated' && $r2['ok'] && $r2['state'] === 'outdated' && file_get_contents($htFile) === $want, $r['message'] . ' ' . $r2['message']);
 htClean($tmpRoot);
 
 //candidate: refused without Replace; with it, the hand lines of every S1 and S2 group get the
