@@ -1116,6 +1116,8 @@ check('htaccess writer: no temporary file is left, the temporary root is empty a
 $home = $pages->get('/');
 $tpl = $wire->templates->get('default') ?: $home->template;
 $fixtures = array();
+//template id => array(template, contentType at start): a contentType changed in memory, put back
+$contentTypesAtStart = array();
 
 //removes the fixture pages and puts the module config back. Called at the end, and from a
 //shutdown function when a fatal error or an exit() ends the script before that: a PHP fatal
@@ -1123,9 +1125,11 @@ $fixtures = array();
 //registers from inside the shutdown sequence, so behind every function registered before)
 $cleanedUp = false;
 function cleanup() {
-	global $wire, $sp, $fixtures, $configAtStart, $cleanedUp;
+	global $wire, $sp, $fixtures, $configAtStart, $cleanedUp, $contentTypesAtStart;
 	if($cleanedUp) return;
 	$cleanedUp = true;
+	foreach($contentTypesAtStart as $t) $t[0]->contentType = $t[1];
+	$sp->publisher()->responseHeaders = null;
 	//the script may have died while the install's own root was in use
 	realPaths(false);
 	$pages = $wire->pages;
@@ -1931,6 +1935,191 @@ $modules->saveConfig('StaticPages', $base);
 $sp->remove('cacheNonHtml');
 htForget($tmp);
 rrmdir("$tmpRoot$Pdir");
+
+////  rendering to index.xml and index.txt (0.11.0)
+
+//the fixture template and the home page's answer XML in memory only, never saved: put back at
+//the end of this block and by cleanup()
+$homeTpl = $home->template;
+foreach(array($tpl, $homeTpl) as $t) if(!isset($contentTypesAtStart[$t->id])) $contentTypesAtStart[$t->id] = array($t, $t->contentType);
+$tplType = $tpl->contentType;
+$homeType = $homeTpl->contentType;
+$since = fn($log0) => substr(logText($tmp), strlen($log0));
+$xmlRel = "$Pdir/a/index.xml";
+$xmlFile = "$tmpRoot$xmlRel";
+$htmlFile = "$tmpRoot$Pdir/a/index.html";
+$body = '<urlset><meta name=csrf-token content=tok></urlset>';
+$resetA = function() use ($sp, $tmpRoot, $Pdir) {
+	$sp->index()->clearRows();
+	rrmdir("$tmpRoot$Pdir/a");
+};
+$saveA = function($title) use ($pages, $A, $sp) {
+	$a = $pages->get($A->id);
+	$a->title = $title;
+	$pages->save($a);
+	$sp->drain();
+};
+$sp->index()->clearRows();
+$sp->set('cacheNonHtml', 1);
+
+$tpl->contentType = 'xml';
+publish($sp, $A, array(), $body);
+$rows = $sp->index()->indexedFiles(null);
+check('switch on, XML template: a/index.xml holds the render byte for byte, CSRF token kept; no index.html, no temporary file', (string) @file_get_contents($xmlFile) === $body && !is_file($htmlFile) && strpos(files("$tmpRoot$Pdir"), '.tmp') === false, files("$tmpRoot$Pdir"));
+check('...its index row names a/index.xml', array_values($rows) === array($xmlRel), json_encode($rows));
+$tagsXml = tagsOf($sp, $xmlRel);
+$tpl->contentType = $tplType;
+publish($sp, $A, array(), $body);
+$tagsHtml = tagsOf($sp, "$Pdir/a/index.html");
+check('...its tags are those the same render gets as index.html', $tagsXml !== array() && $tagsXml === $tagsHtml, json_encode(array($tagsXml, $tagsHtml)));
+$sp->index()->dropIndexRows(array(md5("$Pdir/a/index.html")));
+@unlink($htmlFile);
+$tpl->contentType = 'xml';
+$saveA('A2');
+check('saving the page and drain() remove index.xml and its dir', !is_file($xmlFile) && !is_dir("$tmpRoot$Pdir/a") && !count($sp->index()->indexedFiles(null)), files($tmpRoot));
+
+$sp->set('cacheNonHtml', 0);
+$log0 = logText($tmp);
+publish($sp, $A, array(), $body);
+check('switch off, XML template: nothing written, skipped with content type is \'xml\'', files("$tmpRoot$Pdir") === '' && strpos($since($log0), "skip $Pdir/a/: content type is 'xml'") !== false, files("$tmpRoot$Pdir"));
+$sp->set('cacheNonHtml', 1);
+$tpl->contentType = 'json';
+$log0 = logText($tmp);
+publish($sp, $A, array(), $body);
+check('switch on, template content type json: nothing written, skip logged', files("$tmpRoot$Pdir") === '' && strpos($since($log0), "skip $Pdir/a/: content type is 'json'") !== false, files("$tmpRoot$Pdir"));
+
+$homeTpl->contentType = 'xml';
+$log0 = logText($tmp);
+publish($sp, $home, array(), $body);
+$homeTpl->contentType = $homeType;
+check('switch on, the home page with an XML template: no /index.xml, no /index.html, skip logged', !is_file("$tmpRoot/index.xml") && !is_file("$tmpRoot/index.html") && strpos($since($log0), 'a non-html copy of the home page is not written') !== false, files($tmpRoot));
+
+$tpl->contentType = 'xml';
+$wire->input->setUrlSegment(1, 'feed');
+publish($sp, $A, array(), $body);
+$wire->input->setUrlSegment(1, null);
+check('switch on: a render with a URL segment writes a/feed/index.xml', (string) @file_get_contents("$tmpRoot$Pdir/a/feed/index.xml") === $body && $wire->input->urlSegmentStr === '', files("$tmpRoot$Pdir"));
+$resetA();
+
+$C = $mk($P, 'c.xml', 'C');
+$Dx = $mk($P, 'd.xml', 'Dx');
+$sp->drain();
+publish($sp, $C, array(), $body);
+check('a page named c.xml is written to c.xml/index.xml', $C->name === 'c.xml' && (string) @file_get_contents("$tmpRoot$Pdir/c.xml/index.xml") === $body, files("$tmpRoot$Pdir"));
+$c = $pages->get($C->id);
+$c->title = 'C2';
+$pages->save($c);
+$sp->drain();
+check('...a save removes the file and the dir c.xml', !is_dir("$tmpRoot$Pdir/c.xml"), files("$tmpRoot$Pdir"));
+@mkdir("$tmpRoot$Pdir", 0777, true);
+file_put_contents("$tmpRoot$Pdir/d.xml", 'hand-made');
+$log0 = logText($tmp);
+publish($sp, $Dx, array(), $body);
+check('a hand-made file d.xml where the dir of the page d.xml would go: nothing written, its bytes stay, could not create logged', $Dx->name === 'd.xml' && is_file("$tmpRoot$Pdir/d.xml") && file_get_contents("$tmpRoot$Pdir/d.xml") === 'hand-made' && strpos($since($log0), "skip $Pdir/d.xml/: could not create") !== false, files("$tmpRoot$Pdir"));
+@unlink("$tmpRoot$Pdir/d.xml");
+
+//without index tables: xml refused, html to the manifest
+$resetA();
+$manifest = $sp->manifestPath();
+$manifestBefore = is_file($manifest) ? file_get_contents($manifest) : null;
+@unlink($manifest);
+$tablesAtStart = $tablesReady->getValue($sp->index());
+$tablesReady->setValue($sp->index(), false);
+$log0 = logText($tmp);
+publish($sp, $A, array(), $body);
+$noTablesXml = array(is_file($xmlFile), is_dir("$tmpRoot$Pdir/a"), strpos($since($log0), 'no index tables: only html is cached with the manifest') !== false, is_file($manifest));
+$tpl->contentType = $tplType;
+publish($sp, $A, array(), $body);
+$noTablesHtml = array(is_file($htmlFile), trim((string) @file_get_contents($manifest)));
+$tablesReady->setValue($sp->index(), $tablesAtStart);
+if($manifestBefore !== null) file_put_contents($manifest, $manifestBefore);
+else @unlink($manifest);
+check('without index tables: an XML render writes nothing, skip logged; an HTML render still goes to the manifest', $noTablesXml === array(false, false, true, false) && $noTablesHtml === array(true, "$Pdir/a/index.html"), json_encode(array($noTablesXml, $noTablesHtml)));
+
+//a file nothing recorded is never written over; once recorded it is
+$resetA();
+putFiles($tmpRoot, array($xmlRel));
+$tpl->contentType = 'xml';
+$log0 = logText($tmp);
+publish($sp, $A, array(), $body);
+check('an unrecorded a/index.xml in the way: its bytes stay, skip logged', (string) @file_get_contents($xmlFile) === 'x' && strpos($since($log0), "a file the index does not know is in the way: $xmlRel") !== false, (string) @file_get_contents($xmlFile));
+$sp->index()->recordStaticFile($xmlRel, $A->id, array("p:{$A->id}"));
+publish($sp, $A, array(), $body);
+check('...once recorded, the next publish replaces it', (string) @file_get_contents($xmlFile) === $body);
+
+//the fileContent hook runs for xml too
+$resetA();
+$seen = null;
+$hookId = $wire->addHookAfter('StaticPages::fileContent', function(HookEvent $e) use (&$seen) { $seen = $e->arguments(1); $e->return = 'hooked ' . $e->return; });
+publish($sp, $A, array(), $body);
+$wire->removeHook($hookId);
+check('a fileContent hook gets the XML render as rendered, its return is what index.xml holds', $seen === $body && (string) @file_get_contents($xmlFile) === "hooked $body", (string) @file_get_contents($xmlFile));
+$resetA();
+$hookId = $wire->addHookAfter('StaticPages::fileContent', function(HookEvent $e) { $e->return = ''; });
+$log0 = logText($tmp);
+publish($sp, $A, array(), $body);
+$wire->removeHook($hookId);
+check('...returning \'\': nothing written, no dir, skip logged', !is_file($xmlFile) && !is_dir("$tmpRoot$Pdir/a") && strpos($since($log0), "skip $Pdir/a/: a fileContent hook returned nothing") !== false);
+
+//a broken CSRF token tags line stops HTML only
+$resetA();
+$sp->set('csrfPatterns', '/(unclosed/');
+$tpl->contentType = $tplType;
+$log0 = logText($tmp);
+publish($sp, $A, array(), $body);
+$csrfHtml = array(is_file($htmlFile), strpos($since($log0), "skip $Pdir/a/: markup preparation failed") !== false);
+$tpl->contentType = 'xml';
+publish($sp, $A, array(), $body);
+$sp->remove('csrfPatterns');
+check('a broken CSRF token tags line: an HTML render is skipped (markup preparation failed), an XML render is written', $csrfHtml === array(false, true) && (string) @file_get_contents($xmlFile) === $body, json_encode($csrfHtml));
+
+//AUDIT_CHECKLIST StaticPages 1: a template changing its type between render and save
+$resetA();
+$tpl->contentType = 'xml';
+publish($sp, $A, array(), $body);
+$typeChange = array(is_file($xmlFile));
+$tpl->contentType = $tplType;
+$saveA('A3');
+$typeChange[] = is_file($xmlFile);
+publish($sp, $A, array(), $body);
+$typeChange[] = is_file($htmlFile);
+$tpl->contentType = 'xml';
+$saveA('A4');
+$typeChange[] = is_file($htmlFile);
+check('cached as index.xml, the type changed to html, saved: index.xml goes; cached as index.html, changed back, saved: index.html goes', $typeChange === array(true, false, true, false), json_encode($typeChange));
+
+//the uninstall flag, for xml
+$resetA();
+$sp->markUninstalling();
+$log0 = logText($tmp);
+publish($sp, $A, array(), $body);
+$flagCase = array(is_file($xmlFile), is_dir("$tmpRoot$Pdir/a"), strpos($since($log0), "skip $Pdir/a/: the module is being uninstalled") !== false);
+$sp->markUninstalling(false);
+check('with the uninstall flag set an XML render writes nothing, skip logged; the flag is taken back', $flagCase === array(false, false, true) && htFlagStored($sp) === null && !$sp->uninstalling(), json_encode($flagCase));
+
+//Q10 (a): a response typed XML by its header only. headers_list() is empty under CLI: the
+//header list is handed in through StaticPagesPublisher::$responseHeaders
+$resetA();
+$tpl->contentType = '';
+$sp->set('cacheNonHtml', 0);
+$sp->publisher()->responseHeaders = array('Content-Type: application/xml; charset=utf-8');
+$log0 = logText($tmp);
+publish($sp, $A, array(), $body);
+$q10off = array(is_file($xmlFile), is_file($htmlFile), strpos($since($log0), "skip $Pdir/a/: the response is sent as application/xml; charset=utf-8") !== false);
+$sp->set('cacheNonHtml', 1);
+publish($sp, $A, array(), $body);
+$q10on = (string) @file_get_contents($xmlFile) === $body && !is_file($htmlFile);
+$sp->publisher()->responseHeaders = null;
+check('Q10 (a): a template without a content type, the response typed XML by its header: switch off skipped as the response is sent as <mime>; switch on written to index.xml', $q10off === array(false, false, true) && $q10on, json_encode(array($q10off, $q10on)));
+
+$tpl->contentType = $tplType;
+$homeTpl->contentType = $homeType;
+foreach(array($C, $Dx) as $x) $pages->delete($pages->get($x->id), true);
+$saveA('A');
+$sp->index()->clearRows();
+$sp->remove('cacheNonHtml');
+rrmdir("$tmpRoot$Pdir");
+check('XML block: content types back as they were, nothing left on the temporary root below P', $tpl->contentType === $contentTypesAtStart[$tpl->id][1] && $homeTpl->contentType === $contentTypesAtStart[$homeTpl->id][1] && !is_dir("$tmpRoot$Pdir"));
 
 ////  .htaccess manager (0.10.0)
 

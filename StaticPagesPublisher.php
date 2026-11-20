@@ -17,6 +17,9 @@ class StaticPagesPublisher extends Wire {
 	/** @var StaticPages */
 	protected $sp;
 
+	/** @var array|null The response headers renderType() reads instead of headers_list(), which is empty under CLI: for the smoke test. Null: headers_list() */
+	public $responseHeaders = null;
+
 	public function __construct(StaticPages $sp) {
 		parent::__construct();
 		$this->sp = $sp;
@@ -170,9 +173,7 @@ class StaticPagesPublisher extends Wire {
 		//Content-Type header, else what the template says (its Content-Type setting, resolved as
 		//ProcessPageView does: a key of $config->contentTypes, or a value holding '/'), else
 		//html. Both saying something and disagreeing, or a type outside outputTypes: the type
-		//'' and a skip reason. headers_list() is always empty under CLI
-		if( $headers === null ) $headers = headers_list();
-
+		//'' and a skip reason. $headers null: the headers responseMime() reads
 		$templateValue = trim( (string) $templateContentType );
 		$templateMime = '';
 		if( strpos($templateValue, '/') !== false ) $templateMime = $templateValue;
@@ -181,13 +182,7 @@ class StaticPagesPublisher extends Wire {
 			if( is_array($types) && isset($types[$templateValue]) ) $templateMime = (string) $types[$templateValue];
 		}
 
-		$responseMime = '';
-		foreach( $headers as $header ){
-			$pos = strpos( (string) $header, ':' );
-			if( $pos === false ) continue;
-			if( strtolower( trim( substr($header, 0, $pos) ) ) !== 'content-type' ) continue;
-			$responseMime = trim( substr($header, $pos + 1) );
-		}
+		$responseMime = $this->responseMime($headers);
 
 		$templateType = $templateMime === '' ? '' : $this->typeOfMime($templateMime);
 		$responseType = $responseMime === '' ? '' : $this->typeOfMime($responseMime);
@@ -199,6 +194,20 @@ class StaticPagesPublisher extends Wire {
 		//json and the rest: today's wording when the template says so
 		if( $templateType !== '' ) return array( '', "content type is '$templateValue'" );
 		return array( '', "the response is sent as $responseMime" );
+	}
+
+	public function responseMime(?array $headers = null){
+		//the value of the last Content-Type header, '' for none. $headers null: the list a test
+		//handed in as $responseHeaders, else headers_list()
+		if( $headers === null ) $headers = $this->responseHeaders !== null ? $this->responseHeaders : headers_list();
+		$mime = '';
+		foreach( $headers as $header ){
+			$pos = strpos( (string) $header, ':' );
+			if( $pos === false ) continue;
+			if( strtolower( trim( substr($header, 0, $pos) ) ) !== 'content-type' ) continue;
+			$mime = trim( substr($header, $pos + 1) );
+		}
+		return $mime;
 	}
 
 	public function responseCode(){

@@ -643,6 +643,24 @@ class StaticPagesIndex extends Wire {
 		}
 	}
 
+	public function hasFile($relative){
+		//whether the index has a row for this root relative path. A failed query answers false:
+		//a file not known to be the module's own is never written over
+		try {
+			$query = $this->wire()->database->prepare('SELECT 1 FROM `' . StaticPages::tableFiles . '` WHERE path_hash = UNHEX(:hash) LIMIT 1');
+			$query->bindValue(':hash', md5( (string) $relative ));
+			$query->execute();
+			$found = $query->fetchColumn() !== false;
+			$query->closeCursor();
+			return $found;
+		}
+		catch( \Throwable $e ){
+			$this->sp->logDrain( "could not look up $relative: " . $e->getMessage() );
+			if( $this->isMissingTable($e) ) $this->tablesFailed($e);
+			return false;
+		}
+	}
+
 	public function indexedFiles($tags){
 		//hash => root relative path. $tags null: every indexed file. Otherwise the files
 		//carrying one of $tags, and the '*' ones

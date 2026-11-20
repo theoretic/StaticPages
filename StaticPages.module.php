@@ -633,12 +633,21 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		// skip if template is deprecated
 		if( in_array($page->template->id, (array)$this->nonStaticTemplates) ) return;
 
-		//the file is handed back under staticFile's own name, so the web server types it
-		//from that extension: a template answering xml, json or plain text would be
-		//served to everyone as text/html
+		//the file is handed back under its own name, so the web server types it from that
+		//extension: html, xml or txt by the template's Content-Type and the response's
+		//header (StaticPagesPublisher::renderType()); json and the rest are skipped. xml and
+		//txt only while Cache XML and plain text responses is on, else skipped as before
 		$contentType = (string) $page->template->contentType;
-		if( $contentType !== '' && $contentType !== 'html' ){
-			$this->logSkip( $page, "content type is '$contentType'" );
+		list( $type, $reason ) = $this->publisher()->renderType( $contentType );
+		if( $type !== '' && $type !== 'html' && empty( $this->configValue('cacheNonHtml', 0) ) ){
+			//the template says so: today's wording; the response's header only: its MIME type
+			$reason = $this->publisher()->renderType( $contentType, array() )[0] === $type
+				? "content type is '$contentType'"
+				: 'the response is sent as ' . $this->publisher()->responseMime();
+			$type = '';
+		}
+		if( $type === '' ){
+			$this->logSkip( $page, $reason );
 			return;
 		}
 
@@ -668,12 +677,16 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//the markup is prepared before anything at all is created on disk. stripCsrf()
 		//runs preg_replace, which answers null when PCRE gives up (a backtrack limit on
 		//a large minified page will do it), and file_put_contents(null) returns 0 rather
-		//than false: that path wrote a 0 byte index.html and logged it as a success
-		$content = $this->stripCsrf($html);
-		if( !strlen( (string) $content ) ){
-			$this->logSkip( $page, 'markup preparation failed' );
-			return;
+		//than false: that path wrote a 0 byte index.html and logged it as a success. xml and
+		//txt are written as rendered: the CSRF token tags are HTML
+		if( $type === 'html' ){
+			$content = $this->stripCsrf($html);
+			if( !strlen( (string) $content ) ){
+				$this->logSkip( $page, 'markup preparation failed' );
+				return;
+			}
 		}
+		else $content = (string) $html;
 
 		//what is written may differ from what the visitor got: the hook sees the prepared
 		//markup and its return is the file. $event->return is never touched. Still nothing on
@@ -700,7 +713,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		}
 
 		//a name the wipes could not match safely is a name nothing is written under either
-		$staticFile = $this->staticFileName();
+		$staticFile = $this->staticFileName($type);
 		if( $staticFile === '' ){
 			$this->logSkip( $page, 'Static file name is not a plain file name' );
 			return;
@@ -714,6 +727,24 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( $urlSegmentStr !='' ) $dir.= "$urlSegmentStr/";
 		$path = $dir.$staticFile;
 
+		//xml and txt, before anything is created on disk: the root level stays HTML only, the
+		//manifest knows HTML only, and a file nothing recorded (a hand-made one) is never replaced
+		if( $type !== 'html' ){
+			if( $page->id == $this->wire()->config->rootPageID && $urlSegmentStr == '' ){
+				$this->logSkip( $page, 'a non-html copy of the home page is not written' );
+				return;
+			}
+			if( !$this->index()->ensureTables() ){
+				$this->logSkip( $page, 'no index tables: only html is cached with the manifest' );
+				return;
+			}
+			$relative = substr( $path, strlen($this->rootPath()) );
+			if( ( file_exists($path) || is_link($path) ) && !$this->index()->hasFile($relative) ){
+				$this->logSkip( $page, "a file the index does not know is in the way: $relative" );
+				return;
+			}
+		}
+
 		//a file in a dir listed in Non-static directories is never deleted by any wipe: it
 		//would be served stale for good. Only a saved list is asked, working out the default
 		//costs a walk of the site root
@@ -726,7 +757,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( !$mode ) $mode = 0755;
 
 		$dirExisted = is_dir($dir);
-		if( !$dirExisted && !mkdir($dir, $mode, true) && !is_dir($dir) ) return;
+		if( !$dirExisted && !mkdir($dir, $mode, true) && !is_dir($dir) ){
+			$this->logSkip( $page, 'could not create ' . rtrim($dir, '/\\') );
+			return;
+		}
 
 		if( !$this->publisher()->publish($path, $content) ){
 			//a directory this call created and then could not fill is precisely what the
