@@ -2165,6 +2165,271 @@ $sp->remove('cacheNonHtml');
 rrmdir("$tmpRoot$Pdir");
 check('XML block: content types back as they were, nothing left on the temporary root below P', $tpl->contentType === $contentTypesAtStart[$tpl->id][1] && $homeTpl->contentType === $contentTypesAtStart[$homeTpl->id][1] && !is_dir("$tmpRoot$Pdir"));
 
+////  root files: take over, write, delete by record, give back (0.11.0)
+
+//robots.txt, .robots.txt and the .htaccess below are fixtures on the temporary root. The
+//generated block holds no root file route yet: StaticPagesHtaccess::$blockRoute stands for it
+//("the block condition"), true unless a check says otherwise
+$R = $mk($P, 'r', 'R');
+$sp->drain();
+$rPath = $R->path;
+$rRel = "$Pdir/r";
+$robots = "$tmpRoot/robots.txt";
+$dotRobots = "$tmpRoot/.robots.txt";
+$original = "User-agent: *\nDisallow: /hand-made/\n";
+$txtBody = "User-agent: *\nDisallow: /rendered/\n";
+$rLine = "robots.txt $rPath";
+$listed = array('cacheNonHtml' => 1, 'rootFiles' => $rLine);
+$rootBase = $modules->getConfig('StaticPages');
+$rootSave = function(array $set) use ($modules, $rootBase, $wire, $noticeTexts) {
+	$d = $rootBase;
+	foreach($set as $k => $v) $d[$k] = $v;
+	$from = count($wire->notices);
+	$modules->saveConfig('StaticPages', $d);
+	return $noticeTexts($from);
+};
+$rootReset = function($robotsBytes = null, $dotBytes = null) use ($robots, $dotRobots, $sp) {
+	$sp->index()->clearRows();
+	@unlink($robots);
+	@unlink($dotRobots);
+	if($robotsBytes !== null) file_put_contents($robots, $robotsBytes);
+	if($dotBytes !== null) file_put_contents($dotRobots, $dotBytes);
+	clearstatcache();
+};
+$bytesOf = function($file) { clearstatcache(); return is_file($file) ? file_get_contents($file) : null; };
+$hasAny = fn(array $texts, $needle) => count(array_filter($texts, fn($t) => strpos($t, $needle) !== false)) > 0;
+$methodLines = array('RewriteCond %{REQUEST_METHOD} ^(GET|HEAD)$', 'RewriteCond %{REQUEST_URI} ^/((?:[-_.a-zA-Z0-9]+/)*)$', 'RewriteRule ^ gate.php [L]');
+$tplType = $tpl->contentType;
+htClean($tmpRoot);
+htPut($htFile, $withBlock);
+$h->blockRoute = fn($name, $path) => true;
+$sp->set('cacheNonHtml', 1);
+$sp->set('rootFiles', $rLine);
+$rootReset();
+$rootSave($listed);
+
+//taking over
+$rootReset($original);
+$log0 = logText($tmp);
+$texts = $rootSave($listed);
+check('root files: a settings save with robots.txt listed renames a hand-made /robots.txt to /.robots.txt with its bytes and logs it, no /robots.txt left', $h->status()['state'] === 'current' && $bytesOf($robots) === null && $bytesOf($dotRobots) === $original && strpos($since($log0), "root file robots.txt: taken over for $rPath, the original is kept as .robots.txt") !== false, json_encode($texts) . ' ' . $since($log0));
+$log0 = logText($tmp);
+$rootSave($listed);
+check('...a second save renames nothing', $bytesOf($robots) === null && $bytesOf($dotRobots) === $original && strpos($since($log0), 'root file robots.txt') === false, $since($log0));
+
+$refused = array();
+$rootReset($original);
+$h->blockRoute = null;
+$texts = $rootSave($listed);
+$h->blockRoute = fn($name, $path) => true;
+$refused['block'] = array($bytesOf($robots) === $original, $bytesOf($dotRobots) === null, $hasAny($texts, 'does not hand /robots.txt to the page'));
+$tablesAtStart = $tablesReady->getValue($sp->index());
+$tablesReady->setValue($sp->index(), false);
+$texts = $rootSave($listed);
+$tablesReady->setValue($sp->index(), $tablesAtStart);
+$refused['tables'] = array($bytesOf($robots) === $original, $bytesOf($dotRobots) === null, $hasAny($texts, 'there are no index tables'));
+$texts = $rootSave(array('cacheNonHtml' => 0, 'rootFiles' => $rLine));
+$refused['off'] = array($bytesOf($robots) === $original, $bytesOf($dotRobots) === null, $hasAny($texts, "\"$rLine\" does nothing while"));
+$rootReset();
+$rootSave($listed);
+check('...the same save with the block condition false, without index tables, or with the switch off: /robots.txt byte-identical, no /.robots.txt, a warning names the reason', !in_array(false, array_merge(...array_values($refused)), true), json_encode($refused));
+
+$rootReset($original, 'an older backup');
+$texts = $rootSave($listed);
+check('...the same save with a /.robots.txt already there: both files byte-identical, a warning says a backup is in the way', $bytesOf($robots) === $original && $bytesOf($dotRobots) === 'an older backup' && $hasAny($texts, 'a backup /.robots.txt is in the way'), json_encode($texts));
+
+$rootReset($original);
+$log0 = logText($tmp);
+$rootSave($listed + array('wipeDryRun' => 1));
+$dryRunHeld->setValue($h, false);
+check('Q16 (a): the same save with Dry run checked renames nothing and logs the rename it held back', $bytesOf($robots) === $original && $bytesOf($dotRobots) === null && strpos($since($log0), 'dry run: root file robots.txt: would be renamed to .robots.txt, nothing was') !== false, $since($log0));
+
+//writing
+$rootReset($original);
+$rootSave($listed);
+$tpl->contentType = 'txt';
+publish($sp, $R, array(), $txtBody);
+$rows = $sp->index()->indexedFiles(null);
+check('a TXT render of the listed page writes /robots.txt, no index.txt below its page dir; the index row names /robots.txt; /.robots.txt untouched', $bytesOf($robots) === $txtBody && !is_file("$tmpRoot$rRel/index.txt") && array_values($rows) === array('/robots.txt') && $bytesOf($dotRobots) === $original, json_encode($rows) . ' ' . files($tmpRoot));
+$tpl->contentType = 'xml';
+$log0 = logText($tmp);
+publish($sp, $R, array(), '<urlset/>');
+$tpl->contentType = 'txt';
+check('...an XML render of that page writes nothing and logs why', $bytesOf($robots) === $txtBody && !is_dir("$tmpRoot$rRel") && count($sp->index()->indexedFiles(null)) === 1 && strpos($since($log0), "skip $rPath: the page is listed in Replace these root files with pages as robots.txt, a xml render is not written") !== false, $since($log0));
+$saveR = function($title) use ($pages, $R, $sp) {
+	$r = $pages->get($R->id);
+	$r->title = $title;
+	$pages->save($r);
+	$sp->drain();
+};
+$saveR('R2');
+$savedR = array($bytesOf($robots), $bytesOf($dotRobots) === $original, count($sp->index()->indexedFiles(null)));
+publish($sp, $R, array(), $txtBody);
+check('saving the page and drain() remove /robots.txt, /.robots.txt untouched; the next render writes it again', $savedR === array(null, true, 0) && $bytesOf($robots) === $txtBody, json_encode($savedR));
+
+//a /robots.txt the index does not know, put there after the take-over
+$sp->index()->clearRows();
+file_put_contents($robots, 'put there by hand');
+$intact = fn() => $bytesOf($robots) === 'put there by hand' && $bytesOf($dotRobots) === $original;
+$log0 = logText($tmp);
+publish($sp, $R, array(), $txtBody);
+$unknown = array('render' => $intact() && strpos($since($log0), 'a file the index does not know is in the way: /robots.txt') !== false);
+$sp->wipeCaches();
+$unknown['wipeCaches()'] = $intact();
+foreach(array(0, 1) as $shell) {
+	$sp->set('useShell', $shell);
+	$sp->wipeCaches(true);
+	$unknown["wipeCaches(true), useShell $shell"] = $intact();
+}
+$sp->set('useShell', 0);
+if(PHP_OS_FAMILY === 'Windows' && trim((string) @shell_exec('bash -c "command -v find" 2>NUL')) !== '') {
+	file_put_contents("$tmp/find.sh", $sp->wiper()->unixScanCommand($sp->wiper()->scanTargets()) . "\n");
+	shell_exec('bash ' . escapeshellarg("$tmp/find.sh"));
+	$unknown['find line'] = $intact();
+}
+$manifest = $sp->manifestPath();
+$manifestBefore = is_file($manifest) ? file_get_contents($manifest) : null;
+file_put_contents($manifest, "/robots.txt\n/.robots.txt\n");
+$sp->wiper()->wipeCachesManifest();
+$unknown['manifest'] = $intact();
+file_put_contents($manifest, "/robots.txt\n/.robots.txt\n");
+$sp->index()->importManifest();
+$m->adoptStaticFiles();
+$unknown['importManifest, adoption'] = $intact() && !$sp->index()->hasFile('/robots.txt') && !$sp->index()->hasFile('/.robots.txt');
+if($manifestBefore !== null) file_put_contents($manifest, $manifestBefore);
+else @unlink($manifest);
+check('an unrecorded /robots.txt after the take-over: a render, wipeCaches(), wipeCaches(true) by the PHP walk and the shell, the find line, a manifest line, importManifest() and the adoption all leave it and /.robots.txt', !in_array(false, $unknown, true), json_encode($unknown));
+
+//rows a delete must not follow
+$sp->index()->clearRows();
+$rowCases = array();
+$sp->remove('rootFiles');
+recordAll($sp, array('/robots.txt'));
+$sp->wiper()->wipeIndexed(null);
+$rowCases['not listed'] = $intact();
+$sp->set('rootFiles', $rLine);
+$sp->set('cacheNonHtml', 0);
+recordAll($sp, array('/robots.txt'));
+$sp->wiper()->wipeIndexed(null);
+$rowCases['switch off'] = $intact();
+$sp->set('cacheNonHtml', 1);
+putFiles($tmpRoot, array("$Pdir/robots.txt"));
+recordAll($sp, array("$Pdir/robots.txt"));
+$sp->wiper()->wipeIndexed(null);
+$rowCases['below the root'] = is_file("$tmpRoot$Pdir/robots.txt");
+@unlink("$tmpRoot$Pdir/robots.txt");
+check('an index row for /robots.txt while the name is not listed or the switch is off, and one for <P>/robots.txt while it is listed: no file is deleted', !in_array(false, $rowCases, true), json_encode($rowCases));
+
+$sp->index()->clearRows();
+file_put_contents($robots, $txtBody);
+recordAll($sp, array('/robots.txt'));
+$dry = $sp->wipeCaches(false, true);
+$dryScan = $sp->wipeCaches(true, true);
+$dryPaths = array_merge($dry['paths'] ?? array(), $dryScan['paths'] ?? array());
+check('a dry run of a wipe lists the recorded /robots.txt and deletes nothing; neither it nor a dry run scan lists /.robots.txt or /.htaccess', in_array('/robots.txt', $dry['paths'] ?? array(), true) && !in_array('/.robots.txt', $dryPaths, true) && !in_array('/.htaccess', $dryPaths, true) && $bytesOf($robots) === $txtBody && $bytesOf($dotRobots) === $original, json_encode($dryPaths));
+
+//giving back
+$setUpTaken = function() use ($rootReset, $sp, $txtBody, $original) {
+	$rootReset($txtBody, $original);
+	recordAll($sp, array('/robots.txt'));
+};
+$setUpTaken();
+$log0 = logText($tmp);
+$rootSave(array('cacheNonHtml' => 1, 'rootFiles' => ''));
+check('a save removing the name: the recorded copy goes, /.robots.txt is renamed back to /robots.txt byte for byte, logged', $bytesOf($robots) === $original && $bytesOf($dotRobots) === null && !$sp->index()->hasFile('/robots.txt') && strpos($since($log0), 'settings save: root file robots.txt: .robots.txt renamed back to robots.txt') !== false, $since($log0));
+$rootSave($listed);
+$takenAgain = $bytesOf($robots) === null && $bytesOf($dotRobots) === $original;
+file_put_contents($robots, 'unrecorded');
+$texts = $rootSave(array('cacheNonHtml' => 1, 'rootFiles' => ''));
+check('...with an unrecorded /robots.txt in the way nothing is renamed and a warning says so', $takenAgain && $bytesOf($robots) === 'unrecorded' && $bytesOf($dotRobots) === $original && $hasAny($texts, 'a file /robots.txt is in the way'), json_encode($texts));
+$rootReset();
+$rootSave($listed);
+$setUpTaken();
+$rootSave(array('cacheNonHtml' => 0, 'rootFiles' => $rLine));
+check('...switching Cache XML and plain text responses off does the same', $bytesOf($robots) === $original && $bytesOf($dotRobots) === null && !$sp->index()->hasFile('/robots.txt'), files($tmpRoot));
+$rootReset();
+$rootSave($listed);
+
+//uninstall [decided by user, Q15 (a)]: the copies by the index first, then the originals
+@unlink($htFile);
+$setUpTaken();
+$log0 = logText($tmp);
+htUninstall($sp);
+$uninstallLog = $since($log0);
+$wipeAt = strpos($uninstallLog, 'uninstall: 1 static file(s)');
+$backAt = strpos($uninstallLog, 'uninstall: root file robots.txt: .robots.txt renamed back to robots.txt');
+check('onUninstall() with a recorded /robots.txt and a /.robots.txt: the copy is deleted by the index, then the original is back byte for byte', $bytesOf($robots) === $original && $bytesOf($dotRobots) === null && $wipeAt !== false && $backAt !== false && $wipeAt < $backAt && !count($sp->index()->indexedFiles(null)), $uninstallLog);
+htForget($tmp);
+$rootReset($txtBody);
+recordAll($sp, array('/robots.txt'));
+htUninstall($sp);
+check('...with no backup only the copy goes', $bytesOf($robots) === null && $bytesOf($dotRobots) === null);
+htForget($tmp);
+
+//a hand-written route on a site that keeps its own rules: Keep chosen for the method group, so
+//the save tells nothing about it (core shows a notice text once per request, a later check
+//waits for that warning)
+$h->blockRoute = null;
+$routeLine = 'RewriteRule ^robots\.txt$ index.php?it=' . $rPath . ' [L,QSA]';
+htPut($htFile, htInsert($stock, '# PW-PAGENAME', array_merge($methodLines, array($routeLine))));
+$st = $h->status();
+$listed['htaccessKeep'] = $h->keepHash($st);
+$rootReset($original);
+$rootSave($listed);
+check('a candidate .htaccess holding the hand-written route "' . 'RewriteRule ^robots\.txt$ index.php?it=/<P>/r/ [L,QSA]' . '": the save takes /robots.txt over', $st['state'] === 'candidate' && count($st['routes']) === 1 && $bytesOf($robots) === null && $bytesOf($dotRobots) === $original, htSummary($st));
+htPut($htFile, htInsert($stock, '# PW-PAGENAME', array_merge($methodLines, array('RewriteRule ^robots\.txt$ index.php?it=/other/ [L,QSA]'))));
+$rootReset($original);
+$log0 = logText($tmp);
+$rootSave($listed);
+$want = str_replace("\n", ' | ', $h->rootRouteLines('robots.txt', $rPath));
+check('...with a route to another page path it does not, and the warning shows the lines to add', $bytesOf($robots) === $original && $bytesOf($dotRobots) === null && strpos($want, $routeLine) !== false && $hasAny($noticeTexts(0), $want) && strpos($since($log0), "root file robots.txt: not taken over, the .htaccess holds no route to $rPath") !== false, $want);
+$suggested = $h->classify(htInsert($stock, '# PW-PAGENAME', explode("\n", $h->rootRouteLines('robots.txt', $rPath))));
+check('...the lines it shows are read back as a root file route, no candidate', htSummary($suggested) === 'absent ' && count($suggested['routes']) === 1 && $suggested['routes'][0]['name'] === 'robots.txt', htSummary($suggested));
+
+//[decided by user, Q18 (a)] the block present and current counts in state candidate too
+$h->blockRoute = fn($name, $path) => true;
+$q18 = htInsert($withBlock, '# BEGIN StaticPages', $methodLines);
+htPut($htFile, str_replace('# The home page, from its copy.', '# The home page, from its copY.', $q18));
+$rootReset($original);
+$rootSave($listed);
+$q18Outdated = array($h->status()['state'], $bytesOf($robots) === $original && $bytesOf($dotRobots) === null);
+htPut($htFile, $q18);
+$st = $h->status();
+$rootSave($listed);
+check('Q18 (a): state candidate with the block present and current: the save takes /robots.txt over; with a byte of the block changed it does not', $st['state'] === 'candidate' && $st['blockLines'] !== null && $bytesOf($robots) === null && $bytesOf($dotRobots) === $original && $q18Outdated === array('candidate', true), json_encode(array(htSummary($st), $q18Outdated)));
+
+//step 02's four hand-made root files, with two names listed
+$rootReset();
+htClean($tmpRoot);
+$sp->set('rootFiles', "robots.txt $rPath\nsitemap.xml /sitemap.xml/");
+foreach(array(0, 1) as $shell) {
+	$sp->set('useShell', $shell);
+	$label = $shell ? (PHP_OS_FAMILY === 'Windows' ? 'PowerShell' : 'find') : 'PHP walk';
+	typedLayout($tmpRoot, $Pdir, $rootHand, $typedLayout);
+	$sp->wipeCaches(true);
+	$after = files($tmpRoot);
+	$lost = array_filter($typedSurvivors, fn($x) => strpos(" $after ", " $x ") === false);
+	check("robots.txt and sitemap.xml listed, forced wipe ($label): the four hand-made root files and the other survivors stay", !count($lost), 'lost: ' . implode(' ', $lost) . "; $after");
+}
+$sp->set('useShell', 0);
+foreach($rootHand as $x) @unlink("$tmpRoot$x");
+
+$h->blockRoute = null;
+$modules->saveConfig('StaticPages', $rootBase);
+$dryRunHeld->setValue($h, false);
+$h->using(null);
+htClean($tmpRoot);
+htForget($tmp);
+$sp->remove('rootFiles');
+$sp->remove('cacheNonHtml');
+$tpl->contentType = $tplType;
+$pages->delete($pages->get($R->id), true);
+$sp->drain();
+$sp->index()->clearRows();
+$rootReset();
+rrmdir("$tmpRoot$Pdir");
+check('root files block: no robots.txt, .robots.txt, sitemap.xml, .htaccess or backup left on the temporary root, the stored config as before', !file_exists($robots) && !file_exists($dotRobots) && !file_exists("$tmpRoot/sitemap.xml") && !file_exists($htFile) && !htBackups($tmpRoot) && $modules->getConfig('StaticPages') == $rootBase, files($tmpRoot));
+
 ////  .htaccess manager (0.10.0)
 
 //when the manager runs: install, the check after a superuser's admin request or a CLI run, a

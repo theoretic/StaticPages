@@ -156,6 +156,18 @@ class StaticPagesHtaccess extends Wire {
 	public $fetch = null;
 	public $reread = null;
 
+	/**
+	 * Test seam of rootRoute(): a callable($name, $path) answering whether the generated block
+	 * holds the route of that root file line, asked in place of the generator; null: the block
+	 * holds no root file route yet
+	 *
+	 * #pw-internal
+	 *
+	 * @var callable|null
+	 *
+	 */
+	public $blockRoute = null;
+
 	//the settings a save is storing, see using(); null: the module's own properties
 	protected $settings = null;
 
@@ -491,6 +503,52 @@ class StaticPagesHtaccess extends Wire {
 		$from = $lines[$first]['offset'];
 		$to = $lines[$last]['offset'] + strlen( $lines[$last]['text'] );
 		return array( $from, $to - $from, $block );
+	}
+
+	/**
+	 * Whether the root .htaccess hands a request for the root file $name to ProcessWire as the
+	 * page $path: a hand-written root file route for that name and page path (status()
+	 * 'routes'), or the module's block, present and equal to the generated one whatever the
+	 * state [decided by user, Q18 (a)], holding the route. Reads the file once, writes nothing
+	 *
+	 * #pw-internal
+	 *
+	 * @param string $name A root file name, robots.txt
+	 * @param string $path Its page path, /robots/
+	 * @return bool
+	 *
+	 */
+	public function rootRoute($name, $path) {
+		list($status, $bytes) = $this->read();
+		if( $bytes === null ) return false;
+		foreach( $status['routes'] as $route ){
+			if( $route['name'] === $name && $route['target'] === 'index.php?it=' . $path ) return true;
+		}
+		if( !$status['blockLines'] || !$this->blockIsCurrent( $this->lines($bytes), $status ) ) return false;
+		return $this->blockHoldsRoute( $name, $path );
+	}
+
+	/**
+	 * The line a site keeping its own rules adds for a root file: a request for /$name that is no
+	 * existing file goes to ProcessWire as the page $path
+	 *
+	 * #pw-internal
+	 *
+	 * @param string $name
+	 * @param string $path
+	 * @return string Two lines, LF between them
+	 *
+	 */
+	public function rootRouteLines($name, $path) {
+		//a name is letters, digits, _ - and dots (StaticPages::rootFilesArray()): only the dots
+		//are escaped, the form isRootFileRoute() reads back
+		return "RewriteCond %{REQUEST_FILENAME} !-f\nRewriteRule ^" . str_replace( '.', '\\.', $name ) . '$ index.php?it=' . $path . ' [L,QSA]';
+	}
+
+	protected function blockHoldsRoute($name, $path) {
+		//the generated block holds no root file route yet
+		if( is_callable($this->blockRoute) ) return (bool) call_user_func( $this->blockRoute, $name, $path );
+		return false;
 	}
 
 	protected function blockIsCurrent(array $lines, array $result) {
@@ -1490,8 +1548,8 @@ class StaticPagesHtaccess extends Wire {
 	 * The flag (StaticPages::markUninstalling()) keeps every request from caching from then on,
 	 * and the check after this request's response from writing the block back. The copies go by
 	 * the index tables, or by the manifest where there are none; never by a scan (wipeCaches()
-	 * would fall back to one). Each half is caught and logged, so the uninstall completes. The
-	 * root file originals come back here too once there are root files (step 10b).
+	 * would fall back to one). Each half is caught and logged, so the uninstall completes. Then
+	 * the root file originals come back (.robots.txt to robots.txt), caught and logged as well.
 	 *
 	 * #pw-internal
 	 *
@@ -1532,6 +1590,15 @@ class StaticPagesHtaccess extends Wire {
 		}
 		catch( \Throwable $e ){
 			$sp->logDrain( 'uninstall: the static copies could not be deleted: ' . $e->getMessage() );
+		}
+
+		//the root file originals after the copies, before forget() [decided by user, Q15 (a)]:
+		//each listed name's recorded copy goes if still there, then its dot backup is renamed back
+		try {
+			foreach( $sp->rootFilesArray() as $name => $path ) $sp->wiper()->giveBackRootFile( $name, false, 'uninstall' );
+		}
+		catch( \Throwable $e ){
+			$sp->logDrain( 'uninstall: the root file originals could not be given back: ' . $e->getMessage() );
 		}
 
 		//the stamp and what was told go last: a reinstall tells its outcome again [decided by

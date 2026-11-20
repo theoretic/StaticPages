@@ -15,7 +15,9 @@ with neither). The scan runs in PHP, or as one find or one PowerShell process.
 Whatever finds a path, nothing is deleted unless realpath() puts it below the site root, its
 name is the configured static file name (or the temporary name publish() writes), and it is
 outside every dir listed in Non-static directories. The scan only walks root dirs that are
-static copies of pages, worked out when it runs: see scanTargets().
+static copies of pages, worked out when it runs: see scanTargets(). A root file listed in
+"Replace these root files with pages" (robots.txt) goes by its index record only, directly in
+the site root; its hand-made original is kept as .robots.txt, see takeOverRootFile().
 */
 
 class StaticPagesWiper extends Wire {
@@ -53,20 +55,26 @@ class StaticPagesWiper extends Wire {
 		return $result;
 	}
 
-	public function deleteStaticFiles(array $files, $dryRun = false, $htmlOnly = false){
+	public function deleteStaticFiles(array $files, $dryRun = false, $htmlOnly = false, ?array $rootNames = null){
 		//$dryRun: nothing is deleted, the result lists what would go under 'paths', root
 		//relative, dirs with a trailing slash. A file is deleted under a name of
 		//knownFileNames(), whether or not the switch is on: a copy written while it was on
 		//goes by its record after it went off. $htmlOnly: the HTML name alone, a manifest
-		//line never deletes anything else
+		//line never deletes anything else. A root file name ("Replace these root files with
+		//pages", robots.txt) only directly in the site root, only while it is listed and the
+		//switch is on, never for a manifest line; $rootNames: those names instead (the give
+		//back of a name leaving the list)
 
 		$result = $this->emptyResult($dryRun);
 
 		$staticFile = $this->sp->staticFileName();
 		if( $staticFile === '' ) return $result;
 		$names = $htmlOnly ? array($staticFile) : $this->sp->knownFileNames();
+		if( $htmlOnly ) $rootNames = array();
+		else if( $rootNames === null ) $rootNames = $this->sp->configValue('cacheNonHtml', 0) ? array_keys( $this->sp->rootFilesArray() ) : array();
 
 		$root = $this->sp->rootPath();
+		$rootNorm = rtrim( $this->sp->normalizePath($root), DIRECTORY_SEPARATOR );
 		$nonStaticDirs = $this->sp->nonStaticDirsArray();
 		$dirs = array();
 		$failed = array();
@@ -79,7 +87,11 @@ class StaticPagesWiper extends Wire {
 			//the index could have been tampered with, validating every entry before deletion
 			if( $relative === '' || strpos($relative, '..') !== false || strpos($relative, "\0") !== false ) continue;
 			$path = $root . $relative;
-			if( !in_array( basename($path), $names, true ) ) continue;
+			if( !in_array( basename($path), $names, true ) ){
+				if( !in_array( basename($path), $rootNames, true ) ) continue;
+				if( $relative !== '/' . basename($path) ) continue;
+				if( rtrim( $this->sp->normalizePath( dirname($path) ), DIRECTORY_SEPARATOR ) !== $rootNorm ) continue;
+			}
 			if( !is_file($path) ) continue;
 			$dirPath = dirname($path);
 			if( $this->isProtectedPath($dirPath, $nonStaticDirs) ) continue;
@@ -263,6 +275,118 @@ class StaticPagesWiper extends Wire {
 		if( strlen($real) <= strlen($prefix) ) return false;
 		if( DIRECTORY_SEPARATOR === '\\' ) return strncasecmp( $real, $prefix, strlen($prefix) ) === 0;
 		return strncmp( $real, $prefix, strlen($prefix) ) === 0;
+	}
+
+////  root files ("Replace these root files with pages")
+
+	/**
+	 * Take a hand-made root file over on a settings save: <root>/robots.txt is renamed to
+	 * <root>/.robots.txt, so that the listed page's copy can take its place
+	 *
+	 * Only a file the index does not record, only with index tables, only when no dot backup
+	 * exists yet (one is never overwritten) and only while the .htaccess hands the name to
+	 * ProcessWire (StaticPagesHtaccess::rootRoute()); else the file stays and the save warns
+	 * why [decided by user, Q5]. With $dryRun the rename is held back and logged [decided by
+	 * user, Q16 (a)]. The caller asks only for a listed name while the switch is on.
+	 *
+	 * #pw-internal
+	 *
+	 * @param string $name A name of StaticPages::rootFilesArray()
+	 * @param string $path Its page path
+	 * @param array $data The settings being stored
+	 * @param bool $dryRun
+	 * @return string 'none' (no file), 'recorded' (the module's copy), 'taken', 'dry run',
+	 *   'refused'
+	 *
+	 */
+	public function takeOverRootFile($name, $path, array $data, $dryRun = false){
+		$file = $this->sp->rootPath() . "/$name";
+		$backup = $this->sp->rootPath() . "/.$name";
+		$line = "$name $path";
+		if( !file_exists($file) && !is_link($file) ) return 'none';
+		$why = '';
+		if( !$this->sp->index()->ensureTables() ) $why = 'there are no index tables';
+		else if( $this->sp->index()->hasFile("/$name") ) return 'recorded';
+		else if( is_dir($file) && !is_link($file) ) $why = "/$name is a directory";
+		else if( file_exists($backup) || is_link($backup) ) $why = "a backup /.$name is in the way, it is never overwritten";
+		if( $why === '' && !$this->sp->htaccess()->using($data)->rootRoute($name, $path) ){
+			$this->sp->warning( sprintf(
+				$this->_('"Replace these root files with pages", line "%1$s": /%2$s is not taken over, the root .htaccess does not hand /%2$s to the page %3$s. A site that keeps its own rules adds these lines above the "# PW-PAGENAME" line: %4$s'),
+				$line, $name, $path, str_replace( "\n", ' | ', $this->sp->htaccess()->rootRouteLines($name, $path) )
+				) );
+			$this->sp->logDrain( "root file $name: not taken over, the .htaccess holds no route to $path" );
+			return 'refused';
+		}
+		if( $why !== '' ){
+			$this->sp->warning( sprintf( $this->_('"Replace these root files with pages", line "%1$s": /%2$s is not taken over: %3$s.'), $line, $name, $why ) );
+			$this->sp->logDrain( "root file $name: not taken over: $why" );
+			return 'refused';
+		}
+		if( $dryRun ){
+			$this->sp->logDrain( "dry run: root file $name: would be renamed to .$name, nothing was" );
+			return 'dry run';
+		}
+		if( !@rename($file, $backup) ){
+			$this->sp->warning( sprintf( $this->_('"Replace these root files with pages", line "%1$s": /%2$s could not be renamed to /.%2$s.'), $line, $name ) );
+			$this->sp->logDrain( "root file $name: could not be renamed to .$name" );
+			return 'refused';
+		}
+		clearstatcache();
+		$this->sp->logDrain( "root file $name: taken over for $path, the original is kept as .$name" );
+		return 'taken';
+	}
+
+	/**
+	 * Give a root file back: the recorded copy <root>/robots.txt is deleted, then <root>/.robots.txt
+	 * renamed back when it exists and no file of that name is in the way (the save warns then).
+	 * When a name leaves the list, when the switch goes off, on uninstall. With $dryRun the
+	 * copy still goes, the rename is held back and logged [decided by user, Q16 (a)]. Logged
+	 * either way
+	 *
+	 * #pw-internal
+	 *
+	 * @param string $name
+	 * @param bool $dryRun
+	 * @param string $context For the log: 'settings save', 'uninstall'
+	 * @return string 'none' (no backup), 'given back', 'dry run', 'in the way', 'failed'
+	 *
+	 */
+	public function giveBackRootFile($name, $dryRun = false, $context = 'settings save'){
+		$relative = "/$name";
+		$file = $this->sp->rootPath() . $relative;
+		$backup = $this->sp->rootPath() . "/.$name";
+		$log = "$context: root file $name";
+
+		if( $this->sp->index()->ensureTables() && $this->sp->index()->hasFile($relative) ){
+			if( $this->sp->index()->dropIndexRows( array( md5($relative) ) ) ){
+				$deleted = $this->deleteStaticFiles( array($relative), false, false, array($name) );
+				$this->sp->logDrain( "$log: the copy " . ( $deleted['files'] ? 'was deleted' : 'was not there or could not be deleted' ) );
+			}
+			else $this->sp->logDrain( "$log: the index row could not be dropped, the copy is kept" );
+			clearstatcache();
+		}
+
+		if( !file_exists($backup) && !is_link($backup) ){
+			$this->sp->logDrain( "$log: no backup .$name to give back" );
+			return 'none';
+		}
+		if( $dryRun ){
+			$this->sp->logDrain( "dry run: $log: .$name would be renamed back to $name, nothing was" );
+			return 'dry run';
+		}
+		if( file_exists($file) || is_link($file) ){
+			$this->sp->warning( sprintf( $this->_('StaticPages: /.%1$s is not renamed back to /%1$s, a file /%1$s is in the way.'), $name ) );
+			$this->sp->logDrain( "$log: .$name is not renamed back, a file $name is in the way" );
+			return 'in the way';
+		}
+		if( !@rename($backup, $file) ){
+			$this->sp->warning( sprintf( $this->_('StaticPages: /.%1$s could not be renamed back to /%1$s.'), $name ) );
+			$this->sp->logDrain( "$log: .$name could not be renamed back" );
+			return 'failed';
+		}
+		clearstatcache();
+		$this->sp->logDrain( "$log: .$name renamed back to $name" );
+		return 'given back';
 	}
 
 ////  protected dirs

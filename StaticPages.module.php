@@ -46,6 +46,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	//one shot values are cleared, acted on by hookAfterSaveConfig()
 	private $htaccessSave = null;
 
+	//the config stored before a settings save and its Dry run box, taken by
+	//hookBeforeSaveConfig(): what rootFilesOnSave() compares the saved array with
+	private $rootFilesSave = null;
+
 	//set by noCache(): false, true, or the reason given as a string. Lives as long as the request
 	private $noCache = false;
 
@@ -480,6 +484,9 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$data = $event->arguments(1);
 		if( !is_array($data) ) return;
 
+		$stored = $this->wire()->modules->getConfig( $this->className() );
+		$this->rootFilesSave = array( 'stored' => is_array($stored) ? $stored : array(), 'dryRun' => !empty($data['wipeDryRun']) );
+
 		$this->wipeOnSwitchChange($data);
 
 		//the choice for hand-written .htaccess rules is one shot as well, and never stored. Taken
@@ -555,6 +562,35 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		}
 	}
 
+	private function rootFilesOnSave(array $data){
+		//"Replace these root files with pages", after the .htaccess had its say: a name that left
+		//the list, or every listed name when the switch went off, is given back; with the switch
+		//on every listed hand-made root file is taken over. An admin request or a CLI run only,
+		//as the .htaccess. Dry run checked: the renames are held back and logged [decided by user,
+		//Q16 (a)]
+		$save = $this->rootFilesSave;
+		$this->rootFilesSave = null;
+		if( !$this->htaccessAllowed() ) return;
+		$stored = $save ? $save['stored'] : array();
+		$dryRun = $save ? $save['dryRun'] : false;
+		$old = $this->rootFilesArray($stored);
+		$new = $this->rootFilesArray($data);
+		$on = !empty($data['cacheNonHtml']);
+		$switchedOff = !empty($stored['cacheNonHtml']) && !$on;
+		try {
+			foreach( $old as $name => $path ){
+				if( isset($new[$name]) && !$switchedOff ) continue;
+				$this->wiper()->giveBackRootFile( $name, $dryRun );
+			}
+			if( !$on ) return;
+			foreach( $new as $name => $path ) $this->wiper()->takeOverRootFile( $name, $path, $data, $dryRun );
+		}
+		catch( \Throwable $e ){
+			$this->logDrain( 'root files on settings save: ' . $e->getMessage() );
+			$this->error( 'StaticPages, root files: ' . $e->getMessage() );
+		}
+	}
+
 	public function hookAfterSaveConfig($event) {
 		//should run in backend only!
 		$class = $this->configSaveClassName( $event->arguments(0) );
@@ -571,6 +607,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->warnNonStaticTyped( $event->arguments(1) );
 			$this->warnRootFiles( $event->arguments(1) );
 			$this->htaccessOnSave( $event->arguments(1) );
+			$this->rootFilesOnSave( $event->arguments(1) );
 			if( !$this->wire()->input->post('forceWipeOnModuleSave') ) return;
 			//full disk scan: also catches files the manifest does not know about. With Dry run
 			//checked it only lists them
@@ -727,6 +764,21 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$dir = $this->rootPath() . $page->path;
 		if( $urlSegmentStr !='' ) $dir.= "$urlSegmentStr/";
 		$path = $dir.$staticFile;
+
+		//a page listed in "Replace these root files with pages", rendered without URL segments,
+		//while the switch is on and with index tables: its one file is <root>/<file name>, written
+		//only for the type the name's extension says, never as <page path>/index.<ext>
+		$rootFiles = $this->rootFilesOf( $page, $urlSegmentStr );
+		if( count($rootFiles) ){
+			$rootFile = '';
+			foreach( $rootFiles as $name ) if( pathinfo( $name, PATHINFO_EXTENSION ) === $type ) $rootFile = $name;
+			if( $rootFile === '' ){
+				$this->logSkip( $page, 'the page is listed in Replace these root files with pages as ' . implode( ', ', $rootFiles ) . ", a $type render is not written" );
+				return;
+			}
+			$dir = $this->rootPath() . '/';
+			$path = $dir . $rootFile;
+		}
 
 		//xml and txt, before anything is created on disk: the root level stays HTML only, the
 		//manifest knows HTML only, and a file nothing recorded (a hand-made one) is never replaced
@@ -1244,6 +1296,16 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//An absent key is an empty list. $data as in knownFileNames()
 		$parsed = $this->parseRootFiles($data);
 		return $parsed['files'];
+	}
+
+	private function rootFilesOf(Page $page, $urlSegmentStr){
+		//the root file names listed for $page: its page path, no URL segments, the switch on,
+		//index tables. Nothing of the list holds otherwise
+		if( (string) $urlSegmentStr !== '' ) return array();
+		if( empty( $this->configValue('cacheNonHtml', 0) ) ) return array();
+		$names = array_map( 'strval', array_keys( $this->rootFilesArray(), $page->path, true ) );
+		if( !count($names) || !$this->index()->ensureTables() ) return array();
+		return $names;
 	}
 
 	private function parseRootFiles($data){
