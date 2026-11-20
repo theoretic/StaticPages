@@ -579,7 +579,12 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$switchedOff = !empty($stored['cacheNonHtml']) && !$on;
 		try {
 			foreach( $old as $name => $path ){
-				if( isset($new[$name]) && !$switchedOff ) continue;
+				if( isset($new[$name]) && !$switchedOff ){
+					//the name stays listed for another page: the old page's recorded copy goes,
+					//nothing is renamed, the take-over stands [decided by user, Q26]
+					if( $new[$name] !== $path ) $this->wiper()->deleteRootFileCopy( $name, "settings save, page path $path changed to {$new[$name]}" );
+					continue;
+				}
 				$this->wiper()->giveBackRootFile( $name, $dryRun );
 			}
 			if( !$on ) return;

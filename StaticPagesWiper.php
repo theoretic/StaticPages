@@ -357,14 +357,7 @@ class StaticPagesWiper extends Wire {
 		$backup = $this->sp->rootPath() . "/.$name";
 		$log = "$context: root file $name";
 
-		if( $this->sp->index()->ensureTables() && $this->sp->index()->hasFile($relative) ){
-			if( $this->sp->index()->dropIndexRows( array( md5($relative) ) ) ){
-				$deleted = $this->deleteStaticFiles( array($relative), false, false, array($name) );
-				$this->sp->logDrain( "$log: the copy " . ( $deleted['files'] ? 'was deleted' : 'was not there or could not be deleted' ) );
-			}
-			else $this->sp->logDrain( "$log: the index row could not be dropped, the copy is kept" );
-			clearstatcache();
-		}
+		$this->deleteRootFileCopy($name, $context);
 
 		if( !file_exists($backup) && !is_link($backup) ){
 			$this->sp->logDrain( "$log: no backup .$name to give back" );
@@ -387,6 +380,34 @@ class StaticPagesWiper extends Wire {
 		clearstatcache();
 		$this->sp->logDrain( "$log: .$name renamed back to $name" );
 		return 'given back';
+	}
+
+	/**
+	 * Delete the recorded copy <root>/robots.txt by its index record, row first, through the
+	 * checks of deleteStaticFiles(); a file the index does not know stays. Renames nothing. The
+	 * first half of giveBackRootFile(), and a settings save that keeps a listed name and changes
+	 * its page path [decided by user, Q26]. Runs with Dry run checked as well (Q16 a). Logged
+	 *
+	 * #pw-internal
+	 *
+	 * @param string $name
+	 * @param string $context For the log
+	 * @return bool Whether a copy was deleted
+	 *
+	 */
+	public function deleteRootFileCopy($name, $context = 'settings save'){
+		$relative = "/$name";
+		$log = "$context: root file $name";
+		if( !$this->sp->index()->ensureTables() || !$this->sp->index()->hasFile($relative) ) return false;
+		$gone = false;
+		if( $this->sp->index()->dropIndexRows( array( md5($relative) ) ) ){
+			$deleted = $this->deleteStaticFiles( array($relative), false, false, array($name) );
+			$gone = $deleted['files'] > 0;
+			$this->sp->logDrain( "$log: the copy " . ( $gone ? 'was deleted' : 'was not there or could not be deleted' ) );
+		}
+		else $this->sp->logDrain( "$log: the index row could not be dropped, the copy is kept" );
+		clearstatcache();
+		return $gone;
 	}
 
 ////  protected dirs

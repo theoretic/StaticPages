@@ -2267,6 +2267,27 @@ $savedR = array($bytesOf($robots), $bytesOf($dotRobots) === $original, count($sp
 publish($sp, $R, array(), $txtBody);
 check('saving the page and drain() remove /robots.txt, /.robots.txt untouched; the next render writes it again', $savedR === array(null, true, 0) && $bytesOf($robots) === $txtBody, json_encode($savedR));
 
+//a changed page path for a name that stays listed [decided by user, Q26]
+$B = $mk($P, 'b', 'B');
+$sp->drain();
+$bPath = $B->path;
+$bBody = "User-agent: *\nDisallow: /page-b/\n";
+$log0 = logText($tmp);
+$rootSave($listed);
+check('Q26: a save with the robots.txt line unchanged deletes nothing: the recorded /robots.txt and its row stay, /.robots.txt untouched', $bytesOf($robots) === $txtBody && $sp->index()->hasFile('/robots.txt') && $bytesOf($dotRobots) === $original && strpos($since($log0), 'root file robots.txt') === false, $since($log0));
+$log0 = logText($tmp);
+$rootSave(array('cacheNonHtml' => 1, 'rootFiles' => "robots.txt $bPath"));
+$sp->set('rootFiles', "robots.txt $bPath");
+$moved = array($bytesOf($robots), $sp->index()->hasFile('/robots.txt'), $bytesOf($dotRobots) === $original, strpos($since($log0), "page path $rPath changed to $bPath: root file robots.txt: the copy was deleted") !== false, strpos($since($log0), 'renamed') === false);
+publish($sp, $B, array(), $bBody);
+$rows = $sp->index()->indexedFiles(null);
+check('Q26: a save moving robots.txt from page /a/ to /b/ deletes the recorded /robots.txt and its row, renames nothing, /.robots.txt untouched; a render of /b/ writes /robots.txt anew', $moved === array(null, false, true, true, true) && $bytesOf($robots) === $bBody && array_values($rows) === array('/robots.txt') && !is_dir("$tmpRoot$Pdir/b") && $bytesOf($dotRobots) === $original, json_encode($moved) . ' ' . json_encode($rows) . ' ' . $since($log0));
+$log0 = logText($tmp);
+$rootSave($listed + array('wipeDryRun' => 1));
+$dryRunHeld->setValue($h, false);
+$sp->set('rootFiles', $rLine);
+check('Q26, Q16 (a): the same change with Dry run checked deletes the recorded copy as well, /.robots.txt untouched', $bytesOf($robots) === null && !$sp->index()->hasFile('/robots.txt') && $bytesOf($dotRobots) === $original && strpos($since($log0), "page path $bPath changed to $rPath: root file robots.txt: the copy was deleted") !== false, $since($log0));
+
 //a /robots.txt the index does not know, put there after the take-over
 $sp->index()->clearRows();
 file_put_contents($robots, 'put there by hand');
@@ -2424,6 +2445,7 @@ $sp->remove('rootFiles');
 $sp->remove('cacheNonHtml');
 $tpl->contentType = $tplType;
 $pages->delete($pages->get($R->id), true);
+$pages->delete($pages->get($B->id), true);
 $sp->drain();
 $sp->index()->clearRows();
 $rootReset();
