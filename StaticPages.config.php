@@ -87,6 +87,16 @@ $config = array(
 						'columnWidth'			=> 100,
 					),
 
+					array(
+						'name'					=> 'rootFiles',
+						'type'					=> 'textarea',
+						'label'					=> $this->_('Replace these root files with pages'),
+						'description'			=> $this->_('One "file name, page path" per line, e.g. "robots.txt /robots/" or "sitemap.xml /sitemap/". Without a path the page is the one named like the file (/sitemap.xml/).'),
+						'notes'					=> $this->_('File names are lower case only, end in .xml or .txt, are no path and no dot file, and differ from the static file name and its typed names. Needs "Cache XML and plain text responses". When StaticPages takes a root file over, the original is kept as its dot backup, robots.txt as .robots.txt, sitemap.xml as .sitemap.xml; an existing backup is never overwritten. On a server without the stock rule that refuses dot paths (the .htaccess section blocking paths that start with a dot, or nginx\'s equivalent) /.robots.txt can be fetched by anybody. Once the copy exists the web server serves it to every request for the file, also with a query string or a POST.'),
+						'columnWidth'			=> 100,
+						'value'					=> '',
+					),
+
 				),
 			),
 

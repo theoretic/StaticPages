@@ -569,6 +569,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->publisher()->warnInvalidCsrfPatterns( $event->arguments(1) );
 			$this->warnIgnoredWipeAll( $event->arguments(1) );
 			$this->warnNonStaticTyped( $event->arguments(1) );
+			$this->warnRootFiles( $event->arguments(1) );
 			$this->htaccessOnSave( $event->arguments(1) );
 			if( !$this->wire()->input->post('forceWipeOnModuleSave') ) return;
 			//full disk scan: also catches files the manifest does not know about. With Dry run
@@ -1237,6 +1238,41 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		return $this->fileNameSet( $data, false );
 	}
 
+	/** #pw-internal */
+	public function rootFilesArray(?array $data = null){
+		//"Replace these root files with pages": file name => page path, the lines that are used.
+		//An absent key is an empty list. $data as in knownFileNames()
+		$parsed = $this->parseRootFiles($data);
+		return $parsed['files'];
+	}
+
+	private function parseRootFiles($data){
+		//one "<file name> <page path>" per line, the path defaults to "/<file name>/". A line is
+		//used when the name is a lower case xml or txt file name (never a dot file, never a
+		//path), is no name a copy may carry, is not listed before, and the path names at least
+		//one segment with a slash at both ends. Every other line lands in 'refused'
+		if( $data === null ) $value = $this->configValue('rootFiles', '');
+		else $value = isset($data['rootFiles']) ? $data['rootFiles'] : '';
+		$known = $this->knownFileNames($data);
+		$files = array();
+		$refused = array();
+		foreach( $this->linesToArray($value) as $line ){
+			$words = preg_split('/\s+/', $line);
+			$name = $words[0];
+			$path = count($words) > 1 ? $words[1] : "/$name/";
+			if( count($words) > 2
+				|| !preg_match('/^[a-z0-9_-][a-z0-9._-]{0,99}\.(xml|txt)$/', $name)
+				|| in_array( $name, $known, true )
+				|| isset($files[$name])
+				|| !preg_match('#^/([A-Za-z0-9_.-]+/)+$#', $path) ){
+				$refused[] = $line;
+				continue;
+			}
+			$files[$name] = $path;
+		}
+		return array( 'files' => $files, 'refused' => $refused );
+	}
+
 	private function fileNameSet($data, $all){
 		if( $data === null ){
 			$name = $this->staticFileName();
@@ -1330,6 +1366,25 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->_('Templates listed in "Non-static page templates" answer XML or plain text: %s. "Cache XML and plain text responses" does not cache them, the list wins.'),
 			implode(', ', $names)
 			) );
+	}
+
+	private function warnRootFiles($data){
+		//"Replace these root files with pages": the save names every line that is ignored, every
+		//path that is no page, and every line while "Cache XML and plain text responses" is off
+		$parsed = $this->parseRootFiles($data);
+		foreach( $parsed['refused'] as $line ){
+			$this->warning( sprintf( $this->_('"Replace these root files with pages", line "%s" is ignored: a lower case .xml or .txt file name that is not the static file name or one of its typed names, listed once, and a page path like /robots/.'), $line ) );
+		}
+		$on = !empty($data['cacheNonHtml']);
+		foreach( $parsed['files'] as $name => $path ){
+			$line = "$name $path";
+			if( !$this->wire()->pages->get($path)->id ){
+				$this->warning( sprintf( $this->_('"Replace these root files with pages", line "%1$s": there is no page %2$s.'), $line, $path ) );
+			}
+			if( !$on ){
+				$this->warning( sprintf( $this->_('"Replace these root files with pages", line "%s" does nothing while "Cache XML and plain text responses" is off.'), $line ) );
+			}
+		}
 	}
 
 	private function wipeOnConfigSaveModulesArray(){

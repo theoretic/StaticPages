@@ -1431,6 +1431,50 @@ $modules->saveConfig('StaticPages', $data);
 $tpl->contentType = $contentTypeBefore;
 check('saving the config with the switch on and an XML template in Non-static page templates warns, naming it; with the switch off it does not', $warned === 1 && $warnedOff === 0, "warned $warned, then $warnedOff");
 
+//"Replace these root files with pages" (rootFiles): the lines used, the lines refused, the
+//warnings of a save. Used from step 05 and 06 on; nothing is written here
+$given = $sp->rootFilesArray(array('rootFiles' => "robots.txt /robots/\r\n\r\nsitemap.xml"));
+check('rootFilesArray() accepts "robots.txt /robots/" and "sitemap.xml", whose path is /sitemap.xml/', $given === array('robots.txt' => '/robots/', 'sitemap.xml' => '/sitemap.xml/'), json_encode($given));
+$refusedLines = array('index.xml /x/', 'x.php /x/', '../robots.txt /x/', 'a/b.txt /x/', 'robots.txt /', 'robots.txt x', 'robots.txt /a b/', '.robots.txt /x/', 'ROBOTS.TXT /x/', 'index.txt', 'index.html /x/');
+$accepted = array();
+foreach($refusedLines as $line) $accepted[$line] = $sp->rootFilesArray(array('rootFiles' => $line));
+check('rootFilesArray() refuses a known static name, another extension, a path or dot file as name, a path that is no /segment/, a blank in the path, upper case', !array_filter($accepted), json_encode($accepted));
+$given = $sp->rootFilesArray(array('rootFiles' => "robots.txt /robots/\nrobots.txt /other/"));
+check('rootFilesArray() refuses a second line for a name already listed', $given === array('robots.txt' => '/robots/'), json_encode($given));
+$given = array(
+	$sp->rootFilesArray(array('staticFile' => 'robots.txt', 'rootFiles' => "robots.txt /robots/\nrobots.xml /x/\nsitemap.xml /s/")),
+	$sp->rootFilesArray(array('staticFile' => 'robots.txt', 'cacheNonHtml' => 1, 'rootFiles' => 'robots.txt /robots/')),
+);
+check('rootFilesArray() refuses the names of knownFileNames(), also with Static file name robots.txt', $given === array(array('sitemap.xml' => '/s/'), array()), json_encode($given));
+$rootFilesBefore = $sp->get('rootFiles');
+$sp->remove('rootFiles');
+$given = array($sp->rootFilesArray(), $sp->rootFilesArray(array()));
+$sp->set('rootFiles', "robots.txt /robots/");
+$given[] = $sp->rootFilesArray();
+if($rootFilesBefore === null) $sp->remove('rootFiles'); else $sp->set('rootFiles', $rootFilesBefore);
+check('rootFilesArray(): an absent key is an empty list; without an array it reads the loaded setting', $given === array(array(), array(), array('robots.txt' => '/robots/')), json_encode($given));
+$noticeTexts = function($from) use ($wire) {
+	$out = array();
+	foreach(array_slice(iterator_to_array($wire->notices), $from) as $n) if($n instanceof NoticeWarning) $out[] = html_entity_decode((string) $n->text, ENT_QUOTES);
+	return $out;
+};
+$hasLine = fn(array $texts, $needle, $line) => count(array_filter($texts, fn($t) => strpos($t, $needle) !== false && strpos($t, "\"$line\"") !== false));
+$pagePath = $A->path;
+$withRoot = $data;
+$withRoot['rootFiles'] = "robots.txt $pagePath\nsitemap.xml /sp-smoke-no-such-page/\nx.php /x/";
+$withRoot['cacheNonHtml'] = 1;
+$from = count($wire->notices);
+$modules->saveConfig('StaticPages', $withRoot);
+$onTexts = $noticeTexts($from);
+$withRoot['cacheNonHtml'] = 0;
+$from = count($wire->notices);
+$modules->saveConfig('StaticPages', $withRoot);
+$offTexts = $noticeTexts($from);
+$modules->saveConfig('StaticPages', $data);
+$rootTexts = fn(array $texts) => array_values(array_filter($texts, fn($t) => strpos($t, 'Replace these root files with pages') !== false));
+check('saving the config warns about a refused line and a path that is no page, naming the line; a valid line with a page and the switch on is not warned about', count($rootTexts($onTexts)) === 2 && $hasLine($onTexts, 'is ignored', 'x.php /x/') && $hasLine($onTexts, 'there is no page', 'sitemap.xml /sp-smoke-no-such-page/'), json_encode($rootTexts($onTexts)));
+check('saving the config with the switch off also warns about each used line, naming it (core shows a notice text once per request)', count($rootTexts($offTexts)) === 2 && $hasLine($offTexts, 'is off', "robots.txt $pagePath") && $hasLine($offTexts, 'is off', 'sitemap.xml /sp-smoke-no-such-page/'), json_encode($rootTexts($offTexts)));
+
 //a repeater item counts as its owner's page: a nested item if the install has a repeater whose
 //items carry a repeater of their own, else a plain one
 $textOf = function($template) {
@@ -2676,6 +2720,9 @@ check('the settings form offers the default list when none is stored', $field &&
 $field = $form ? $form->getChildByName('cacheNonHtml') : null;
 $notes = $field ? (string) $field->notes : '';
 check('the switch "Cache XML and plain text responses" is a checkbox whose notes name the template Content-Type setting and the Content-Type header', $field instanceof InputfieldCheckbox && strpos($notes, 'Content-Type setting') !== false && strpos($notes, 'Content-Type header') !== false, $notes);
+$field = $form ? $form->getChildByName('rootFiles') : null;
+$notes = $field ? (string) $field->notes : '';
+check('"Replace these root files with pages" is an empty textarea whose notes name the dot backup .robots.txt and when it can be fetched', $field instanceof InputfieldTextarea && (string) $field->attr('value') === '' && strpos($notes, '.robots.txt') !== false && strpos($notes, 'can be fetched') !== false && strpos($notes, 'without the stock rule') !== false, $notes);
 
 //the settings form groups its fields in fieldsets (0.8.2), the force wipe and the main switch
 //ungrouped at the bottom. ProcessModule stores getAll(): wrappers are left out of it, so a
@@ -2694,7 +2741,7 @@ if($form) foreach($form->children() as $child) {
 $layout = array_slice($layout, -8, null, true);
 $expected = array(
 	'_general' => array('priority'),
-	'_static' => array('newDirPermissions', 'staticFile', 'cacheNonHtml'),
+	'_static' => array('newDirPermissions', 'staticFile', 'cacheNonHtml', 'rootFiles'),
 	'_exclusions' => array('nonStaticDirs', 'nonStaticTemplates', 'trackedPaths', 'noCacheCookies'),
 	'_system' => array('csrfPatterns', 'useShell', 'wipeDryRun', 'logSkips'),
 	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields', 'ignoreTemplates'),
