@@ -103,6 +103,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	//be brought through, see StaticPagesMigration
 	const configVersion = 1;
 
+	//the file types a render may be written as, see staticFileName() and
+	//StaticPagesPublisher::renderType(). No json: such a response is skipped
+	const outputTypes = array('html', 'xml', 'txt');
+
 	//seconds an uninstall flag keeps every request from caching, see uninstalling(): an
 	//uninstall that died halfway (a fatal error, a timeout) leaves the flag in the config of a
 	//still installed module, which caches again after this long
@@ -541,6 +545,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->wiper()->warnPageDirsProtected( $event->arguments(1) );
 			$this->publisher()->warnInvalidCsrfPatterns( $event->arguments(1) );
 			$this->warnIgnoredWipeAll( $event->arguments(1) );
+			$this->warnNonStaticTyped( $event->arguments(1) );
 			$this->htaccessOnSave( $event->arguments(1) );
 			if( !$this->wire()->input->post('forceWipeOnModuleSave') ) return;
 			//full disk scan: also catches files the manifest does not know about. With Dry run
@@ -1148,12 +1153,59 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	}
 
 	/** #pw-internal */
-	public function staticFileName(){
+	public function staticFileName($type = 'html'){
 		//the configured name, or '' when it is not a plain file name. The name reaches find
 		//-name and PowerShell -like as a pattern and the disk as a path: '*', '*.html' or
 		//'../x' would turn a wipe into something else entirely. '' stops caching and every
-		//wipe matching by name. Never saved: index.html, as the config screen offers
-		return $this->plainFileName( $this->configValue('staticFile', 'index.html') );
+		//wipe matching by name. Never saved: index.html, as the config screen offers.
+		//Another type of outputTypes: that name with its extension replaced, see typedFileName()
+		$name = $this->plainFileName( $this->configValue('staticFile', 'index.html') );
+		if( $type === 'html' ) return $name;
+		return $this->typedFileName( $name, $type );
+	}
+
+	/** #pw-internal */
+	public function knownFileNames(?array $data = null){
+		//every name a copy of any type may carry, whether or not the switch is on: what a
+		//delete by record accepts. array() when the static file name is invalid. $data: the
+		//array a settings save is storing, read instead of the loaded properties
+		return $this->fileNameSet( $data, true );
+	}
+
+	/** #pw-internal */
+	public function scanFileNames(?array $data = null){
+		//the names a scan matches and a static copy dir is recognised by: the HTML name, and
+		//the other types only while "Cache XML and plain text responses" is on. $data as in
+		//knownFileNames()
+		return $this->fileNameSet( $data, false );
+	}
+
+	private function fileNameSet($data, $all){
+		if( $data === null ){
+			$name = $this->staticFileName();
+			$on = !empty( $this->configValue('cacheNonHtml', 0) );
+		} else {
+			$name = $this->plainFileName( isset($data['staticFile']) ? $data['staticFile'] : 'index.html' );
+			$on = !empty( $data['cacheNonHtml'] );
+		}
+		if( $name === '' ) return array();
+		$names = array($name);
+		if( $all || $on ) foreach( self::outputTypes as $type ){
+			if( $type === 'html' ) continue;
+			$typed = $this->typedFileName( $name, $type );
+			if( $typed !== '' ) $names[] = $typed;
+		}
+		//a static file name of index.xml is its own xml name: each name once
+		return array_values( array_unique($names) );
+	}
+
+	private function typedFileName($name, $type){
+		//$name, a valid HTML name, with its last extension replaced by $type ('index.html' gives
+		//'index.xml'), a name without one gets it appended; '' for a type outside outputTypes
+		if( $name === '' || !is_string($type) || $type === 'html' || !in_array( $type, self::outputTypes, true ) ) return '';
+		if( preg_match('/\.[A-Za-z0-9_-]+$/', $name) ) $typed = preg_replace('/\.[A-Za-z0-9_-]+$/', ".$type", $name);
+		else $typed = "$name.$type";
+		return $this->plainFileName($typed) === $typed ? $typed : '';
 	}
 
 	/** #pw-internal */
@@ -1198,6 +1250,27 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		}
 		$this->warning( sprintf(
 			$this->_('Templates listed in both "Wipe everything on save of these templates" and "Never invalidate on save of these templates": %s. A save of their pages wipes everything, the broader rule wins.'),
+			implode(', ', $names)
+			) );
+	}
+
+	private function warnNonStaticTyped($data){
+		//a page of a template in Non-static page templates is never cached, whatever its type:
+		//with "Cache XML and plain text responses" on, the operator learns on the save that a
+		//listed XML or plain text template stays uncached
+		if( empty($data['cacheNonHtml']) || empty($data['nonStaticTemplates']) ) return;
+		$names = array();
+		foreach( array_unique( array_filter( array_map( 'intval', (array) $data['nonStaticTemplates'] ) ) ) as $id ){
+			$template = $this->wire()->templates->get($id);
+			if( !$template instanceof Template ) continue;
+			$contentType = (string) $template->contentType;
+			if( $contentType === '' ) continue;
+			$r = $this->publisher()->renderType( $contentType, array() );
+			if( $r[1] === '' && ( $r[0] === 'xml' || $r[0] === 'txt' ) ) $names[] = $template->name;
+		}
+		if( !count($names) ) return;
+		$this->warning( sprintf(
+			$this->_('Templates listed in "Non-static page templates" answer XML or plain text: %s. "Cache XML and plain text responses" does not cache them, the list wins.'),
 			implode(', ', $names)
 			) );
 	}

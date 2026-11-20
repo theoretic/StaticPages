@@ -79,6 +79,14 @@ $config = array(
 						'value'					=> 'index.html',
 					),
 
+					array(
+						'name'					=> 'cacheNonHtml',
+						'type'					=> 'checkbox',
+						'label'					=> $this->_('Cache XML and plain text responses'),
+						'notes'					=> $this->_('The file type follows the template\'s Content-Type setting (Templates > Files) or the Content-Type header the template sends: XML is written as index.xml, plain text as index.txt (the static file name with its extension replaced), so a page /sitemap/ becomes sitemap/index.xml and /robots/ becomes robots/index.txt. There is nothing to map. A template listed in "Non-static page templates" is never cached, whatever its type. Off: such responses are not cached at all.'),
+						'columnWidth'			=> 100,
+					),
+
 				),
 			),
 

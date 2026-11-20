@@ -139,6 +139,68 @@ $sp->remove('staticFile');
 check('static file name defaults to index.html', $sp->staticFileName() === 'index.html');
 $sp->set('staticFile', 'index.html');
 
+//the names of the other output types: the static file name with its extension replaced
+$typed = array();
+foreach(array('index.html', 'cache.htm', 'index', '*') as $name) {
+	$sp->set('staticFile', $name);
+	$typed[$name] = $sp->staticFileName('xml');
+}
+$sp->set('staticFile', 'index.html');
+foreach(array('php', 'json', 'XML', '', '../x') as $type) $typed["type $type"] = $sp->staticFileName($type);
+check('staticFileName(type): index.xml, cache.xml, index.xml, "" for an invalid name; "" for a type outside xml and txt', $typed === array('index.html' => 'index.xml', 'cache.htm' => 'cache.xml', 'index' => 'index.xml', '*' => '', 'type php' => '', 'type json' => '', 'type XML' => '', 'type ' => '', 'type ../x' => ''), json_encode($typed));
+check('staticFileName() and staticFileName("html") stay the static file name, staticFileName("txt") is index.txt', $sp->staticFileName() === 'index.html' && $sp->staticFileName('html') === 'index.html' && $sp->staticFileName('txt') === 'index.txt');
+
+$pub = $sp->publisher();
+$mimes = array();
+foreach(array('text/html; charset=utf-8', 'TEXT/HTML', 'application/xml', 'text/xml', 'application/rss+xml', 'application/xhtml+xml', 'text/plain; charset=UTF-8', 'application/json') as $mime) $mimes[] = $pub->typeOfMime($mime);
+check('typeOfMime(): html html xml xml xml other txt other', $mimes === array('html', 'html', 'xml', 'xml', 'xml', 'other', 'txt', 'other'), json_encode($mimes));
+
+$rt = array(
+	$pub->renderType('', array()),
+	$pub->renderType('html', array()),
+	$pub->renderType('xml', array()),
+	$pub->renderType('', array('Content-Type: application/xml; charset=utf-8')),
+	$pub->renderType('txt', array('Content-Type: text/plain')),
+	$pub->renderType('xml', array('Content-Type: text/html')),
+	$pub->renderType('json', array()),
+	$pub->renderType('', array('Content-Type: application/json')),
+	$pub->renderType('text/plain', array()),
+	$pub->renderType('', array('Content-Type: text/html', 'X-Other: 1', 'content-type: text/xml')),
+	$pub->renderType('', array('Content-Type: text/xml', 'Content-Type: text/html')),
+);
+check('renderType(): the response type, else the template type, else html', array_slice($rt, 0, 5) === array(array('html', ''), array('html', ''), array('xml', ''), array('xml', ''), array('txt', '')) && $rt[8] === array('txt', ''), json_encode($rt));
+check('renderType(): a template and a response that disagree are a skip naming both', $rt[5][0] === '' && strpos($rt[5][1], 'xml') !== false && strpos($rt[5][1], 'text/html') !== false, json_encode($rt[5]));
+check('renderType(): json is a skip, in today\'s wording when the template says so', $rt[6] === array('', "content type is 'json'") && $rt[7][0] === '' && $rt[7][1] !== '', json_encode(array($rt[6], $rt[7])));
+check('renderType(): of two Content-Type headers the last one counts', $rt[9] === array('xml', '') && $rt[10] === array('html', ''), json_encode(array($rt[9], $rt[10])));
+
+$sets = array();
+$sp->remove('cacheNonHtml');
+$sets['absent'] = array($sp->scanFileNames(), $sp->knownFileNames());
+$sp->set('cacheNonHtml', 0);
+$sets['off'] = array($sp->scanFileNames(), $sp->knownFileNames());
+$sp->set('cacheNonHtml', 1);
+$sets['on'] = array($sp->scanFileNames(), $sp->knownFileNames());
+$sp->set('staticFile', '*');
+$sets['invalid'] = array($sp->scanFileNames(), $sp->knownFileNames());
+$sp->set('staticFile', 'index.xml');
+$sets['index.xml'] = array($sp->scanFileNames(), $sp->knownFileNames());
+$sp->set('staticFile', 'index.txt');
+$sets['index.txt'] = array($sp->scanFileNames(), $sp->knownFileNames());
+$sp->set('staticFile', 'index.html');
+$sp->remove('cacheNonHtml');
+$three = array('index.html', 'index.xml', 'index.txt');
+check('scanFileNames(): index.html with the switch off or absent, the three names with it on; knownFileNames(): the three names either way', $sets['absent'] === array(array('index.html'), $three) && $sets['off'] === array(array('index.html'), $three) && $sets['on'] === array($three, $three), json_encode($sets));
+check('both name sets are empty for an invalid static file name', $sets['invalid'] === array(array(), array()), json_encode($sets['invalid']));
+check('both name sets hold each name once when the static file name is index.xml or index.txt', $sets['index.xml'] === array(array('index.xml', 'index.txt'), array('index.xml', 'index.txt')) && $sets['index.txt'] === array(array('index.txt', 'index.xml'), array('index.txt', 'index.xml')), json_encode(array($sets['index.xml'], $sets['index.txt'])));
+$given = array(
+	$sp->scanFileNames(array('staticFile' => 'cache.htm', 'cacheNonHtml' => 1)),
+	$sp->knownFileNames(array('staticFile' => 'cache.htm')),
+	$sp->scanFileNames(array('cacheNonHtml' => 0)),
+	$sp->scanFileNames(array('staticFile' => '*', 'cacheNonHtml' => 1)),
+);
+check('the name sets read staticFile and cacheNonHtml from an array handed in, not from the loaded properties', $given === array(array('cache.htm', 'cache.xml', 'cache.txt'), array('cache.htm', 'cache.xml', 'cache.txt'), array('index.html'), array()) && $sp->scanFileNames() === array('index.html'), json_encode($given));
+check('tmpFileGlob(): .index.html.*.tmp, with a name .index.xml.*.tmp', $pub->tmpFileGlob() === '.index.html.*.tmp' && $pub->tmpFileGlob('index.xml') === '.index.xml.*.tmp');
+
 $w = $sp->wiper();
 check('readableFilesize 133', $w->readableFilesize(133) === '133.00B', $w->readableFilesize(133));
 check('readableFilesize 2048', $w->readableFilesize(2048) === '2.00K', $w->readableFilesize(2048));
@@ -1346,6 +1408,25 @@ $warnedOne = count(array_filter(iterator_to_array($wire->notices), $isWarning)) 
 $modules->saveConfig('StaticPages', $data);
 check('saving the config with a template in both lists warns, naming it; one list alone does not', $warned === 1 && $warnedOne === 0, "warned $warned, then $warnedOne");
 
+//a template of Non-static page templates answering XML is never cached: with the switch on,
+//the save says so. contentType set in memory only, never saved
+$isWarning = fn($n) => $n instanceof NoticeWarning && strpos((string) $n->text, 'answer XML or plain text') !== false && strpos((string) $n->text, $tpl->name) !== false;
+$contentTypeBefore = $tpl->contentType;
+$tpl->contentType = 'xml';
+$warningsBefore = count(array_filter(iterator_to_array($wire->notices), $isWarning));
+$on = $data;
+$on['nonStaticTemplates'] = array_merge((array) ($data['nonStaticTemplates'] ?? array()), array($tpl->id));
+$on['cacheNonHtml'] = 1;
+$modules->saveConfig('StaticPages', $on);
+$warned = count(array_filter(iterator_to_array($wire->notices), $isWarning)) - $warningsBefore;
+$off = $on;
+$off['cacheNonHtml'] = 0;
+$modules->saveConfig('StaticPages', $off);
+$warnedOff = count(array_filter(iterator_to_array($wire->notices), $isWarning)) - $warningsBefore - $warned;
+$modules->saveConfig('StaticPages', $data);
+$tpl->contentType = $contentTypeBefore;
+check('saving the config with the switch on and an XML template in Non-static page templates warns, naming it; with the switch off it does not', $warned === 1 && $warnedOff === 0, "warned $warned, then $warnedOff");
+
 //a repeater item counts as its owner's page: a nested item if the install has a repeater whose
 //items carry a repeater of their own, else a plain one
 $textOf = function($template) {
@@ -2195,6 +2276,9 @@ $field = $form ? $form->getChildByName('nonStaticDirs') : null;
 $formDefaults = implode("\n", $sp->wiper()->defaultNonStaticDirs());
 $config->paths->root = $tmpRootPath;
 check('the settings form offers the default list when none is stored', $field && $formDefaults !== '' && (string) $field->attr('value') === $formDefaults, $field ? json_encode((string) $field->attr('value')) : 'no field');
+$field = $form ? $form->getChildByName('cacheNonHtml') : null;
+$notes = $field ? (string) $field->notes : '';
+check('the switch "Cache XML and plain text responses" is a checkbox whose notes name the template Content-Type setting and the Content-Type header', $field instanceof InputfieldCheckbox && strpos($notes, 'Content-Type setting') !== false && strpos($notes, 'Content-Type header') !== false, $notes);
 
 //the settings form groups its fields in fieldsets (0.8.2), the force wipe and the main switch
 //ungrouped at the bottom. ProcessModule stores getAll(): wrappers are left out of it, so a
@@ -2213,7 +2297,7 @@ if($form) foreach($form->children() as $child) {
 $layout = array_slice($layout, -8, null, true);
 $expected = array(
 	'_general' => array('priority'),
-	'_static' => array('newDirPermissions', 'staticFile'),
+	'_static' => array('newDirPermissions', 'staticFile', 'cacheNonHtml'),
 	'_exclusions' => array('nonStaticDirs', 'nonStaticTemplates', 'trackedPaths', 'noCacheCookies'),
 	'_system' => array('csrfPatterns', 'useShell', 'wipeDryRun', 'logSkips'),
 	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields', 'ignoreTemplates'),

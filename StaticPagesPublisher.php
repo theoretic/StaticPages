@@ -147,9 +147,58 @@ class StaticPagesPublisher extends Wire {
 		return true;
 	}
 
-	public function tmpFileGlob(){
-		//the shape publish() writes, as a glob: '.index.html.*.tmp'
-		return '.' . $this->sp->staticFileName() . '.*.tmp';
+	public function tmpFileGlob($name = null){
+		//the shape publish() writes, as a glob: '.index.html.*.tmp'; $name: another static
+		//name, '.index.xml.*.tmp'
+		return '.' . ( $name === null ? $this->sp->staticFileName() : (string) $name ) . '.*.tmp';
+	}
+
+	public function typeOfMime($mime){
+		//the output type of a MIME type: html, xml or txt of StaticPages::outputTypes, else
+		//'other'. Parameters after ';' and letter case do not count. XHTML is no html here: a
+		//static .html file is served as text/html
+		$mime = strtolower( trim( explode(';', (string) $mime)[0] ) );
+		if( $mime === 'text/html' ) return 'html';
+		if( $mime === 'text/plain' ) return 'txt';
+		if( $mime === 'application/xml' || $mime === 'text/xml' ) return 'xml';
+		if( $mime !== 'application/xhtml+xml' && preg_match('#^[a-z0-9.+-]+/[a-z0-9.+-]+\+xml$#', $mime) ) return 'xml';
+		return 'other';
+	}
+
+	public function renderType($templateContentType, ?array $headers = null){
+		//array(type, skip reason) of one render: the type is what the response says by its last
+		//Content-Type header, else what the template says (its Content-Type setting, resolved as
+		//ProcessPageView does: a key of $config->contentTypes, or a value holding '/'), else
+		//html. Both saying something and disagreeing, or a type outside outputTypes: the type
+		//'' and a skip reason. headers_list() is always empty under CLI
+		if( $headers === null ) $headers = headers_list();
+
+		$templateValue = trim( (string) $templateContentType );
+		$templateMime = '';
+		if( strpos($templateValue, '/') !== false ) $templateMime = $templateValue;
+		else if( $templateValue !== '' ){
+			$types = $this->wire()->config->contentTypes;
+			if( is_array($types) && isset($types[$templateValue]) ) $templateMime = (string) $types[$templateValue];
+		}
+
+		$responseMime = '';
+		foreach( $headers as $header ){
+			$pos = strpos( (string) $header, ':' );
+			if( $pos === false ) continue;
+			if( strtolower( trim( substr($header, 0, $pos) ) ) !== 'content-type' ) continue;
+			$responseMime = trim( substr($header, $pos + 1) );
+		}
+
+		$templateType = $templateMime === '' ? '' : $this->typeOfMime($templateMime);
+		$responseType = $responseMime === '' ? '' : $this->typeOfMime($responseMime);
+
+		if( $templateType !== '' && $responseType !== '' && $templateType !== $responseType )
+			return array( '', "the template says $templateValue, the response is sent as $responseMime" );
+		$type = $responseType !== '' ? $responseType : ( $templateType !== '' ? $templateType : 'html' );
+		if( in_array( $type, StaticPages::outputTypes, true ) ) return array( $type, '' );
+		//json and the rest: today's wording when the template says so
+		if( $templateType !== '' ) return array( '', "content type is '$templateValue'" );
+		return array( '', "the response is sent as $responseMime" );
 	}
 
 	public function responseCode(){
