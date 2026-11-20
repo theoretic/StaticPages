@@ -480,6 +480,8 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$data = $event->arguments(1);
 		if( !is_array($data) ) return;
 
+		$this->wipeOnSwitchChange($data);
+
 		//the choice for hand-written .htaccess rules is one shot as well, and never stored. Taken
 		//here with the dry run box, before that is cleared; acted on after the save. Keep stores
 		//the hash of the candidates with this very save
@@ -509,6 +511,27 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		}
 		$this->htaccessSave['data'] = $data;
 		if( $changed ) $event->arguments(1, $data);
+	}
+
+	private function wipeOnSwitchChange(array $data){
+		//a save of the whole config changing the stored "Cache XML and plain text responses"
+		//wipes every copy before the new value is stored, Dry run checked or not. Off to on: a
+		//response cached as index.html by its header would stay next to its new index.xml. On
+		//to off: a dir holding index.xml stops being a static copy dir, lands in the default
+		//Non-static directories, and its files would be protected from every wipe. An absent
+		//key is off. A single key save (saveConfig with a key and a value) never gets here
+		$modules = $this->wire()->modules;
+		$stored = !empty( $modules->getConfig( $this->className(), 'cacheNonHtml' ) );
+		$new = !empty( $data['cacheNonHtml'] );
+		if( $stored === $new ) return;
+		$this->logDrain( 'Cache XML and plain text responses turned ' . ( $new ? 'on' : 'off' ) . ': every static copy is wiped' );
+		try {
+			$this->wipeCaches();
+		}
+		catch( \Throwable $e ){
+			$this->logDrain( 'the wipe on Cache XML and plain text responses failed: ' . $e->getMessage() );
+			$this->error( 'StaticPages: the wipe on "Cache XML and plain text responses" failed: ' . $e->getMessage() );
+		}
 	}
 
 	private function htaccessAllowed(){

@@ -257,8 +257,9 @@ class StaticPagesTracker extends Wire {
 		//change on ordinary requests, and a pattern covering them would detect a change,
 		//wipe, change the state again by wiping, and never settle
 
-		//a generated static file is not a source file either
-		if( basename($path) === $this->sp->staticFileName() ) return true;
+		//a generated static file is not a source file either: a name a scan matches, index.xml
+		//and index.txt only while "Cache XML and plain text responses" is on
+		if( in_array( basename($path), $this->sp->scanFileNames(), true ) ) return true;
 
 		$path = $this->sp->normalizePath($path);
 		$paths = $this->wire()->config->paths;

@@ -53,14 +53,18 @@ class StaticPagesWiper extends Wire {
 		return $result;
 	}
 
-	public function deleteStaticFiles(array $files, $dryRun = false){
+	public function deleteStaticFiles(array $files, $dryRun = false, $htmlOnly = false){
 		//$dryRun: nothing is deleted, the result lists what would go under 'paths', root
-		//relative, dirs with a trailing slash
+		//relative, dirs with a trailing slash. A file is deleted under a name of
+		//knownFileNames(), whether or not the switch is on: a copy written while it was on
+		//goes by its record after it went off. $htmlOnly: the HTML name alone, a manifest
+		//line never deletes anything else
 
 		$result = $this->emptyResult($dryRun);
 
 		$staticFile = $this->sp->staticFileName();
 		if( $staticFile === '' ) return $result;
+		$names = $htmlOnly ? array($staticFile) : $this->sp->knownFileNames();
 
 		$root = $this->sp->rootPath();
 		$nonStaticDirs = $this->sp->nonStaticDirsArray();
@@ -75,7 +79,7 @@ class StaticPagesWiper extends Wire {
 			//the index could have been tampered with, validating every entry before deletion
 			if( $relative === '' || strpos($relative, '..') !== false || strpos($relative, "\0") !== false ) continue;
 			$path = $root . $relative;
-			if( basename($path) !== $staticFile ) continue;
+			if( !in_array( basename($path), $names, true ) ) continue;
 			if( !is_file($path) ) continue;
 			$dirPath = dirname($path);
 			if( $this->isProtectedPath($dirPath, $nonStaticDirs) ) continue;
@@ -177,7 +181,7 @@ class StaticPagesWiper extends Wire {
 
 		if( $dryRun ){
 			$lines = @file( $manifest, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
-			return $this->deleteStaticFiles( array_unique( $lines === false ? array() : $lines ), true );
+			return $this->deleteStaticFiles( array_unique( $lines === false ? array() : $lines ), true, true );
 		}
 
 		$taken = $manifest . '.' . getmypid() . '.wipe';
@@ -188,7 +192,9 @@ class StaticPagesWiper extends Wire {
 		@unlink($taken);
 		if( $lines === false ) $lines = array();
 
-		return $this->deleteStaticFiles( array_unique($lines) );
+		//no manifest line names anything but an HTML copy: non-HTML is never written without
+		//index tables
+		return $this->deleteStaticFiles( array_unique($lines), false, true );
 	}
 
 	public function pruneDirs(array $dirs, $rootNorm){
@@ -313,13 +319,14 @@ class StaticPagesWiper extends Wire {
 	public function isStaticCopyDir($name, array $pageDirs){
 		//a root dir named like a page is that page's static copy dir, unless it holds
 		//anything besides static copies: a page named like a code dir (an /api/ page next
-		//to the api/ endpoints) must leave that dir protected
+		//to the api/ endpoints) must leave that dir protected. Static copies: the names of
+		//scanFileNames() and their temporary names, the HTML ones alone while the switch is off
 		if( !isset($pageDirs[$name]) ) return false;
-		$staticFile = $this->sp->staticFileName();
-		if( $staticFile === '' ) return false;
+		$names = $this->sp->scanFileNames();
+		if( !count($names) ) return false;
 		$dir = $this->sp->rootPath() . DIRECTORY_SEPARATOR . $name;
 		if( is_link($dir) || !is_dir($dir) ) return false;
-		$tmpGlob = $this->sp->publisher()->tmpFileGlob();
+		$tmpGlobs = $this->tmpFileGlobs($names);
 		try {
 			$rii = new \RecursiveIteratorIterator(
 				new \RecursiveDirectoryIterator( $dir, \FilesystemIterator::SKIP_DOTS ),
@@ -330,7 +337,7 @@ class StaticPagesWiper extends Wire {
 				if( $entry->isLink() ) return false;
 				if( $entry->isDir() ) continue;
 				$basename = $entry->getFilename();
-				if( $basename === $staticFile || fnmatch( $tmpGlob, $basename ) ) continue;
+				if( $this->matchesStaticName( $basename, $names, $tmpGlobs ) ) continue;
 				return false;
 			}
 		}
@@ -338,6 +345,18 @@ class StaticPagesWiper extends Wire {
 			return false;
 		}
 		return true;
+	}
+
+	public function tmpFileGlobs(array $names){
+		//the temporary name of each static name, in the same order
+		return array_map( fn($name) => $this->sp->publisher()->tmpFileGlob($name), array_values($names) );
+	}
+
+	public function matchesStaticName($basename, array $names, array $tmpGlobs){
+		//$basename is one of $names or matches one of the globs
+		if( in_array( $basename, $names, true ) ) return true;
+		foreach( $tmpGlobs as $glob ) if( fnmatch( $glob, $basename ) ) return true;
+		return false;
 	}
 
 	public function warnPageDirsProtected($data){
@@ -501,17 +520,23 @@ class StaticPagesWiper extends Wire {
 
 		$root = $this->sp->rootPath();
 		$nonStaticDirs = $this->sp->nonStaticDirsArray();
+		//the root level: the HTML name and its temporary name alone, the home page is never
+		//written as anything else and index.xml or robots.txt at the root is no copy of a page.
+		//Inside the targets: every name of scanFileNames()
 		$staticFile = $this->sp->staticFileName();
-		$tmpGlob = $this->sp->publisher()->tmpFileGlob();
+		$rootNames = array($staticFile);
+		$rootGlobs = array( $this->sp->publisher()->tmpFileGlob() );
+		$names = $this->sp->scanFileNames();
+		$tmpGlobs = $this->tmpFileGlobs($names);
 		$dirs = array();
 		$deleted = array();
 
-		$delete = function($path) use (&$result, &$deleted, $tmpGlob, $staticFile, $dryRun){
+		$delete = function($path, array $names, array $tmpGlobs) use (&$result, &$deleted, $dryRun){
 			$name = basename($path);
 			//a temporary file left behind by a killed publish keeps its directory non-empty,
 			//and an orphan directory holding no index.html is the 403
-			$tmp = fnmatch( $tmpGlob, $name );
-			if( !$tmp && $name !== $staticFile ) return;
+			$tmp = $this->matchesStaticName( $name, array(), $tmpGlobs );
+			if( !$tmp && !in_array( $name, $names, true ) ) return;
 			if( !$this->insideRoot($path) ) return;
 			$size = (int) @filesize($path);
 			if( $dryRun ){
@@ -527,7 +552,7 @@ class StaticPagesWiper extends Wire {
 		//the home page's copy, at root level
 		try {
 			foreach( new \FilesystemIterator( $root, \FilesystemIterator::SKIP_DOTS ) as $entry )
-				if( $entry->isFile() ) $delete( $entry->getPathname() );
+				if( $entry->isFile() ) $delete( $entry->getPathname(), $rootNames, $rootGlobs );
 		}
 		catch( \Throwable $e ){}
 
@@ -548,7 +573,7 @@ class StaticPagesWiper extends Wire {
 
 				foreach( $rii as $entry ){
 					if( $entry->isDir() ) $dirs[ $entry->getPathname() ] = true;
-					else $delete( $entry->getPathname() );
+					else $delete( $entry->getPathname(), $names, $tmpGlobs );
 				}
 			}
 			catch( \Throwable $e ){}
@@ -590,14 +615,23 @@ class StaticPagesWiper extends Wire {
 	public function unixScanCommand(array $targets){
 		//the shell line wipeScanUnix() runs, ending in a marker that tells it the shell ran
 
+		//the root find: the HTML name and its temporary name, as wipeScanPHP(). The targets find:
+		//every name of scanFileNames() and its temporary name, in that order; the switch off,
+		//the same pair as the root find
 		$match = '\\( -name ' . escapeshellarg( $this->sp->staticFileName() ) . ' -o -name ' . escapeshellarg( $this->sp->publisher()->tmpFileGlob() ) . ' \\)';
 
 		$root = escapeshellarg( $this->sp->rootPath() );
 		$commands = array( "find $root -mindepth 1 -maxdepth 1 -type f $match -delete 2>/dev/null" );
 
 		if( count($targets) ){
+			$names = $this->sp->scanFileNames();
+			$tmpGlobs = $this->tmpFileGlobs($names);
+			$pairs = array();
+			foreach( $names as $i => $name )
+				$pairs[] = '-name ' . escapeshellarg($name) . ' -o -name ' . escapeshellarg( $tmpGlobs[$i] );
+			$targetMatch = '\\( ' . implode( ' -o ', $pairs ) . ' \\)';
 			$dirs = implode( ' ', array_map( 'escapeshellarg', $targets ) );
-			$commands[] = "find $dirs -depth \\( -type f $match -delete \\) -o \\( -type d -empty -delete \\) 2>/dev/null";
+			$commands[] = "find $dirs -depth \\( -type f $targetMatch -delete \\) -o \\( -type d -empty -delete \\) 2>/dev/null";
 		}
 
 		$commands[] = 'echo StaticPages-scan-done';
@@ -616,14 +650,19 @@ class StaticPagesWiper extends Wire {
 
 		$text = fn($value) => "([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" . base64_encode( (string) $value ) . "')))";
 
-		//one statement per line: powershell reading a script from stdin runs it line by line
+		//one statement per line: powershell reading a script from stdin runs it line by line.
+		//The root level: $name and $tmp, the HTML name and its temporary name, as wipeScanPHP().
+		//Inside the targets: $names and $tmps, every name of scanFileNames() and its temporary name
+		$names = $this->sp->scanFileNames();
 		$lines = array(
 			"\$ErrorActionPreference = 'SilentlyContinue'",
 			'$name = ' . $text( $this->sp->staticFileName() ),
 			'$tmp = ' . $text( $this->sp->publisher()->tmpFileGlob() ),
-			'function Wipe-Files([string]$dir){ try { $files = [IO.Directory]::GetFiles($dir) } catch { return }; foreach($file in $files){ $n = [IO.Path]::GetFileName($file); if($n -eq $name -or $n -like $tmp){ try { [IO.File]::Delete($file) } catch {} } } }',
-			'function Wipe-Tree([string]$dir){ try { $subs = [IO.Directory]::GetDirectories($dir) } catch { return }; foreach($sub in $subs){ if(-not ([IO.File]::GetAttributes($sub) -band [IO.FileAttributes]::ReparsePoint)){ Wipe-Tree $sub } }; Wipe-Files $dir; try { if([IO.Directory]::GetFileSystemEntries($dir).Length -eq 0){ [IO.Directory]::Delete($dir) } } catch {} }',
-			'Wipe-Files ' . $text( $this->sp->rootPath() ),
+			'$names = @(' . implode( ', ', array_map( $text, $names ) ) . ')',
+			'$tmps = @(' . implode( ', ', array_map( $text, $this->tmpFileGlobs($names) ) ) . ')',
+			'function Wipe-Files([string]$dir, [bool]$all){ try { $files = [IO.Directory]::GetFiles($dir) } catch { return }; foreach($file in $files){ $n = [IO.Path]::GetFileName($file); $hit = $false; if($all){ foreach($x in $names){ if($n -eq $x){ $hit = $true } }; foreach($x in $tmps){ if($n -like $x){ $hit = $true } } } else { $hit = ($n -eq $name -or $n -like $tmp) }; if($hit){ try { [IO.File]::Delete($file) } catch {} } } }',
+			'function Wipe-Tree([string]$dir){ try { $subs = [IO.Directory]::GetDirectories($dir) } catch { return }; foreach($sub in $subs){ if(-not ([IO.File]::GetAttributes($sub) -band [IO.FileAttributes]::ReparsePoint)){ Wipe-Tree $sub } }; Wipe-Files $dir $true; try { if([IO.Directory]::GetFileSystemEntries($dir).Length -eq 0){ [IO.Directory]::Delete($dir) } } catch {} }',
+			'Wipe-Files ' . $text( $this->sp->rootPath() ) . ' $false',
 		);
 		foreach( $targets as $target ) $lines[] = 'Wipe-Tree ' . $text($target);
 		$lines[] = "Write-Output 'StaticPages-scan-done'";

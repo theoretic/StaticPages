@@ -587,9 +587,16 @@ class StaticPagesIndex extends Wire {
 		$lines = @file( $manifest, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
 		if( $lines === false ) return;
 
+		//a manifest line names an HTML copy or nothing of ours: no other name is adopted from
+		//it. No valid name: the manifest stays for a later import
+		$staticFile = $this->sp->staticFileName();
+		if( $staticFile === '' ) return;
+
 		$imported = true;
-		foreach( array_unique($lines) as $relative )
+		foreach( array_unique($lines) as $relative ){
+			if( basename( (string) $relative ) !== $staticFile ) continue;
 			if( !$this->recordStaticFile( $relative, 0, array('*') ) ) $imported = false;
+		}
 
 		if( $imported ) @unlink($manifest);
 	}

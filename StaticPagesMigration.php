@@ -155,13 +155,15 @@ class StaticPagesMigration extends Wire {
 		$staticFile = $this->sp->staticFileName();
 		if( $staticFile === '' ) return 0;
 
+		//the names a scan matches: index.xml and index.txt only while the switch is on
+		$names = $this->sp->scanFileNames();
 		$scan = $this->sp->wiper()->wipeScan(true);
 		$known = array_flip( $this->sp->index()->indexedFiles(null) );
 
 		$adopted = 0;
 		foreach( $scan['paths'] as $relative ){
 			if( substr($relative, -1) === '/' ) continue;
-			if( basename($relative) !== $staticFile ) continue;
+			if( !in_array( basename($relative), $names, true ) ) continue;
 			if( isset($known[$relative]) ) continue;
 			if( $this->sp->index()->recordStaticFile( $relative, 0, array('*') ) ) $adopted++;
 		}

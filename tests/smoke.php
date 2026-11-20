@@ -1724,6 +1724,214 @@ $pages->save($x);
 $sp->drain();
 check('the next save removes the adopted files', !is_file("$tmpRoot$Pdir/old/index.html") && !is_file("$tmpRoot/index.html") && is_file("$tmpRoot/landing/index.html"));
 
+////  deletes and scans know the name sets (0.11.0)
+
+//knownFileNames() for a delete by record, the HTML name for a manifest line, scanFileNames()
+//for a scan inside the targets, the HTML name alone at the root level
+function putFiles($tmpRoot, array $relatives) {
+	foreach($relatives as $relative) {
+		@mkdir(dirname("$tmpRoot$relative"), 0777, true);
+		file_put_contents("$tmpRoot$relative", 'x');
+	}
+}
+function recordAll(StaticPages $sp, array $relatives) {
+	foreach($relatives as $relative) $sp->index()->recordStaticFile($relative, 0, array('*'));
+}
+$sp->wipeCaches();
+rrmdir("$tmpRoot$Pdir");
+$sp->remove('cacheNonHtml');
+
+//by record, switch off and on
+foreach(array(0, 1) as $switch) {
+	$sp->set('cacheNonHtml', $switch);
+	$typed = array("$Pdir/a/index.xml", "$Pdir/b/index.txt");
+	putFiles($tmpRoot, $typed);
+	recordAll($sp, $typed);
+	$sp->wiper()->wipeIndexed(null);
+	check("by record (switch $switch): wipeIndexed() removes a recorded index.xml and index.txt and prunes their dirs", !is_dir("$tmpRoot$Pdir/a") && !is_dir("$tmpRoot$Pdir/b") && !count($sp->index()->indexedFiles(null)), files($tmpRoot));
+}
+$sp->set('cacheNonHtml', 1);
+$tampered = array('/robots.txt', '/sitemap.xml', "$Pdir/a/index.php", "$Pdir/a/sitemap.xml");
+putFiles($tmpRoot, $tampered);
+recordAll($sp, $tampered);
+$sp->wiper()->wipeIndexed(null);
+$kept = array_filter($tampered, fn($x) => is_file("$tmpRoot$x"));
+check('by record, tampered rows naming robots.txt, sitemap.xml, a/index.php and a/sitemap.xml: none is deleted', count($kept) === 4, files($tmpRoot));
+foreach($tampered as $x) @unlink("$tmpRoot$x");
+rrmdir("$tmpRoot$Pdir");
+
+//the manifest: HTML lines only
+$manifest = $sp->manifestPath();
+$manifestBefore = is_file($manifest) ? file_get_contents($manifest) : null;
+putFiles($tmpRoot, array("$Pdir/a/index.xml", "$Pdir/a/index.html"));
+file_put_contents($manifest, "$Pdir/a/index.xml\n$Pdir/a/index.html\n");
+$sp->wiper()->wipeCachesManifest();
+check('manifest listing a/index.xml and a/index.html: wipeCachesManifest() removes the HTML file only', is_file("$tmpRoot$Pdir/a/index.xml") && !is_file("$tmpRoot$Pdir/a/index.html"), files($tmpRoot));
+file_put_contents($manifest, "$Pdir/a/index.xml\n$Pdir/a/index.html\n");
+$sp->index()->importManifest();
+check('importManifest() records the HTML line only', tagsOf($sp, "$Pdir/a/index.html") === array('*') && !count(tagsOf($sp, "$Pdir/a/index.xml")) && !is_file($manifest));
+$sp->index()->clearRows();
+if($manifestBefore !== null) file_put_contents($manifest, $manifestBefore);
+else @unlink($manifest);
+rrmdir("$tmpRoot$Pdir");
+
+//the scan, on layout() and more
+$rootHand = array('/robots.txt', '/sitemap.xml', '/index.xml', '/index.txt');
+$typedLayout = array("$Pdir/a/index.xml", "$Pdir/a/.index.xml.999.tmp", "$Pdir/b/index.txt", "$Pdir/c.xml/index.xml");
+function typedLayout($tmpRoot, $Pdir, array $rootHand, array $typedLayout) {
+	layout($tmpRoot, $Pdir);
+	putFiles($tmpRoot, array_merge($rootHand, $typedLayout));
+}
+$typedSurvivors = array_merge($survivors, $rootHand);
+$sp->set('cacheNonHtml', 1);
+foreach(array(0, 1) as $shell) {
+	$sp->set('useShell', $shell);
+	$label = $shell ? (PHP_OS_FAMILY === 'Windows' ? 'PowerShell' : 'find') : 'PHP walk';
+	typedLayout($tmpRoot, $Pdir, $rootHand, $typedLayout);
+	if(!$shell) {
+		$before = files($tmpRoot);
+		$beforeList = explode(' ', $before);
+		$dry = $sp->wipeCaches(true, true);
+		$paths = $dry['paths'] ?? array();
+		check('switch on, dry run: changes nothing, lists none of the four root files', files($tmpRoot) === $before && !count(array_intersect($rootHand, $paths)), implode(' ', $paths));
+	}
+	$sp->wipeCaches(true);
+	$after = files($tmpRoot);
+	$lost = array_filter($typedSurvivors, fn($x) => strpos(" $after ", " $x ") === false);
+	check("switch on, forced wipe ($label): the four root files and the other survivors stay, the page dir goes", !count($lost) && !is_dir("$tmpRoot$Pdir"), 'lost: ' . implode(' ', $lost) . "; $after");
+	if(!$shell) {
+		$removed = array_values(array_diff($beforeList, explode(' ', $after)));
+		$listed = $paths;
+		sort($removed);
+		sort($listed);
+		check('switch on, dry run: lists exactly what the real scan then removes', $removed === $listed, json_encode(array($removed, $listed)));
+	}
+}
+$sp->set('useShell', 0);
+if(PHP_OS_FAMILY === 'Windows' && trim((string) @shell_exec('bash -c "command -v find" 2>NUL')) !== '') {
+	typedLayout($tmpRoot, $Pdir, $rootHand, $typedLayout);
+	file_put_contents("$tmp/find.sh", $sp->wiper()->unixScanCommand($sp->wiper()->scanTargets()) . "\n");
+	$out = (string) shell_exec('bash ' . escapeshellarg("$tmp/find.sh"));
+	$after = files($tmpRoot);
+	$lost = array_filter($typedSurvivors, fn($x) => strpos(" $after ", " $x ") === false);
+	check('switch on, find line (GNU find via bash): the four root files and the other survivors stay, the page dir goes', !count($lost) && !is_dir("$tmpRoot$Pdir") && strpos($out, 'StaticPages-scan-done') !== false, 'lost: ' . implode(' ', $lost) . "; $after");
+}
+$sp->set('cacheNonHtml', 0);
+typedLayout($tmpRoot, $Pdir, $rootHand, $typedLayout);
+$before = files($tmpRoot);
+$pdirFiles = array_values(array_filter(explode(' ', $before), fn($x) => strpos($x, "$Pdir/") === 0));
+$sp->wipeCaches(true);
+$after = files($tmpRoot);
+$gone = array_filter($pdirFiles, fn($x) => strpos(" $after ", " $x ") === false);
+check('switch off, forced wipe: the page dir holding index.xml is left alone, nothing below it is deleted', in_array(ltrim($Pdir, '/'), $sp->wiper()->leftAlone()) && !count($gone), 'gone: ' . implode(' ', $gone));
+
+//the find line: the switch off as 0.10.0 builds it, the switch on no index.xml at the root
+$targets = $sp->wiper()->scanTargets();
+$targets[] = "$tmpRoot/x";
+$q = escapeshellarg($sp->staticFileName()) . ' -o -name ' . escapeshellarg($sp->publisher()->tmpFileGlob());
+$literal = 'find ' . escapeshellarg($sp->rootPath()) . " -mindepth 1 -maxdepth 1 -type f \\( -name $q \\) -delete 2>/dev/null; find " . implode(' ', array_map('escapeshellarg', $targets)) . " -depth \\( -type f \\( -name $q \\) -delete \\) -o \\( -type d -empty -delete \\) 2>/dev/null; echo StaticPages-scan-done";
+check('unixScanCommand(), switch off: the line 0.10.0 builds, character for character', $sp->wiper()->unixScanCommand($targets) === $literal, $sp->wiper()->unixScanCommand($targets));
+$sp->set('cacheNonHtml', 1);
+$parts = explode('; ', $sp->wiper()->unixScanCommand($targets));
+check('unixScanCommand(), switch on: the root find holds no index.xml, the targets find does', strpos($parts[0], 'index.xml') === false && strpos($parts[1], escapeshellarg('index.xml')) !== false && strpos($parts[1], escapeshellarg('.index.txt.*.tmp')) !== false, implode(' | ', $parts));
+rrmdir("$tmpRoot$Pdir");
+foreach($rootHand as $x) @unlink("$tmpRoot$x");
+
+//the default Non-static directories
+putFiles($tmpRoot, array("$Pdir/index.html", "$Pdir/a/index.xml"));
+$sp->set('cacheNonHtml', 1);
+$listedOn = in_array(ltrim($Pdir, '/'), $sp->defaultNonStaticDirs(), true);
+$sp->set('cacheNonHtml', 0);
+$listedOff = in_array(ltrim($Pdir, '/'), $sp->defaultNonStaticDirs(), true);
+check('defaultNonStaticDirs(): a page dir holding index.html and a/index.xml is not listed with the switch on, listed with it off', !$listedOn && $listedOff);
+
+//adoption
+@unlink("$tmpRoot$Pdir/index.html");
+$sp->index()->clearRows();
+$sp->set('cacheNonHtml', 0);
+$m->adoptStaticFiles();
+$adoptedOff = tagsOf($sp, "$Pdir/a/index.xml");
+$sp->set('cacheNonHtml', 1);
+$m->adoptStaticFiles();
+$adoptedOn = tagsOf($sp, "$Pdir/a/index.xml");
+check('adoption: an unrecorded a/index.xml is recorded with * with the switch on, not with it off', $adoptedOff === array() && $adoptedOn === array('*'), json_encode(array($adoptedOff, $adoptedOn)));
+
+//Q17 (a): a recorded index.xml under a tracked pattern is no source file while the switch is on
+$trackedBefore = $sp->get('trackedPaths');
+$sp->set('trackedPaths', ltrim($Pdir, '/') . '/');
+$sp->checkTrackedPaths(true);
+file_put_contents("$tmpRoot$Pdir/a/index.xml", 'changed, longer');
+$maxId = queueMaxId($sp);
+$sp->checkTrackedPaths(true);
+$queuedOn = queueRowsAfter($sp, $maxId);
+$sp->set('cacheNonHtml', 0);
+$excludedOff = $sp->tracker()->isExcludedFromTracking("$tmpRoot$Pdir/a/index.xml");
+$htmlOff = $sp->tracker()->isExcludedFromTracking("$tmpRoot$Pdir/a/index.html");
+check('tracked pattern over a recorded index.xml: its change queues nothing with the switch on; with it off isExcludedFromTracking() answers as 0.10.0 (index.xml no, index.html yes)', !count($queuedOn) && $excludedOff === false && $htmlOff === true, json_encode($queuedOn));
+if($trackedBefore === null) $sp->remove('trackedPaths');
+else $sp->set('trackedPaths', $trackedBefore);
+
+//uninstall by the index
+$sp->set('cacheNonHtml', 1);
+$sp->index()->clearRows();
+putFiles($tmpRoot, array("$Pdir/a/index.xml"));
+recordAll($sp, array("$Pdir/a/index.xml"));
+$out = htUninstall($sp);
+check('onUninstall() removes a recorded index.xml', !is_file("$tmpRoot$Pdir/a/index.xml") && !count($sp->index()->indexedFiles(null)), files($tmpRoot));
+htForget($tmp);
+rrmdir("$tmpRoot$Pdir");
+
+//a change of the stored switch on a save of the whole config wipes, before the value is stored
+$switchFiles = array("$Pdir/a/index.html", "$Pdir/b/index.xml");
+$setUpSwitch = function() use ($sp, $tmpRoot, $switchFiles) {
+	$sp->index()->clearRows();
+	putFiles($tmpRoot, $switchFiles);
+	recordAll($sp, $switchFiles);
+};
+$present = fn() => count(array_filter($switchFiles, fn($x) => is_file("$tmpRoot$x")));
+$base = $modules->getConfig('StaticPages');
+unset($base['cacheNonHtml']);
+$modules->saveConfig('StaticPages', $base);
+$sp->remove('cacheNonHtml');
+$seen = array();
+$seenHook = $wire->addHookBefore('Modules::saveConfig', function($e) use (&$seen, $modules, $present) {
+	if(is_array($e->arguments(1))) $seen[] = array($modules->getConfig('StaticPages', 'cacheNonHtml'), $present());
+}, array('priority' => 200));
+$setUpSwitch();
+$same = $base;
+$same['cacheNonHtml'] = 0;
+$modules->saveConfig('StaticPages', $same);
+$modules->saveConfig('StaticPages', $same);
+$modules->saveConfig('StaticPages', 'indexSchema', StaticPages::schemaVersion);
+check('a save keeping the switch (absent, then 0, twice) and a single key save remove nothing', $present() === 2 && count($sp->index()->indexedFiles(null)) === 2);
+$log0 = logText($tmp);
+$seen = array();
+$on = $base;
+$on['cacheNonHtml'] = 1;
+$modules->saveConfig('StaticPages', $on);
+check('a save turning the switch on removes the recorded files before the value is stored, and logs it', $present() === 0 && $seen === array(array(0, 0)) && (int) $modules->getConfig('StaticPages', 'cacheNonHtml') === 1 && strpos(substr(logText($tmp), strlen($log0)), 'Cache XML and plain text responses turned on') !== false, json_encode($seen));
+$sp->set('cacheNonHtml', 1);
+$setUpSwitch();
+$modules->saveConfig('StaticPages', $on);
+$modules->saveConfig('StaticPages', $on);
+check('a save with the switch on again, twice, removes nothing', $present() === 2);
+$off = $base;
+$off['cacheNonHtml'] = 0;
+$off['wipeDryRun'] = 1;
+$log0 = logText($tmp);
+$modules->saveConfig('StaticPages', $off);
+//a dry run save holds back every .htaccess write for the rest of the request: taken back
+$dryRunHeld = new \ReflectionProperty(StaticPagesHtaccess::class, 'dryRunSave');
+$dryRunHeld->setAccessible(true);
+$dryRunHeld->setValue($sp->htaccess(), false);
+$stored = $modules->getConfig('StaticPages');
+check('Q16 (a): a save turning the switch off with Dry run checked still wipes, stores the new value, clears Dry run', $present() === 0 && !count($sp->index()->indexedFiles(null)) && (int) $stored['cacheNonHtml'] === 0 && empty($stored['wipeDryRun']) && strpos(substr(logText($tmp), strlen($log0)), 'Cache XML and plain text responses turned off') !== false, json_encode($stored));
+$wire->removeHook($seenHook);
+$modules->saveConfig('StaticPages', $base);
+$sp->remove('cacheNonHtml');
+htForget($tmp);
+rrmdir("$tmpRoot$Pdir");
+
 ////  .htaccess manager (0.10.0)
 
 //when the manager runs: install, the check after a superuser's admin request or a CLI run, a
