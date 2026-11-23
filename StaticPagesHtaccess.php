@@ -158,8 +158,8 @@ class StaticPagesHtaccess extends Wire {
 
 	/**
 	 * Test seam of rootRoute(): a callable($name, $path) answering whether the generated block
-	 * holds the route of that root file line, asked in place of the generator; null: the block
-	 * holds no root file route yet
+	 * holds the route of that root file line, asked in place of the generator; null: the
+	 * generator answers
 	 *
 	 * #pw-internal
 	 *
@@ -246,6 +246,23 @@ class StaticPagesHtaccess extends Wire {
 			'flags' => '[L]',
 			);
 
+		//the other names a copy carries while "Cache XML and plain text responses" is on
+		//(index.xml, index.txt): the same rule, after the HTML one. No home rule: a copy of
+		//another type is never written for the home page [decided by user, Q9]
+		foreach( $this->scanNames() as $typed ){
+			if( $typed === $name ) continue;
+			$rules[] = array(
+				'comment' => 'A page, from its ' . $typed . ' copy, unless its directory holds an index file of its own.',
+				'conds' => array_merge( $serve, array(
+					array( '%{REQUEST_FILENAME}/index.php', '!-f' ),
+					array( '%{REQUEST_FILENAME}/' . $this->escape($typed), '-f' ),
+					) ),
+				'pattern' => '^(.+/)$',
+				'target' => '$1' . $this->escape($typed),
+				'flags' => '[L]',
+				);
+		}
+
 		//the stock rules answer an existing dir from disk: DirectoryIndex would serve the copy
 		//to a POST, a query string and a logged in user, and Options -Indexes a 403 to a dir
 		//holding no copy. The stock rule 19's substitution, so ProcessWire gets the same "it".
@@ -278,6 +295,21 @@ class StaticPagesHtaccess extends Wire {
 			'target' => 'index.php?it=$1',
 			'flags' => '[L,QSA]',
 			);
+
+		//"Replace these root files with pages": a request for the name that is no existing file
+		//goes to ProcessWire as the line's page; once the copy exists the stock rules serve it.
+		//The line rootRouteLines() suggests, in the form isRootFileRoute() reads
+		foreach( $this->rootFiles() as $root => $path ){
+			$rules[] = array(
+				'comment' => 'The root file ' . $root . ', from the page ' . $path . ' while it is no existing file.',
+				'conds' => array(
+					array( '%{REQUEST_FILENAME}', '!-f' ),
+					),
+				'pattern' => '^' . $this->escape($root) . '$',
+				'target' => 'index.php?it=' . $path,
+				'flags' => '[L,QSA]',
+				);
+		}
 
 		return array( 'rules' => $rules, 'notes' => $notes );
 	}
@@ -546,8 +578,12 @@ class StaticPagesHtaccess extends Wire {
 	}
 
 	protected function blockHoldsRoute($name, $path) {
-		//the generated block holds no root file route yet
+		//the generated block's rule for this root file line, see rules()
 		if( is_callable($this->blockRoute) ) return (bool) call_user_func( $this->blockRoute, $name, $path );
+		$result = $this->rules();
+		foreach( $result['rules'] as $rule ){
+			if( $rule['pattern'] === '^' . $this->escape($name) . '$' && $rule['target'] === 'index.php?it=' . $path ) return true;
+		}
 		return false;
 	}
 
@@ -1428,6 +1464,19 @@ class StaticPagesHtaccess extends Wire {
 		//what the generator and the heuristic call the static file
 		if( $this->settings === null ) return $this->sp->staticFileName();
 		return $this->sp->plainFileName( isset($this->settings['staticFile']) ? $this->settings['staticFile'] : 'index.html' );
+	}
+
+	protected function scanNames() {
+		//the names a copy carries: the HTML name, the typed ones while the switch is on
+		return $this->sp->scanFileNames( $this->settings );
+	}
+
+	protected function rootFiles() {
+		//the root file lines that are used, name => page path; none while "Cache XML and plain
+		//text responses" is off, as the module reads the list (StaticPages::rootFilesOf())
+		$on = $this->settings === null ? $this->sp->configValue('cacheNonHtml', 0) : ( isset($this->settings['cacheNonHtml']) ? $this->settings['cacheNonHtml'] : 0 );
+		if( empty($on) ) return array();
+		return $this->sp->rootFilesArray( $this->settings );
 	}
 
 	protected function keep() {
