@@ -658,12 +658,21 @@ class StaticPagesWiper extends Wire {
 		//stays where it is, a wipe renames nothing
 		$rootCopies = $this->recordedRootFiles();
 
+		//every other path the index or the manifest knows, read before both are emptied: a copy
+		//outside the scan targets (the home page with a URL segment) was left without its row.
+		//Each path once, the root files' pass first; a manifest line the HTML name alone
+		$recorded = array_values( array_diff( array_unique( array_values( $this->recordedFiles() ) ), $rootCopies ) );
+		$manifestLines = array_values( array_diff( $this->manifestLines(), $rootCopies, $recorded ) );
+
 		if( $dryRun ){
 			$targets = $this->scanTargets();
 			$result = $this->wipeScanPHP($targets, true);
 			$result['leftAlone'] = $this->leftAlone;
-			if( count($rootCopies) ) $result = $this->addCounts( $result, $this->deleteStaticFiles($rootCopies, true) );
-			return $result;
+			$byRecord = array();
+			if( count($rootCopies) ) $byRecord[] = $this->deleteStaticFiles($rootCopies, true);
+			if( count($recorded) ) $byRecord[] = $this->deleteStaticFiles($recorded, true);
+			if( count($manifestLines) ) $byRecord[] = $this->deleteStaticFiles($manifestLines, true, true);
+			return count($byRecord) ? $this->mergeDryRuns($result, $byRecord) : $result;
 		}
 
 		//rows first: a render recording while the scan runs keeps a row for a file the scan then
@@ -676,6 +685,8 @@ class StaticPagesWiper extends Wire {
 
 		//rows gone first: a copy that can not be unlinked gets its row back
 		$rootResult = count($rootCopies) ? $this->deleteStaticFiles($rootCopies) : null;
+		if( count($recorded) ) $rootResult = $this->addCounts( $rootResult ?? $this->emptyResult(), $this->deleteStaticFiles($recorded) );
+		if( count($manifestLines) ) $rootResult = $this->addCounts( $rootResult ?? $this->emptyResult(), $this->deleteStaticFiles($manifestLines, false, true) );
 
 		$targets = $this->scanTargets();
 		if( count($this->leftAlone) )
@@ -723,6 +734,59 @@ class StaticPagesWiper extends Wire {
 			if( $this->sp->index()->hasFile($relative) ) $files[] = $relative;
 		}
 		return $files;
+	}
+
+	public function recordedFiles(){
+		//hash => static root relative path of every indexed file, for the forced scan. Empty
+		//without index tables or when the query fails: the scan still runs
+		if( !$this->sp->index()->ensureTables() ) return array();
+		try {
+			return $this->sp->index()->indexedFiles(null);
+		}
+		catch( \Throwable $e ){
+			$this->sp->logDrain( 'full scan could not read the index: ' . $e->getMessage() );
+			return array();
+		}
+	}
+
+	public function manifestLines(){
+		//the manifest's lines, each once; empty without a manifest
+		$manifest = $this->sp->manifestPath();
+		if( !is_file($manifest) ) return array();
+		$lines = @file( $manifest, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
+		return $lines === false ? array() : array_values( array_unique($lines) );
+	}
+
+	private function mergeDryRuns(array $scan, array $byRecord){
+		//a dry run scan and the dry runs by record as one list: a path any of them lists once,
+		//its file counted once, and the dirs worked out again for every file listed, as the
+		//deletes and pruneDirs() would leave them. Files listed by record are never temporary
+		//names, so each one the scan did not list adds one file
+		$root = $this->sp->staticRoot();
+		$files = array();
+		$dirs = array();
+		foreach( $scan['paths'] as $relative ){
+			if( substr($relative, -1) === '/' ) $dirs[ rtrim( $root . $relative, '/' ) ] = true;
+			else $files[$relative] = true;
+		}
+		foreach( $byRecord as $more ){
+			foreach( $more['paths'] as $relative ){
+				if( substr($relative, -1) === '/' || isset($files[$relative]) ) continue;
+				$files[$relative] = true;
+				$scan['files']++;
+				$scan['bytes'] += (int) @filesize( $root . $relative );
+			}
+		}
+		$deleted = array();
+		foreach( array_keys($files) as $relative ){
+			$deleted[ $this->sp->normalizePath( $root . $relative ) ] = true;
+			$dirs[ dirname( $root . $relative ) ] = true;
+		}
+		$gone = $this->simulatePrune( array_keys($dirs), $this->sp->normalizePath($root), $deleted );
+		$scan['paths'] = array_keys($files);
+		foreach( $gone as $dir ) $scan['paths'][] = $this->relativePath($dir) . '/';
+		$scan['dirs'] = count($gone);
+		return $scan;
 	}
 
 	private function addCounts(array $result, array $more){

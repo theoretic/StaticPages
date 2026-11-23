@@ -1987,6 +1987,87 @@ check('unixScanCommand(), switch on: the root find holds no index.xml, the targe
 rrmdir("$tmpRoot$Pdir");
 foreach($rootHand as $x) @unlink("$tmpRoot$x");
 
+////  a forced scan removes what the index knew first (0.12.0)
+
+//the home page with a URL segment writes <root>/<segment>/index.html, a root dir no page is
+//named like: the scan leaves it alone, the delete by record does not
+$sp->index()->clearRows();
+$sp->set('cacheNonHtml', 1);
+$fsSeg = 'sp-seg-' . getmypid();
+$fsHome = function() use ($sp, $wire, $home, $fsSeg, $tmpRoot) {
+	$wire->input->setUrlSegment(1, $fsSeg);
+	publish($sp, $home);
+	$wire->input->setUrlSegment(1, null);
+	return is_file("$tmpRoot/$fsSeg/index.html") && $sp->index()->hasFile("/$fsSeg/index.html");
+};
+foreach(array(0, 1) as $shell) {
+	$sp->set('useShell', $shell);
+	$label = $shell ? (PHP_OS_FAMILY === 'Windows' ? 'PowerShell' : 'find') : 'PHP walk';
+	$fsSeen = array($fsHome());
+	$sp->wipeCaches(true);
+	$fsSeen = array_merge($fsSeen, array(is_file("$tmpRoot/$fsSeg/index.html"), is_dir("$tmpRoot/$fsSeg"), $sp->index()->hasFile("/$fsSeg/index.html")));
+	check("forced wipe ($label): a recorded copy outside the scan targets (the home page with a URL segment, <root>/<segment>/index.html) is deleted with its dir, its row gone", $fsSeen === array(true, false, false, false), json_encode($fsSeen) . ' ' . files($tmpRoot));
+	rrmdir("$tmpRoot/$fsSeg");
+}
+
+//recorded paths a guard refuses: a protected dir, a foreign basename inside and outside the targets
+$fsGuard = array('/vendor/sp-guard/index.html', "/$fsSeg/notes.txt", "$Pdir/a/index.php");
+foreach(array(0, 1) as $shell) {
+	$sp->set('useShell', $shell);
+	$label = $shell ? (PHP_OS_FAMILY === 'Windows' ? 'PowerShell' : 'find') : 'PHP walk';
+	putFiles($tmpRoot, $fsGuard);
+	recordAll($sp, $fsGuard);
+	$sp->wipeCaches(true);
+	$fsKept = array_values(array_filter($fsGuard, fn($x) => is_file("$tmpRoot$x")));
+	check("forced wipe ($label): recorded paths a guard refuses survive (vendor/ listed, notes.txt, a/index.php)", $fsKept === $fsGuard, files($tmpRoot));
+}
+$sp->set('useShell', 0);
+rrmdir("$tmpRoot/vendor/sp-guard");
+rrmdir("$tmpRoot/$fsSeg");
+rrmdir("$tmpRoot$Pdir");
+$sp->index()->clearRows();
+
+//the dry run: recorded copies outside the targets (one an index.xml), a recorded and an
+//unrecorded copy inside them, each listed and counted once; the scan then removes exactly that
+$fsHome();
+putFiles($tmpRoot, array("$Pdir/a/index.html", "$Pdir/b/index.html", "/$fsSeg/x/index.xml"));
+recordAll($sp, array("$Pdir/a/index.html", "/$fsSeg/x/index.xml"));
+$fsFiles = array("/$fsSeg/index.html", "/$fsSeg/x/index.xml", "$Pdir/a/index.html", "$Pdir/b/index.html");
+$fsDirs = array("/$fsSeg/", "/$fsSeg/x/", "$Pdir/", "$Pdir/a/", "$Pdir/b/");
+$fsBytes = array_sum(array_map(fn($x) => filesize("$tmpRoot$x"), $fsFiles));
+$before = files($tmpRoot);
+$rowsBefore = count($sp->index()->indexedFiles(null));
+$dry = $sp->wipeCaches(true, true);
+$paths = $dry['paths'] ?? array();
+sort($paths);
+$fsExpected = array_merge($fsFiles, $fsDirs);
+sort($fsExpected);
+check('forced wipe dry run: a recorded copy outside the targets, a recorded index.xml outside them, a recorded and an unrecorded copy inside them: each path listed once, files, bytes and dirs counted once, nothing deleted, no row dropped', $paths === $fsExpected && $dry['files'] === 4 && $dry['bytes'] === $fsBytes && $dry['dirs'] === 5 && files($tmpRoot) === $before && count($sp->index()->indexedFiles(null)) === $rowsBefore, json_encode(array($paths, $dry['files'] ?? null, $dry['bytes'] ?? null, $fsBytes, $dry['dirs'] ?? null)));
+$walk = $sp->wipeCaches(true);
+$gone = array_values(array_diff(explode(' ', $before), explode(' ', files($tmpRoot))));
+sort($gone);
+check('...the forced wipe then removes exactly what the dry run listed, equal counts, no row left', $gone === $paths && is_array($walk) && $walk['files'] === 4 && $walk['bytes'] === $fsBytes && $walk['dirs'] === 5 && !count($sp->index()->indexedFiles(null)), json_encode(array($gone, $walk)));
+
+//switch off: a recorded index.xml goes by its record, as wipeIndexed() does it [decided by user, Q48 E (a)]
+$sp->set('cacheNonHtml', 0);
+putFiles($tmpRoot, array("/$fsSeg/index.xml", "$Pdir/a/index.xml"));
+recordAll($sp, array("/$fsSeg/index.xml", "$Pdir/a/index.xml"));
+$sp->wipeCaches(true);
+check('forced wipe, switch off: recorded index.xml copies inside and outside the targets are deleted by their record, dirs pruned', !file_exists("$tmpRoot/$fsSeg") && !file_exists("$tmpRoot$Pdir") && !count($sp->index()->indexedFiles(null)), files($tmpRoot));
+$sp->set('cacheNonHtml', 1);
+
+//a manifest line: the HTML copy outside the targets goes, an index.xml line deletes nothing
+$fsManifest = $sp->manifestPath();
+$fsManifestBefore = is_file($fsManifest) ? file_get_contents($fsManifest) : null;
+putFiles($tmpRoot, array("/$fsSeg/m/index.html", "/$fsSeg/m/index.xml"));
+file_put_contents($fsManifest, "/$fsSeg/m/index.html\n/$fsSeg/m/index.xml\n");
+$sp->wipeCaches(true);
+check('forced wipe: a manifest line outside the targets deletes its HTML copy, an index.xml line nothing; the manifest is emptied', !is_file("$tmpRoot/$fsSeg/m/index.html") && is_file("$tmpRoot/$fsSeg/m/index.xml") && (string) @file_get_contents($fsManifest) === '', files($tmpRoot));
+if($fsManifestBefore !== null) file_put_contents($fsManifest, $fsManifestBefore);
+else @unlink($fsManifest);
+rrmdir("$tmpRoot/$fsSeg");
+$sp->index()->clearRows();
+
 //the default Non-static directories
 putFiles($tmpRoot, array("$Pdir/index.html", "$Pdir/a/index.xml"));
 $sp->set('cacheNonHtml', 1);
@@ -2878,6 +2959,32 @@ $log0 = logText($tmp);
 publish($sp, $B);
 $noMarker[] = !is_dir("$bAbs$Pdir/b9") && strpos($since($log0), "skip $Pdir/b9/: the Static base directory $bRel holds no marker file .staticpages") !== false;
 check('a base dir without the marker: wipeCaches(), wipeCaches(true) (PHP walk, shell) and a drain delete nothing, keep the row and log it; a publish writes nothing, skip logged', $noMarker === array(true, true, true, 4, true), json_encode($noMarker));
+$bReset();
+
+//a forced scan with the index read first, below the base dir: every copy lies inside the scan,
+//so these rows only say nothing changed (deleted once, listed once, a foreign name stays)
+//[decided by user, Q48 D (a)]
+foreach(array(0, 1) as $shell) {
+	$sp->set('useShell', $shell);
+	$label = $shell ? (PHP_OS_FAMILY === 'Windows' ? 'PowerShell' : 'find') : 'PHP walk';
+	publish($sp, $A);
+	putFiles($bAbs, array("$Pdir/x/index.xml", "$Pdir/f/notes.txt"));
+	recordAll($sp, array("$Pdir/x/index.xml", "$Pdir/f/notes.txt"));
+	$bfSeen = array('written' => is_file($bA) && $sp->index()->hasFile("$Pdir/a/index.html"));
+	if(!$shell) {
+		$dry = $sp->wipeCaches(true, true);
+		$dryPaths = $dry['paths'] ?? array();
+		$bfSeen['dry once'] = count(array_keys($dryPaths, "$Pdir/a/index.html", true)) === 1 && count(array_keys($dryPaths, "$Pdir/x/index.xml", true)) === 1 && !in_array("$Pdir/f/notes.txt", $dryPaths, true) && $dry['files'] === 2 && is_file($bA);
+	}
+	$walk = $sp->wipeCaches(true);
+	$bfSeen['gone'] = !is_file($bA) && !file_exists("$bAbs$Pdir/x") && !count($sp->index()->indexedFiles(null));
+	$bfSeen['foreign kept'] = is_file("$bAbs$Pdir/f/notes.txt") && is_file($bMarker);
+	if(!$shell) $bfSeen['counted once'] = is_array($walk) && $walk['files'] === 2;
+	check("base dir, forced wipe ($label): a recorded copy and a recorded index.xml deleted once (dry run lists each once), a recorded foreign name stays", !in_array(false, $bfSeen, true), json_encode($bfSeen) . ' ' . files($bAbs));
+	@unlink("$bAbs$Pdir/f/notes.txt");
+	rrmdir("$bAbs$Pdir");
+}
+$sp->set('useShell', 0);
 $bReset();
 
 //a settings save: a changed value wipes under the old root first, the same value twice nothing
