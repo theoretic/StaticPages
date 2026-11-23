@@ -61,6 +61,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	//null: the loaded setting
 	private $baseDirOverride = null;
 
+	//"Key static files by host" read from this value instead of the loaded setting, see
+	//hostKeyOn(); null: the loaded setting
+	private $hostKeyOverride = null;
+
 	//the refused base directory values logged in this request, see staticBaseDir()
 	private $baseDirLogged = array();
 
@@ -545,7 +549,11 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$new = !empty( $data['cacheNonHtml'] );
 		$oldBase = $this->staticBaseDir($storedConfig);
 		$newBase = $this->staticBaseDir($data);
-		if( $stored === $new && $oldBase === $newBase ) return;
+		//"Static files per host" as used, not the stored box: toggled without a base directory it
+		//changes nothing and wipes nothing [decided by user, Q38 E (a)]
+		$oldKey = $this->hostKeyOn($storedConfig);
+		$newKey = $this->hostKeyOn($data);
+		if( $stored === $new && $oldBase === $newBase && $oldKey === $newKey ) return;
 		$what = array();
 		if( $stored !== $new ){
 			$this->logDrain( 'Cache XML and plain text responses turned ' . ( $new ? 'on' : 'off' ) . ': every static copy is wiped' );
@@ -555,8 +563,12 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->logDrain( 'Static base directory changed from ' . ( $oldBase === '' ? 'none' : $oldBase ) . ' to ' . ( $newBase === '' ? 'none' : $newBase ) . ': every static copy under the old root is wiped' );
 			$what[] = 'Static base directory';
 		}
+		if( $oldKey !== $newKey ){
+			$this->logDrain( 'Static files per host turned ' . ( $newKey ? 'on' : 'off' ) . ': every static copy under the old layout is wiped' );
+			$what[] = 'Static files per host';
+		}
 		try {
-			$this->withBaseDir( isset($storedConfig['staticBaseDir']) ? $storedConfig['staticBaseDir'] : '', fn() => $this->wipeCaches() );
+			$this->withBaseDir( isset($storedConfig['staticBaseDir']) ? $storedConfig['staticBaseDir'] : '', fn() => $this->withHostKey( !empty($storedConfig['staticHostKey']), fn() => $this->wipeCaches() ) );
 		}
 		catch( \Throwable $e ){
 			$this->logDrain( 'the wipe on ' . implode(' and ', $what) . ' failed: ' . $e->getMessage() );
@@ -817,7 +829,21 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//$base: what $path is made relative to and pruned up to, the static root, which also
 		//holds a root file's copy: the site root, or the base directory
 		$base = $this->staticRoot();
-		$dir = $base . $page->path;
+
+		//"Static files per host": the copies of each host in a dir of their own below the base
+		//directory, <base>/<host>/; $base stays the static root, the relative paths carry the host
+		//[decided by user, Q38 B (a)]. A host that is not the configured one is no dir at all
+		$hostDir = '';
+		if( $this->hostKeyOn() ){
+			list( $host, $why ) = $this->staticHost();
+			if( $host === '' ){
+				$this->logSkip( $page, "Static files per host: $why" );
+				return;
+			}
+			$hostDir = "/$host";
+		}
+
+		$dir = $base . $hostDir . $page->path;
 		if( $urlSegmentStr !='' ) $dir.= "$urlSegmentStr/";
 		$path = $dir.$staticFile;
 
@@ -832,7 +858,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 				$this->logSkip( $page, 'the page is listed in Replace these root files with pages as ' . implode( ', ', $rootFiles ) . ", a $type render is not written" );
 				return;
 			}
-			$dir = $base . '/';
+			$dir = $base . $hostDir . '/';
 			$path = $dir . $rootFile;
 		}
 
@@ -1410,6 +1436,56 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		}
 		finally {
 			$this->baseDirOverride = $before;
+		}
+	}
+
+	/** #pw-internal */
+	public function hostKeyOn(?array $data = null){
+		//"Static files per host" as used: checked and a base directory in use (as staticBaseDir()
+		//answers); without a base directory the box changes nothing. $data as in staticBaseDir()
+		if( $data !== null ) $on = !empty( $data['staticHostKey'] );
+		else if( $this->hostKeyOverride !== null ) $on = $this->hostKeyOverride;
+		else $on = !empty( $this->configValue('staticHostKey', 0) );
+		return $on && $this->staticBaseDir($data) !== '';
+	}
+
+	/** #pw-internal */
+	public function staticHost(){
+		//array(the host dir of this request, '' when there is none; why not). The host is
+		//$config->httpHost lower-cased; the request's Host header, lower-cased, has to be that very
+		//host (core answers the first of $config->httpHosts for a host it does not know) [decided
+		//by user, Q38 A (b)], and it has to be listed in $config->httpHosts. ':' becomes '_'
+		$config = $this->wire()->config;
+		$clean = fn($s) => preg_replace( '/[\x00-\x1f\x7f]/', ' ', (string) $s );
+		$host = strtolower( (string) $config->httpHost );
+		if( $host === '' ) return array('', 'the host is empty');
+		$request = isset($_SERVER['HTTP_HOST']) ? strtolower( (string) $_SERVER['HTTP_HOST'] ) : '';
+		if( $request !== $host ) return array('', 'the request\'s host "' . $clean($request) . '" is not $config->httpHost "' . $clean($host) . '"');
+		$listed = array();
+		foreach( (array) $config->httpHosts as $listedHost ) $listed[] = strtolower( (string) $listedHost );
+		if( !in_array( $host, $listed, true ) ) return array('', 'the host "' . $clean($host) . '" is not listed in $config->httpHosts');
+		$dir = str_replace( ':', '_', $host );
+		if( !$this->isHostDir($dir) ) return array('', 'the host "' . $clean($host) . '" is no plain host name');
+		return array($dir, '');
+	}
+
+	/** #pw-internal */
+	public function isHostDir($name){
+		//one dir name a host may be stored under: lower case letters, digits, . _ -, no leading
+		//dot, no .. anywhere [decided by user, Q38 F (b)]
+		$name = (string) $name;
+		return preg_match('/^[a-z0-9_-][a-z0-9._-]*$/D', $name) === 1 && strpos( $name, '..' ) === false;
+	}
+
+	private function withHostKey($on, callable $fn){
+		//$fn() with "Static files per host" read as $on, as withBaseDir()
+		$before = $this->hostKeyOverride;
+		$this->hostKeyOverride = (bool) $on;
+		try {
+			return $fn();
+		}
+		finally {
+			$this->hostKeyOverride = $before;
 		}
 	}
 

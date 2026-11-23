@@ -1208,6 +1208,16 @@ $tpl = $wire->templates->get('default') ?: $home->template;
 $fixtures = array();
 //template id => array(template, contentType at start): a contentType changed in memory, put back
 $contentTypesAtStart = array();
+//$config->httpHost, $config->httpHosts and the request's Host header, set by the host key block:
+//put back at its end and by cleanup()
+$hostsAtStart = array($config->httpHost, $config->httpHosts, array_key_exists('HTTP_HOST', $_SERVER), $_SERVER['HTTP_HOST'] ?? null);
+function restoreHosts() {
+	global $config, $hostsAtStart;
+	$config->httpHost = $hostsAtStart[0];
+	$config->httpHosts = $hostsAtStart[1];
+	if($hostsAtStart[2]) $_SERVER['HTTP_HOST'] = $hostsAtStart[3];
+	else unset($_SERVER['HTTP_HOST']);
+}
 
 //removes the fixture pages and puts the module config back. Called at the end, and from a
 //shutdown function when a fatal error or an exit() ends the script before that: a PHP fatal
@@ -1219,6 +1229,7 @@ function cleanup() {
 	if($cleanedUp) return;
 	$cleanedUp = true;
 	foreach($contentTypesAtStart as $t) $t[0]->contentType = $t[1];
+	restoreHosts();
 	$sp->publisher()->responseHeaders = null;
 	//the script may have died while the install's own root was in use
 	realPaths(false);
@@ -2979,6 +2990,226 @@ if(!$siteExisted) { @rmdir("$tmpRoot/site/assets"); @rmdir("$tmpRoot/site"); }
 htClean($tmpRoot);
 check('base dir block: the stored config as before, no base dir, robots.txt, .robots.txt or .htaccess left on the temporary root', $modules->getConfig('StaticPages') == $rootBase && !is_dir($bAbs) && !file_exists($robots) && !file_exists($dotRobots) && !file_exists($htFile) && $sp->staticRoot() === $sp->rootPath(), files($tmpRoot));
 
+////  Static files per host (0.12.0)
+
+//$config->httpHost, $config->httpHosts and the request's Host header are set per case, put back
+//at the end of this block and by cleanup(). Host names are fixtures, no request leaves the machine
+$hSet = function($host, array $hosts, $request = null) use ($config) {
+	$config->httpHost = $host;
+	$config->httpHosts = $hosts;
+	$_SERVER['HTTP_HOST'] = $request === null ? $host : $request;
+};
+$hList = array('example.test', 'www.example.test');
+$hA = fn($host) => "$bAbs/$host$Pdir/a/index.html";
+$bReset();
+$sp->remove('staticBaseDir');
+$sp->remove('staticHostKey');
+$sp->set('cacheNonHtml', 1);
+$bSave(array('staticBaseDir' => '', 'cacheNonHtml' => 1));
+
+//without a base directory the box changes nothing: a copy in the web root, no wipe when it is
+//saved on or off [decided by user, Q38 E (a)]
+$hSet('example.test', $hList);
+$sp->set('staticHostKey', 1);
+publish($sp, $A);
+$hNone = array('on' => $sp->hostKeyOn(), 'file' => is_file("$tmpRoot$Pdir/a/index.html"), 'rows' => array_values($sp->index()->indexedFiles(null)));
+$log0 = logText($tmp);
+$bSave(array('staticBaseDir' => '', 'cacheNonHtml' => 1, 'staticHostKey' => 1));
+$bSave(array('staticBaseDir' => '', 'cacheNonHtml' => 1, 'staticHostKey' => 0));
+$hNone['saves'] = is_file("$tmpRoot$Pdir/a/index.html") && count($sp->index()->indexedFiles(null)) === 1 && strpos($since($log0), 'Static files per host') === false;
+check('host key on without a base dir changes nothing: the copy at <P>/a/index.html in the web root; saving the box on and off wipes nothing', $hNone === array('on' => false, 'file' => true, 'rows' => array("$Pdir/a/index.html"), 'saves' => true), json_encode($hNone));
+$sp->remove('staticHostKey');
+$sp->wipeCaches();
+rrmdir("$tmpRoot$Pdir");
+
+//a save switching the key on removes the files indexed under the old layout before the value is
+//stored, logged
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1));
+$sp->set('staticBaseDir', $bRel);
+publish($sp, $A);
+$hSeen = array();
+$hSeenHook = $wire->addHookBefore('Modules::saveConfig', function($e) use (&$hSeen, $modules, $bA) {
+	if(is_array($e->arguments(1))) $hSeen[] = array(!empty($modules->getConfig('StaticPages', 'staticHostKey')), is_file($bA));
+}, array('priority' => 200));
+$log0 = logText($tmp);
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'staticHostKey' => 1));
+$wire->removeHook($hSeenHook);
+$sp->set('staticHostKey', 1);
+check('a save switching the host key on (base dir set) removes the indexed <base>/<P>/a/index.html before the value is stored, logged', $hSeen === array(array(false, false)) && !is_file($bA) && !count($sp->index()->indexedFiles(null)) && (int) $modules->getConfig('StaticPages', 'staticHostKey') === 1 && strpos($since($log0), 'Static files per host turned on: every static copy under the old layout is wiped') !== false && is_file($bMarker), json_encode($hSeen) . ' ' . $since($log0));
+$log0 = logText($tmp);
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'staticHostKey' => 1));
+check('...the same value again wipes nothing more, logs nothing', strpos($since($log0), 'Static files per host turned') === false);
+
+//two listed hosts, two copies, one save removes both
+$hSeen = array();
+foreach($hList as $host) {
+	$hSet($host, $hList);
+	publish($sp, $A);
+}
+$rows = array_values($sp->index()->indexedFiles(null));
+sort($rows);
+$hSeen['written'] = is_file($hA('example.test')) && is_file($hA('www.example.test')) && $rows === array("/example.test$Pdir/a/index.html", "/www.example.test$Pdir/a/index.html");
+$saveA('H1');
+$hSeen['saved'] = !is_file($hA('example.test')) && !is_file($hA('www.example.test')) && !is_dir("$bAbs/example.test") && !is_dir("$bAbs/www.example.test") && is_file($bMarker) && !count($sp->index()->indexedFiles(null));
+check('host key on: $config->httpHost example.test writes <base>/example.test/<P>/a/index.html, www.example.test its own copy, rows /<host>/...; a save removes both and the empty host dirs, the marker stays', $hSeen === array('written' => true, 'saved' => true), json_encode($hSeen) . ' ' . json_encode($rows) . ' ' . files($bAbs));
+
+//hosts that are no dir: not listed, not the request's host, no plain name, empty [decided by user,
+//Q38 A (b), F (b)]
+$hRefused = array(
+	'not listed' => array('other.test', array('example.test'), null, 'the host "other.test" is not listed in $config->httpHosts'),
+	'no httpHosts' => array('example.test', array(), null, 'is not listed in $config->httpHosts'),
+	'unconfigured Host header' => array('example.test', $hList, 'evil.test', 'the request\'s host "evil.test" is not $config->httpHost "example.test"'),
+	'no Host header' => array('example.test', $hList, '', 'the request\'s host "" is not'),
+	'a/b' => array('a/b', array('a/b'), null, 'no plain host name'),
+	'..' => array('..', array('..'), null, 'no plain host name'),
+	'.' => array('.', array('.'), null, 'no plain host name'),
+	'a..b' => array('a..b', array('a..b'), null, 'no plain host name'),
+	'.hidden' => array('.hidden', array('.hidden'), null, 'no plain host name'),
+	'empty' => array('', array(''), null, 'the host is empty'),
+);
+$hSeen = array();
+foreach($hRefused as $label => $case) {
+	$hSet($case[0], $case[1], $case[2]);
+	$before = files($tmpRoot);
+	$log0 = logText($tmp);
+	publish($sp, $A);
+	$hSeen[$label] = files($tmpRoot) === $before && !count($sp->index()->indexedFiles(null)) && strpos($since($log0), "skip $Pdir/a/: Static files per host: ") !== false && strpos($since($log0), $case[3]) !== false;
+}
+check('host key on: a host not in $config->httpHosts, none listed, a Host header that is not $config->httpHost (or none), a/b, .., ., a..b, .hidden, an empty host: no file, no dir, no row, skip logged', !in_array(false, $hSeen, true), json_encode($hSeen));
+
+//a port and upper case
+$hSeen = array();
+$hSet('example.test:8080', array('example.test:8080'));
+publish($sp, $A);
+$hSeen['port'] = is_file($hA('example.test_8080')) && $sp->index()->hasFile("/example.test_8080$Pdir/a/index.html");
+$hSet('example.test', $hList, 'EXAMPLE.Test');
+publish($sp, $A);
+$hSeen['request upper'] = is_file($hA('example.test')) && in_array('example.test', (array) scandir($bAbs), true) && $sp->index()->hasFile("/example.test$Pdir/a/index.html");
+$sp->wipeCaches();
+$hSet('Example.TEST', $hList, 'example.test');
+publish($sp, $A);
+$hSeen['httpHost upper'] = is_file($hA('example.test')) && in_array('example.test', (array) scandir($bAbs), true) && !in_array('Example.TEST', (array) scandir($bAbs), true) &&$sp->index()->hasFile("/example.test$Pdir/a/index.html");
+$sp->wipeCaches();
+$hSeen['wiped'] = files($bAbs) === '/' . StaticPages::baseDirMarker;
+check('host key on: example.test:8080 is stored as example.test_8080, a Host header EXAMPLE.Test and an httpHost Example.TEST as example.test; a wipe removes them', !in_array(false, $hSeen, true) && count($hSeen) === 4, json_encode($hSeen) . ' ' . files($bAbs));
+
+//the home page of an XML template
+$hSet('example.test', $hList);
+$homeTpl->contentType = 'xml';
+$log0 = logText($tmp);
+publish($sp, $home, array(), $body);
+$homeTpl->contentType = $homeType;
+check('host key on: the home page with an XML template writes no <base>/example.test/index.xml, skip logged', !file_exists("$bAbs/example.test") && strpos($since($log0), 'a non-html copy of the home page is not written') !== false, files($bAbs));
+
+//root files: <base>/<host>/robots.txt, found by the files table's paths for every delete
+//[decided by user, Q38 C (b)]
+$hR = $mk($P, 'r10', 'R10');
+$sp->drain();
+$hLine = "robots.txt {$hR->path}";
+$hRobots = fn($host) => "$bAbs/$host/robots.txt";
+$hBoth = function() use ($sp, $hR, $hSet, $hList, $txtBody, $tpl, $tplType) {
+	$tpl->contentType = 'txt';
+	foreach($hList as $host) {
+		$hSet($host, $hList);
+		publish($sp, $hR, array(), $txtBody);
+	}
+	$tpl->contentType = $tplType;
+	$hSet('example.test', $hList);
+};
+$hNoCopy = fn() => !file_exists($hRobots('example.test')) && !file_exists($hRobots('www.example.test')) && !$sp->index()->hasFile('/example.test/robots.txt') && !$sp->index()->hasFile('/www.example.test/robots.txt');
+$rootReset($original);
+$sp->set('rootFiles', $hLine);
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'staticHostKey' => 1, 'rootFiles' => $hLine));
+$hSeen = array();
+$hBoth();
+$hSeen['written'] = $bytesOf($hRobots('example.test')) === $txtBody && $bytesOf($hRobots('www.example.test')) === $txtBody && $sp->index()->hasFile('/example.test/robots.txt') && !$sp->index()->hasFile('/robots.txt') && !file_exists("$bAbs/robots.txt") && $bytesOf($robots) === $original;
+$r = $pages->get($hR->id);
+$r->title = 'R10 saved';
+$pages->save($r);
+$sp->drain();
+$hSeen['page save'] = $hNoCopy();
+$hBoth();
+$sp->wipeCaches();
+$hSeen['wipe'] = $hNoCopy();
+foreach(array(0, 1) as $shell) {
+	$sp->set('useShell', $shell);
+	$hBoth();
+	$sp->wipeCaches(true);
+	$hSeen["scan $shell"] = $hNoCopy() && is_file($bMarker);
+}
+$sp->set('useShell', 0);
+$hBoth();
+$hR2 = $mk($P, 'r11', 'R11');
+$sp->drain();
+$hBoth();
+$log0 = logText($tmp);
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'staticHostKey' => 1, 'rootFiles' => "robots.txt {$hR2->path}"));
+$hSeen['page path changed'] = $hNoCopy() && strpos($since($log0), 'root file robots.txt: the copy /www.example.test/robots.txt was deleted') !== false;
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'staticHostKey' => 1, 'rootFiles' => $hLine));
+//a host since removed from $config->httpHosts: its copy is still found by its path
+$tpl->contentType = 'txt';
+$hSet('old.test', array('old.test'));
+publish($sp, $hR, array(), $txtBody);
+$tpl->contentType = $tplType;
+$hSet('example.test', $hList);
+$hOld = $bytesOf($hRobots('old.test')) === $txtBody;
+$log0 = logText($tmp);
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'staticHostKey' => 1, 'rootFiles' => ''));
+$hSeen['unlisted host, name removed'] = $hOld && !file_exists($hRobots('old.test')) && !$sp->index()->hasFile('/old.test/robots.txt') && strpos($since($log0), 'root file robots.txt: the copy /old.test/robots.txt was deleted') !== false;
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'staticHostKey' => 1, 'rootFiles' => $hLine));
+$hBoth();
+htClean($tmpRoot);
+htUninstall($sp);
+htForget($tmp);
+htClean($tmpRoot);
+$hSeen['uninstall'] = $hNoCopy() && !count($sp->index()->indexedFiles(null)) && is_file($bMarker);
+$hSeen['web root'] = $bytesOf($robots) === $original && !file_exists($dotRobots);
+check('host key on, robots.txt listed: written to <base>/example.test/robots.txt and <base>/www.example.test/robots.txt; a page save, a wipe, a forced scan (both walks), a changed page path, a name leaving the list (also for old.test, a host no longer in httpHosts) and onUninstall() delete them by their rows; the web root\'s robots.txt untouched', !in_array(false, $hSeen, true) && count($hSeen) === 9, json_encode($hSeen) . ' ' . files($bAbs));
+
+//a root name is deleted only at /<name> or /<host>/<name>, <host> one plain host dir; with the key
+//off only at /<name>, as before
+$hBad = array("/x/y/robots.txt", '/.h/robots.txt', '/a..b/robots.txt', '/Upper/robots.txt');
+putFiles($bAbs, $hBad);
+recordAll($sp, $hBad);
+$sp->wipeCaches();
+$hSeen = array('bad kept' => count(array_filter($hBad, fn($x) => is_file("$bAbs$x"))) === count($hBad));
+foreach($hBad as $x) @unlink("$bAbs$x");
+foreach(array('/x/y', '/x', '/.h', '/a..b', '/Upper') as $x) @rmdir("$bAbs$x");
+$sp->set('staticHostKey', 0);
+putFiles($bAbs, array('/example.test/robots.txt'));
+recordAll($sp, array('/example.test/robots.txt'));
+$sp->wipeCaches();
+$hSeen['key off kept'] = is_file($hRobots('example.test'));
+@unlink($hRobots('example.test'));
+@rmdir("$bAbs/example.test");
+$sp->set('staticHostKey', 1);
+check('a recorded robots.txt at /x/y/, /.h/, /a..b/ or /Upper/ is not deleted by a wipe; with the key off neither is /example.test/robots.txt', $hSeen === array('bad kept' => true, 'key off kept' => true), json_encode($hSeen) . ' ' . files($bAbs));
+
+//a save switching the key off removes the host copies, root file copies included
+$hBoth();
+publish($sp, $A);
+$log0 = logText($tmp);
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'staticHostKey' => 0, 'rootFiles' => $hLine));
+$sp->set('staticHostKey', 0);
+check('a save switching the host key off removes every host copy, robots.txt ones included, logged; the host dirs go', $hNoCopy() && !is_file($hA('example.test')) && !is_dir("$bAbs/example.test") && !is_dir("$bAbs/www.example.test") && !count($sp->index()->indexedFiles(null)) && strpos($since($log0), 'Static files per host turned off') !== false, files($bAbs) . ' ' . $since($log0));
+
+restoreHosts();
+$sp->remove('staticHostKey');
+$sp->remove('rootFiles');
+$sp->remove('cacheNonHtml');
+$sp->remove('staticBaseDir');
+$tpl->contentType = $tplType;
+$modules->saveConfig('StaticPages', $rootBase);
+$pages->delete($pages->get($hR2->id), true);
+$pages->delete($pages->get($hR->id), true);
+$sp->drain();
+$sp->index()->clearRows();
+$bReset();
+if(!$siteExisted) { @rmdir("$tmpRoot/site/assets"); @rmdir("$tmpRoot/site"); }
+$rootReset();
+htClean($tmpRoot);
+check('host key block: $config->httpHost, $config->httpHosts and the Host header as before; the stored config as before; no base dir, robots.txt or .htaccess left on the temporary root', $config->httpHost === $hostsAtStart[0] && $config->httpHosts === $hostsAtStart[1] && array_key_exists('HTTP_HOST', $_SERVER) === $hostsAtStart[2] && $modules->getConfig('StaticPages') == $rootBase && !is_dir($bAbs) && !file_exists($robots) && !file_exists($htFile), files($tmpRoot));
+
 ////  .htaccess manager (0.10.0)
 
 //when the manager runs: install, the check after a superuser's admin request or a CLI run, a
@@ -3540,6 +3771,9 @@ check('"Replace these root files with pages" is an empty textarea whose notes na
 $field = $form ? $form->getChildByName('staticBaseDir') : null;
 $notes = $field ? (string) $field->notes : '';
 check('"Static base directory" is an empty text field whose notes name the marker .staticpages and say a copy is not served yet', $field instanceof InputfieldText && !($field instanceof InputfieldTextarea) && (string) $field->attr('value') === '' && strpos($notes, '.staticpages') !== false && strpos($notes, 'not served') !== false, $notes);
+$field = $form ? $form->getChildByName('staticHostKey') : null;
+$notes = $field ? (string) $field->notes : '';
+check('"Static files per host" is an unchecked checkbox shown with a base directory, whose notes name httpHosts', $field instanceof InputfieldCheckbox && !$field->attr('checked') && (string) $field->showIf === "staticBaseDir!=''" && strpos($notes, 'httpHosts') !== false, $notes);
 
 //the settings form groups its fields in fieldsets (0.8.2), the force wipe and the main switch
 //ungrouped at the bottom. ProcessModule stores getAll(): wrappers are left out of it, so a
@@ -3558,7 +3792,7 @@ if($form) foreach($form->children() as $child) {
 $layout = array_slice($layout, -8, null, true);
 $expected = array(
 	'_general' => array('priority'),
-	'_static' => array('newDirPermissions', 'staticFile', 'cacheNonHtml', 'rootFiles', 'staticBaseDir'),
+	'_static' => array('newDirPermissions', 'staticFile', 'cacheNonHtml', 'rootFiles', 'staticBaseDir', 'staticHostKey'),
 	'_exclusions' => array('nonStaticDirs', 'nonStaticTemplates', 'trackedPaths', 'noCacheCookies'),
 	'_system' => array('csrfPatterns', 'useShell', 'wipeDryRun', 'logSkips'),
 	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields', 'ignoreTemplates'),

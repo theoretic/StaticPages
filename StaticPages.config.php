@@ -107,6 +107,15 @@ $config = array(
 						'value'					=> '',
 					),
 
+					array(
+						'name'					=> 'staticHostKey',
+						'type'					=> 'checkbox',
+						'label'					=> $this->_('Static files per host'),
+						'notes'					=> $this->_('Needs a Static base directory, changes nothing without one. Each host gets a directory of its own below the base directory, named like the host in lower case with ":" replaced by "_": <base>/example.com/about/index.html, and a root file listed above <base>/example.com/robots.txt. Only a host listed in $config->httpHosts is cached, and only when the request\'s Host header is that host ($config->httpHost); any other render is not cached. Changing this setting deletes every static copy first. The root .htaccess does not serve these files yet.'),
+						'showIf'				=> "staticBaseDir!=''",
+						'columnWidth'			=> 100,
+					),
+
 				),
 			),
 

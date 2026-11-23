@@ -104,6 +104,9 @@ class StaticPagesWiper extends Wire {
 		$siteRoot = $root;
 		$rootNorm = rtrim( $this->sp->normalizePath($siteRoot), DIRECTORY_SEPARATOR );
 		$nonStaticDirs = $this->protectedDirs();
+		//"Static files per host": a root file's copy also one host dir down, /<host>/robots.txt
+		//[decided by user, Q38 C (b)]
+		$hostKey = $this->sp->hostKeyOn();
 		$dirs = array();
 		$failed = array();
 		$deleted = array();
@@ -117,9 +120,15 @@ class StaticPagesWiper extends Wire {
 			$path = $root . $relative;
 			if( !in_array( basename($path), $names, true ) ){
 				if( !in_array( basename($path), $rootNames, true ) ) continue;
-				if( $relative !== '/' . basename($path) ) continue;
-				$path = $siteRoot . $relative;
-				if( rtrim( $this->sp->normalizePath( dirname($path) ), DIRECTORY_SEPARATOR ) !== $rootNorm ) continue;
+				if( $hostKey && $this->isHostRootCopy($relative, basename($path)) ){
+					$path = $siteRoot . $relative;
+					if( rtrim( $this->sp->normalizePath( dirname( dirname($path) ) ), DIRECTORY_SEPARATOR ) !== $rootNorm ) continue;
+				}
+				else {
+					if( $relative !== '/' . basename($path) ) continue;
+					$path = $siteRoot . $relative;
+					if( rtrim( $this->sp->normalizePath( dirname($path) ), DIRECTORY_SEPARATOR ) !== $rootNorm ) continue;
+				}
 			}
 			if( !is_file($path) ) continue;
 			$dirPath = dirname($path);
@@ -440,17 +449,64 @@ class StaticPagesWiper extends Wire {
 	public function deleteRootFileCopy($name, $context = 'settings save'){
 		$relative = "/$name";
 		$log = "$context: root file $name";
-		if( !$this->sp->index()->ensureTables() || !$this->sp->index()->hasFile($relative) ) return false;
+		if( !$this->sp->index()->ensureTables() ) return false;
+		//"Static files per host": every recorded /<host>/<name> as well [decided by user, Q38 C (b)]
+		if( $this->sp->hostKeyOn() ) $relatives = $this->recordedRootCopies($name);
+		else $relatives = $this->sp->index()->hasFile($relative) ? array($relative) : array();
+		if( !count($relatives) ) return false;
 		if( $this->baseDirRefuses("$log: the copy") ) return false;
 		$gone = false;
-		if( $this->sp->index()->dropIndexRows( array( md5($relative) ) ) ){
-			$deleted = $this->deleteStaticFiles( array($relative), false, false, array($name) );
-			$gone = $deleted['files'] > 0;
-			$this->sp->logDrain( "$log: the copy " . ( $gone ? 'was deleted' : 'was not there or could not be deleted' ) );
+		foreach( $relatives as $one ){
+			$which = $one === $relative ? '' : " $one";
+			if( $this->sp->index()->dropIndexRows( array( md5($one) ) ) ){
+				$deleted = $this->deleteStaticFiles( array($one), false, false, array($name) );
+				if( $deleted['files'] > 0 ) $gone = true;
+				$this->sp->logDrain( "$log: the copy$which " . ( $deleted['files'] > 0 ? 'was deleted' : 'was not there or could not be deleted' ) );
+			}
+			else $this->sp->logDrain( "$log$which: the index row could not be dropped, the copy is kept" );
 		}
-		else $this->sp->logDrain( "$log: the index row could not be dropped, the copy is kept" );
 		clearstatcache();
 		return $gone;
+	}
+
+	/**
+	 * The recorded copies of the root file $name: '/<name>' when the index has it, and with
+	 * "Static files per host" every '/<host>/<name>' of the files table, found by its path, so a
+	 * host since removed from $config->httpHosts is found as well [decided by user, Q38 C (b)].
+	 * Index tables assumed; a failed query finds no host copy, logged
+	 *
+	 * #pw-internal
+	 *
+	 * @param string $name
+	 * @return array Static root relative paths
+	 *
+	 */
+	public function recordedRootCopies($name){
+		$name = (string) $name;
+		$files = array();
+		if( $this->sp->index()->hasFile("/$name") ) $files[] = "/$name";
+		if( !$this->sp->hostKeyOn() ) return $files;
+		try {
+			$query = $this->wire()->database->prepare('SELECT path FROM `' . StaticPages::tableFiles . "` WHERE path LIKE :like ESCAPE '!'");
+			$query->bindValue( ':like', '/%/' . str_replace( array('!', '%', '_'), array('!!', '!%', '!_'), $name ) );
+			$query->execute();
+			foreach( $query->fetchAll(\PDO::FETCH_COLUMN) as $path ){
+				if( $this->isHostRootCopy($path, $name) && !in_array( $path, $files, true ) ) $files[] = $path;
+			}
+			$query->closeCursor();
+		}
+		catch( \Throwable $e ){
+			$this->sp->logDrain( "could not look up the host copies of $name: " . $e->getMessage() );
+			if( $this->sp->index()->isMissingTable($e) ) $this->sp->index()->tablesFailed($e);
+		}
+		return $files;
+	}
+
+	/** #pw-internal */
+	public function isHostRootCopy($relative, $name){
+		//$relative is '/<host>/<name>', <host> one dir name a host may be stored under
+		$parts = explode( '/', (string) $relative );
+		return count($parts) === 3 && $parts[0] === '' && $parts[2] === (string) $name && $this->sp->isHostDir($parts[1]);
 	}
 
 ////  protected dirs
@@ -658,6 +714,11 @@ class StaticPagesWiper extends Wire {
 		if( !count($names) || !$this->sp->index()->ensureTables() ) return array();
 		$files = array();
 		foreach( $names as $name ){
+			//"Static files per host": every recorded /<host>/<name> as well [decided by user, Q38 C (b)]
+			if( $this->sp->hostKeyOn() ){
+				foreach( $this->recordedRootCopies($name) as $relative ) $files[] = $relative;
+				continue;
+			}
 			$relative = '/' . $name;
 			if( $this->sp->index()->hasFile($relative) ) $files[] = $relative;
 		}
