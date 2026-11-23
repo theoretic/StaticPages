@@ -551,10 +551,16 @@ class StaticPagesWiper extends Wire {
 			return $this->emptyResult($dryRun);
 		}
 
+		//the listed root files the index records (robots.txt): no scan matches their names, they
+		//go by their record, read before the rows are cleared. The original kept as .robots.txt
+		//stays where it is, a wipe renames nothing
+		$rootCopies = $this->recordedRootFiles();
+
 		if( $dryRun ){
 			$targets = $this->scanTargets();
 			$result = $this->wipeScanPHP($targets, true);
 			$result['leftAlone'] = $this->leftAlone;
+			if( count($rootCopies) ) $result = $this->addCounts( $result, $this->deleteStaticFiles($rootCopies, true) );
 			return $result;
 		}
 
@@ -565,6 +571,9 @@ class StaticPagesWiper extends Wire {
 		//empty rather than gone: a missing manifest is what sends the next wipe into a scan
 		$manifest = $this->sp->manifestPath();
 		if( is_file($manifest) ) @file_put_contents( $manifest, '', LOCK_EX );
+
+		//rows gone first: a copy that can not be unlinked gets its row back
+		$rootResult = count($rootCopies) ? $this->deleteStaticFiles($rootCopies) : null;
 
 		$targets = $this->scanTargets();
 		if( count($this->leftAlone) )
@@ -591,7 +600,29 @@ class StaticPagesWiper extends Wire {
 			}
 		}
 
-		return $this->wipeScanPHP($targets);
+		$result = $this->wipeScanPHP($targets);
+		return $rootResult ? $this->addCounts($result, $rootResult) : $result;
+	}
+
+	public function recordedRootFiles(){
+		//'/<name>' for each listed root file name the index has a row for. Empty without index
+		//tables, with the switch off or the list empty
+		if( !$this->sp->configValue('cacheNonHtml', 0) ) return array();
+		$names = array_keys( $this->sp->rootFilesArray() );
+		if( !count($names) || !$this->sp->index()->ensureTables() ) return array();
+		$files = array();
+		foreach( $names as $name ){
+			$relative = '/' . $name;
+			if( $this->sp->index()->hasFile($relative) ) $files[] = $relative;
+		}
+		return $files;
+	}
+
+	private function addCounts(array $result, array $more){
+		//$more's files, bytes, dirs and dry run paths added to $result
+		foreach( array('files', 'bytes', 'dirs') as $key ) $result[$key] += $more[$key];
+		if( isset($more['paths']) ) $result['paths'] = array_merge( $result['paths'], $more['paths'] );
+		return $result;
 	}
 
 	public function scanTargets(){

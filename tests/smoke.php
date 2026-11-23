@@ -2437,11 +2437,71 @@ $dryScan = $sp->wipeCaches(true, true);
 $dryPaths = array_merge($dry['paths'] ?? array(), $dryScan['paths'] ?? array());
 check('a dry run of a wipe lists the recorded /robots.txt and deletes nothing; neither it nor a dry run scan lists /.robots.txt or /.htaccess', in_array('/robots.txt', $dry['paths'] ?? array(), true) && !in_array('/.robots.txt', $dryPaths, true) && !in_array('/.htaccess', $dryPaths, true) && $bytesOf($robots) === $txtBody && $bytesOf($dotRobots) === $original, json_encode($dryPaths));
 
-//giving back
+//a forced wipe deletes the recorded copy [decided by user, Q30]: it left the file without a
+//row, the next save took it over as a stale original and a give-back renamed it back
+foreach(array(0, 1) as $shell) {
+	$rootReset();
+	$sp->set('useShell', $shell);
+	publish($sp, $R, array(), $txtBody);
+	$written = $bytesOf($robots) === $txtBody && $sp->index()->hasFile('/robots.txt');
+	$sp->wipeCaches(true);
+	$wiped = array($bytesOf($robots), $sp->index()->hasFile('/robots.txt'));
+	$log0 = logText($tmp);
+	$rootSave($listed);
+	$afterSave = array($bytesOf($robots), $bytesOf($dotRobots));
+	$rootSave(array('cacheNonHtml' => 1, 'rootFiles' => ''));
+	$saves = $since($log0);
+	$end = array($bytesOf($robots), $bytesOf($dotRobots));
+	check("Q30: a recorded /robots.txt, wipeCaches(true) with useShell $shell: file and row gone; a save listing the name and one without it make no /.robots.txt, take nothing over, rename nothing back; no /robots.txt at the end", $written && $wiped === array(null, false) && $afterSave === array(null, null) && $end === array(null, null) && strpos($saves, 'taken over') === false && strpos($saves, 'renamed back') === false, json_encode(array($written, $wiped, $afterSave, $end)) . ' ' . $saves);
+	$rootReset();
+	$rootSave($listed);
+}
+$sp->set('useShell', 0);
+
 $setUpTaken = function() use ($rootReset, $sp, $txtBody, $original) {
 	$rootReset($txtBody, $original);
 	recordAll($sp, array('/robots.txt'));
 };
+$setUpTaken();
+$sp->wipeCaches(true);
+$wiped = array($bytesOf($robots), $sp->index()->hasFile('/robots.txt'), $bytesOf($dotRobots) === $original);
+publish($sp, $R, array(), $txtBody);
+check('Q30: with a taken-over original, wipeCaches(true) deletes the recorded /robots.txt and its row, /.robots.txt byte-identical; the next render writes /robots.txt and its row again', $wiped === array(null, false, true) && $bytesOf($robots) === $txtBody && $sp->index()->hasFile('/robots.txt') && $bytesOf($dotRobots) === $original, json_encode($wiped));
+
+$rowsBefore = count($sp->index()->indexedFiles(null));
+$dryScan = $sp->wipeCaches(true, true);
+$dryFiles = $dryScan['paths'] ?? array();
+$m->adoptStaticFiles();
+$dryKept = array(count(array_keys($dryFiles, '/robots.txt', true)), in_array('/.robots.txt', $dryFiles, true), $bytesOf($robots) === $txtBody, $sp->index()->hasFile('/robots.txt'), count($sp->index()->indexedFiles(null)) === $rowsBefore);
+$filesBefore = explode(' ', files($tmpRoot));
+$walk = $sp->wipeCaches(true);
+$gone = array_values(array_diff($filesBefore, explode(' ', files($tmpRoot))));
+$listedPaths = $dryFiles;
+sort($gone);
+sort($listedPaths);
+check('Q30: wipeCaches(true, true) with the copy recorded lists /robots.txt once and no dot file, file and row stay, adoptStaticFiles() adds no row; the PHP walk then removes exactly what it listed, equal files counts', $dryKept === array(1, false, true, true, true) && $gone === $listedPaths && is_array($walk) && $walk['files'] === $dryScan['files'] && $bytesOf($dotRobots) === $original, json_encode(array($dryKept, $gone, $listedPaths, $walk['files'] ?? null, $dryScan['files'] ?? null)));
+
+$rootReset('put there by hand', $original);
+$scanCases = array();
+$sp->remove('rootFiles');
+recordAll($sp, array('/robots.txt'));
+$sp->wipeCaches(true);
+$scanCases['not listed'] = $intact();
+$sp->set('rootFiles', $rLine);
+$sp->set('cacheNonHtml', 0);
+recordAll($sp, array('/robots.txt'));
+$sp->wipeCaches(true);
+$scanCases['switch off'] = $intact();
+$sp->set('cacheNonHtml', 1);
+putFiles($tmpRoot, array("$Pdir/robots.txt"));
+recordAll($sp, array("$Pdir/robots.txt"));
+$sp->wipeCaches(true);
+$scanCases['below the root'] = is_file("$tmpRoot$Pdir/robots.txt") && $intact();
+@unlink("$tmpRoot$Pdir/robots.txt");
+check('Q30: wipeCaches(true) with a row for /robots.txt while the name is not listed or the switch is off, and one for <P>/robots.txt while it is listed: no file is deleted', !in_array(false, $scanCases, true), json_encode($scanCases));
+$rootReset();
+
+//giving back
 $setUpTaken();
 $log0 = logText($tmp);
 $rootSave(array('cacheNonHtml' => 1, 'rootFiles' => ''));
