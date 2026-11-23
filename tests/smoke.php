@@ -2717,6 +2717,35 @@ if($linked) {
 }
 @rmdir($outside);
 
+//a base dir the stock .htaccess denies to visitors (403, probed in step 11b) is refused, in any
+//letter case, at any depth, site-<name> like site [decided by user, Q40, Q41 b, Q43]
+$deniedBase = array('site/assets/cache/static', 'Site/Assets/Cache/static', 'x/site/assets/logs', 'site-x/assets/tmp', 'site/assets/-x', 'site/assets/files/-secure', 'site/templates', 'Site/Templates/static', 'x/site/templates', 'site-x/templates', 'site/install/static', 'Site/Install/static', 'site/classes/static', 'site/templates-admin/static', 'wire/templates-admin/static', 'site-default/static', 'Site-Default/static', 'x/site-default', 'static/htaccess.d', 'site/assets/x.phtml', 'wire/core/x.inc', 'site/x.phpz', 'site/x.bak', 'wire/x.sql', 'site/config.php');
+$nearBase = array('static', 'site/assets/static', 'site/assets/caches', 'site/assets/static-x', 'site/templatesx', 'mysite/assets/cache');
+$deniedWhy = 'a directory the stock .htaccess denies to visitors';
+$deniedSeen = array();
+foreach($deniedBase as $value) {
+	$log0 = logText($tmp);
+	$sp->set('staticBaseDir', $value);
+	$sp->index()->clearRows();
+	publish($sp, $A);
+	$deniedSeen[$value] = $sp->checkBaseDir($value)[0] === '' && strpos($sp->checkBaseDir($value)[1], $deniedWhy) !== false && $sp->baseDirSyntax($value)[0] === '' && strpos($sp->baseDirSyntax($value)[1], 'the stock .htaccess denies') !== false && $sp->staticBaseDir() === '' && $sp->staticRoot() === $sp->rootPath() && strpos($since($log0), "Static base directory \"$value\" refused: $deniedWhy") !== false && is_file("$tmpRoot$Pdir/a/index.html") && !file_exists("$tmpRoot/$value");
+	rrmdir("$tmpRoot$Pdir");
+}
+$sp->index()->clearRows();
+check('Static base directory the stock .htaccess denies (assets/cache, logs, tmp, a -dir below assets, templates, install, classes, templates-admin, site-default, htaccess.*, *.phtml, *.inc, *.phpz, *.bak, *.sql, config.php; mixed case, nested, site-x): refused, logged, a publish lands in the web root, nothing made there', !in_array(false, $deniedSeen, true), json_encode($deniedSeen));
+$nearSeen = array();
+foreach($nearBase as $value) $nearSeen[$value] = $sp->checkBaseDir($value) === array($value, '') && $sp->baseDirSyntax($value) === array($value, '');
+check('...still accepted: static, site/assets/static and the near misses site/assets/caches, site/assets/static-x, site/templatesx, mysite/assets/cache', !in_array(false, $nearSeen, true), json_encode($nearSeen));
+$lfSeen = array();
+foreach(array("a\n/b" => 'a /b', "site/assets/static\n/x" => 'site/assets/static /x') as $value => $logged) {
+	$log0 = logText($tmp);
+	$sp->set('staticBaseDir', $value);
+	$plain = 'a segment that is no plain name';
+	$lfSeen[] = $sp->checkBaseDir($value)[0] === '' && strpos($sp->checkBaseDir($value)[1], $plain) === 0 && $sp->baseDirSyntax($value)[0] === '' && strpos($sp->baseDirSyntax($value)[1], $plain) === 0 && $sp->staticBaseDir() === '' && strpos($since($log0), "Static base directory \"$logged\" refused: $plain") !== false;
+}
+$sp->remove('staticBaseDir');
+check('...a segment ending in a line feed (a\\n/b, site/assets/static\\n/x) is refused with the plain-name reason, the logged line holds no line feed', $lfSeen === array(true, true), json_encode($lfSeen));
+
 //publishing below it
 $sp->set('staticBaseDir', $bRel);
 $sp->index()->clearRows();
@@ -2816,6 +2845,35 @@ $unmarked[] = is_file($bMarker);
 $texts = $bSave(array('staticBaseDir' => 'a/../b'));
 $unmarked[] = $hasAny($texts, 'Static base directory "a/../b" is not used: a . or .. segment');
 check('a save naming a dir that holds a file and no marker leaves it unmarked and warns; once empty the next save marks it; a refused value warns', $unmarked === array(false, true, true, true), json_encode($unmarked));
+$bSave(array('staticBaseDir' => $bRel));
+$sp->set('staticBaseDir', $bRel);
+
+//a save naming a dir the stock .htaccess denies: warned, stored as typed, nothing made; the
+//copies under the base dir before it are wiped [Q40]
+$markersBelow = function() use ($tmpRoot) {
+	$found = array();
+	foreach(new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($tmpRoot, \FilesystemIterator::SKIP_DOTS)) as $f) if($f->getFilename() === StaticPages::baseDirMarker) $found[] = str_replace('\\', '/', substr($f->getPathname(), strlen($tmpRoot)));
+	return $found;
+};
+$deniedSave = array();
+foreach($deniedBase as $value) {
+	$bSave(array('staticBaseDir' => $bRel));
+	$sp->set('staticBaseDir', $bRel);
+	putFiles($tmpRoot, $baseFiles);
+	recordAll($sp, array("$Pdir/a/index.html"));
+	$log0 = logText($tmp);
+	$texts = $bSave(array('staticBaseDir' => $value));
+	$sp->set('staticBaseDir', $value);
+	$deniedSave[$value] = $hasAny($texts, "Static base directory \"$value\" is not used: $deniedWhy") && $modules->getConfig('StaticPages', 'staticBaseDir') === $value && !file_exists("$tmpRoot/$value") && $markersBelow() === array("/$bRel/" . StaticPages::baseDirMarker) && $present($baseFiles, $tmpRoot) === 0 && !count($sp->index()->indexedFiles(null)) && strpos($since($log0), "Static base directory changed from $bRel to none") !== false;
+}
+check('a save naming a dir the stock .htaccess denies (every value above): warned "is not used", stored as typed, the dir not made, no other marker; the copies under site/assets/static wiped, logged "changed from site/assets/static to none"', !in_array(false, $deniedSave, true), json_encode($deniedSave));
+$nearSave = array();
+foreach($nearBase as $value) {
+	$texts = $bSave(array('staticBaseDir' => $value));
+	$nearSave[$value] = !$hasAny($texts, 'is not used') && $modules->getConfig('StaticPages', 'staticBaseDir') === $value;
+}
+foreach(array('static', 'mysite', 'site/assets/caches', 'site/assets/static-x', 'site/templatesx') as $dir) rrmdir("$tmpRoot/$dir");
+check('...the near misses and static, site/assets/static: no warning, stored', !in_array(false, $nearSave, true), json_encode($nearSave));
 $bSave(array('staticBaseDir' => $bRel));
 $sp->set('staticBaseDir', $bRel);
 
@@ -3285,6 +3343,15 @@ foreach(array('/site/assets/static', 'C:/static', 'a/../b', '..', '.hidden', 'a/
 	if($block !== $block010 || count($notes) !== 1 || strpos($notes[0], 'Static base directory setting is not used') === false) $gLeaks[] = json_encode($value);
 }
 check('...a refused Static base directory (absolute, . or .., dot segment, empty segment, blanks, quotes, $1, %{...}, a line feed inside a segment, regex characters) gives the web root\'s block and one note', !count($gLeaks), implode('; ', $gLeaks));
+//a base dir the stock .htaccess denies: refused the same way [Q40]; the near misses get base rules
+$gDenied = array();
+foreach(array_merge($deniedBase, array("a\n/b", "site/assets/static\n/x")) as $value) {
+	$block = $gOf(array('staticBaseDir' => $value));
+	$notes = $gNotes();
+	if($block !== $block010 || count($notes) !== 1 || strpos($notes[0], 'Static base directory setting is not used') === false) $gDenied[] = json_encode($value);
+}
+foreach($nearBase as $value) if($gOf(array('staticBaseDir' => $value)) !== $gSwap($value) || count($gNotes())) $gDenied[] = 'near ' . json_encode($value);
+check('...a base dir the stock .htaccess denies (the values above) and a segment ending in a line feed give the web root\'s block and one note; static, site/assets/static and the near misses get the base rules', !count($gDenied), implode('; ', $gDenied));
 //Static file name index.htm: a web root index.htm is a copy of the root layout, no guard for it
 $gHtm = $gOf(array('staticBaseDir' => $bRel, 'staticFile' => 'index.htm'));
 check('...Static file name index.htm: no rule carries the index.htm guard, the copies are index\\.htm below site/assets/static/', strpos($gHtm, 'index.htm !-f') === false && strpos($gHtm, 'site/assets/static/$1index\\.htm [L]') !== false && strpos($gHtm, 'index\\.html') === false, $gHtm);
@@ -3915,7 +3982,7 @@ $notes = $field ? (string) $field->notes : '';
 check('"Replace these root files with pages" is an empty textarea whose notes name the dot backup .robots.txt and when it can be fetched', $field instanceof InputfieldTextarea && (string) $field->attr('value') === '' && strpos($notes, '.robots.txt') !== false && strpos($notes, 'can be fetched') !== false && strpos($notes, 'without the stock rule') !== false, $notes);
 $field = $form ? $form->getChildByName('staticBaseDir') : null;
 $notes = $field ? (string) $field->notes : '';
-check('"Static base directory" is an empty text field whose notes name the marker .staticpages; the block serves from it (step 11): its notes name the dirs the stock .htaccess denies, the spelling-only check and a copy served by its own path', $field instanceof InputfieldText && !($field instanceof InputfieldTextarea) && (string) $field->attr('value') === '' && strpos($notes, '.staticpages') !== false && strpos($notes, 'does not serve') === false && strpos($notes, 'site/assets/cache, logs, backups, sessions, config, database, install and tmp') !== false && strpos($notes, '403 Forbidden') !== false && strpos($notes, 'checks only how this setting is written') !== false && strpos($notes, 'by its own path') !== false, $notes);
+check('"Static base directory" is an empty text field whose notes name the marker .staticpages; the block serves from it (step 11): its notes name the dirs the stock .htaccess denies, the spelling-only check and a copy served by its own path', $field instanceof InputfieldText && !($field instanceof InputfieldTextarea) && (string) $field->attr('value') === '' && strpos($notes, '.staticpages') !== false && strpos($notes, 'does not serve') === false && strpos($notes, 'site/assets/cache, logs, backups, sessions, config, database, install and tmp') !== false && strpos($notes, 'denies to visitors is refused') !== false && strpos($notes, '403 Forbidden') === false && strpos($notes, 'checks only how this setting is written') !== false && strpos($notes, 'by its own path') !== false, $notes);
 $field = $form ? $form->getChildByName('staticHostKey') : null;
 $notes = $field ? (string) $field->notes : '';
 check('"Static files per host" is an unchecked checkbox shown with a base directory, whose notes name httpHosts and how the block matches the Host header (step 11)', $field instanceof InputfieldCheckbox && !$field->attr('checked') && (string) $field->showIf === "staticBaseDir!=''" && strpos($notes, 'httpHosts') !== false && strpos($notes, 'serve these files yet') === false && strpos($notes, 'without regard to letter case') !== false, $notes);

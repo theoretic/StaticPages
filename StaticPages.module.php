@@ -1348,8 +1348,9 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	public function checkBaseDir($raw){
 		//array(the base directory as used, '' when refused or empty; why it is refused, '' when
 		//not). Accepted: a relative path of plain names (letters, digits, . _ -, no leading dot),
-		//no empty, . or .. segment, that resolves below the site root, links and all, and is not
-		//the site root itself; a trailing slash is dropped. It need not exist yet
+		//no empty, . or .. segment, not denied to visitors by the stock .htaccess (stockDenied),
+		//that resolves below the site root, links and all, and is not the site root itself; a
+		//trailing slash is dropped. It need not exist yet
 		list( $value, $why ) = $this->baseDirSyntax($raw);
 		if( $value === '' ) return array('', $why);
 		$root = $this->rootPath();
@@ -1383,10 +1384,36 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		foreach( explode('/', $value) as $segment ){
 			if( $segment === '' ) return array('', 'an empty segment');
 			if( $segment === '.' || $segment === '..' ) return array('', 'a . or .. segment');
-			if( !preg_match('/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/', $segment) ) return array('', 'a segment that is no plain name (letters, digits, . _ -, no leading dot)');
+			if( !preg_match('/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/D', $segment) ) return array('', 'a segment that is no plain name (letters, digits, . _ -, no leading dot)');
+		}
+		//a place whose copies the stock .htaccess answers with 403 [decided by user, Q40, Q41 b]: the
+		//deny lines of its section 15A (3.0.274) that can match a copy path /<dir>/a/index.html,
+		//fixed here, as publish never reads the .htaccess and the generator reads no disk. Tested
+		//as stock tests them, on that path, without regard to letter case; site-default in any
+		//letter case too, although its stock line has no [NC] [decided by user, Q43]
+		$path = '/' . $value . '/a/index.html';
+		foreach( self::stockDenied as $pattern ){
+			if( preg_match( '#' . $pattern . '#i', $path ) ) return array('', 'a directory the stock .htaccess denies to visitors (403 Forbidden)');
 		}
 		return array($value, '');
 	}
+
+	/** #pw-internal The deny conditions of stock 15A (3.0.274) that can match a copy path, as written there */
+	const stockDenied = array(
+		'(^|/)(\.htaccess|htaccess\..*)$',
+		'(^|/)(site|site-[^/]+)/assets/(cache|logs|backups|sessions|config|database|install|tmp)($|/.*$)',
+		'(^|/)(site|site-[^/]+)/install($|/.*$)',
+		'(^|/)(site|site-[^/]+)/assets.*/-.+/.*',
+		'(^|/)(wire|site|site-[^/]+)/(config|index\.config|config-dev)\.php($|/)',
+		'(^|/)(wire|site|site-[^/]+)/templates-admin($|/|/.*\.(php|html?|tpl|inc))($|/)',
+		'(^|/)(site|site-[^/]+)/templates($|/|/.*\.(php|html?|tpl|inc))($|/)',
+		'(^|/)(site|site-[^/]+)/classes($|/.*)',
+		'(^|/)(site|site-[^/]+)/assets($|/|/.*\.ph(p|ps|tml|p[0-9]))($|/)',
+		'(^|/)wire/(core|modules)/.*\.(php|inc|tpl|module|info\.json)($|/)',
+		'(^|/)(site|site-[^/]+)/(config[^/]*/?|[^/]+\.php.*)$',
+		'(^|/)(wire/|site[-/]).+\.(bak|old|sql|sw[op]|(bak|php|sql)[./]+.*)[\d.]*$',
+		'(^|/)site-default/',
+	);
 
 	/** #pw-internal */
 	public function baseDirReady($create = false){

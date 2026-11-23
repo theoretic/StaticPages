@@ -425,7 +425,7 @@ class StaticPagesHtaccess extends Wire {
 		//of the web root and a note, as the module then writes there [Q39 C]
 		$raw = $this->settings === null ? $this->sp->configValue('staticBaseDir', '') : ( isset($this->settings['staticBaseDir']) ? $this->settings['staticBaseDir'] : '' );
 		list( $dir, $why ) = $this->sp->baseDirSyntax($raw);
-		//one more line than baseDirSyntax(): its pattern's $ lets a segment end in a line feed
+		//one more line than baseDirSyntax(), kept as a second guard on what goes into a rule
 		if( $dir !== '' && !preg_match( '#^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$#D', $dir ) ){
 			$dir = '';
 			$why = 'a character that is no letter, digit, . _ - or /';
