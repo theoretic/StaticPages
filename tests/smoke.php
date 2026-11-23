@@ -2746,6 +2746,83 @@ foreach(array("a\n/b" => 'a /b', "site/assets/static\n/x" => 'site/assets/static
 $sp->remove('staticBaseDir');
 check('...a segment ending in a line feed (a\\n/b, site/assets/static\\n/x) is refused with the plain-name reason, the logged line holds no line feed', $lfSeen === array(true, true), json_encode($lfSeen));
 
+//base mode: a copy path a deny line of stock 15A matches is not written, as probed in step 11c;
+//the whole copy path, host dir and file name included, in any letter case; root mode unchanged
+//[decided by user, Q42 b, Q44 a, Q45 a, Q46 a]
+$cpYes = array('/site-static/install/index.html', '/site-static/classes/x/index.html', '/site-static/templates/x/index.html', '/site/assets/static/docs.php.alpha.test/x/index.html', '/site/assets/static/docs.php.alpha.test/index.html', '/site/assets/static/docs.php.alpha.test/robots.txt', '/site/assets/static/x/Site-Default/x/index.html');
+$cpNo = array('/site-static/installs/index.html', '/site-static/templates/x/index.xml', '/site/assets/static/php.alpha.test/x/index.html', '/site/assets/static/php.alpha.test/robots.txt', '/static/install/index.html', '/static/classes/x/index.html', '/static/templates/x/index.html');
+foreach(array('', '/alpha.test') as $cpH) {
+	foreach(array('-x', 'feed.php', 'x.phtml', 'x.bak', 'x.sql', 'a.php.b') as $cpS) foreach(array('html', 'xml') as $cpE) {
+		$cpYes[] = "/site/assets/static$cpH/x/$cpS/index.$cpE";
+		$cpNo[] = "/static$cpH/x/$cpS/index.$cpE";
+	}
+	foreach(array('x-y', 'x.old', 'feed.phpx', 'xbak') as $cpS) foreach(array('html', 'xml') as $cpE) $cpNo[] = "/site/assets/static$cpH/x/$cpS/index.$cpE";
+}
+$cpNo = array_values(array_diff($cpNo, array_filter($cpNo, fn($cpX) => preg_match('#^/static(/alpha\.test)?/x/x\.(bak|sql)/#', $cpX))));
+$cpSeen = array();
+foreach($cpYes as $cpX) if($sp->stockDeniedPath($cpX) !== true) $cpSeen[] = "yes $cpX";
+foreach($cpNo as $cpX) if($sp->stockDeniedPath($cpX) !== false) $cpSeen[] = "no $cpX";
+check('stockDeniedPath(): true for the copy paths step 11c probed 403 (-x, feed.php, x.phtml, a.php.b, x.bak, x.sql below site/assets/static[/alpha.test], html and xml; site-static install, classes, templates html; host docs.php.alpha.test page, home, robots.txt; Site-Default, Q45), false for those probed 200 (near misses, below static, templates xml, php.alpha.test)', $cpSeen === array() && count($cpYes) === 31 && count($cpNo) === 39, json_encode($cpSeen) . ' ' . count($cpYes) . '/' . count($cpNo));
+
+//publishing: each denied shape as a URL segment of a, feed.php and x.bak also as page names
+$cpFeed = $mk($P, 'feed.php', 'Feed');
+$cpBak = $mk($P, 'x.bak', 'Bak');
+$sp->drain();
+$sp->index()->clearRows();
+$cpRender = function($page, $segment, $body = null) use ($sp, $wire) {
+	if($segment !== '') $wire->input->setUrlSegment(1, $segment);
+	$cpSeg = $wire->input->urlSegmentStr;
+	publish($sp, $page, array(), $body);
+	if($segment !== '') $wire->input->setUrlSegment(1, null);
+	return $cpSeg;
+};
+$cpDeniedShapes = array(array($A, '-x'), array($A, 'feed.php'), array($A, 'x.phtml'), array($A, 'x.bak'), array($A, 'x.sql'), array($A, 'a.php.b'), array($A, 'Site-Default'), array($cpFeed, ''), array($cpBak, ''));
+$cpNearShapes = array(array($A, 'x-y'), array($A, 'x.old'), array($A, 'feed.phpx'), array($A, 'xbak'));
+$cpWhy = 'the stock .htaccess denies its copy path';
+$cpSeen = array('names' => $cpFeed->name === 'feed.php' && $cpBak->name === 'x.bak');
+$sp->set('staticBaseDir', $bRel);
+foreach($cpDeniedShapes as $cpShape) {
+	list($cpPg, $cpS) = $cpShape;
+	$cpBefore = files($tmpRoot);
+	$log0 = logText($tmp);
+	$cpSeg = $cpRender($cpPg, $cpS);
+	$cpCopy = "/$bRel" . $cpPg->path . ($cpSeg === '' ? '' : "$cpSeg/") . 'index.html';
+	$cpSeen["base $cpPg->name/$cpS"] = $cpSeg === $cpS && files($tmpRoot) === $cpBefore && !file_exists($bAbs) && !count($sp->index()->indexedFiles(null)) && strpos($since($log0), "skip {$cpPg->path}: $cpWhy $cpCopy to visitors (403 Forbidden)") !== false;
+}
+$sp->set('cacheNonHtml', 1);
+$tpl->contentType = 'xml';
+$cpBefore = files($tmpRoot);
+$log0 = logText($tmp);
+$cpRender($A, 'x.phtml', $body);
+$cpSeen['base xml x.phtml'] = files($tmpRoot) === $cpBefore && !count($sp->index()->indexedFiles(null)) && strpos($since($log0), "skip $Pdir/a/: $cpWhy /$bRel$Pdir/a/x.phtml/index.xml") !== false;
+$tpl->contentType = $tplType;
+$sp->remove('cacheNonHtml');
+$wire->input->setUrlSegment(1, 'feed.php');
+$cpA = $pages->get($A->id);
+$wire->wire('page', $cpA);
+$sp->queue()->startGen();
+$cpSeen['returns null'] = $sp->cachePage(new HookEvent(array('object' => $cpA, 'method' => 'render', 'return' => '<html><body>A</body></html>'))) === null && !file_exists($bAbs);
+$wire->input->setUrlSegment(1, null);
+foreach($cpNearShapes as $cpShape) {
+	list($cpPg, $cpS) = $cpShape;
+	$cpRender($cpPg, $cpS);
+	$cpSeen["base near $cpS"] = is_file("$bAbs$Pdir/a/$cpS/index.html") && $sp->index()->hasFile("$Pdir/a/$cpS/index.html");
+}
+check('base dir site/assets/static: a render whose copy path a stock deny line matches (URL segments -x, feed.php, x.phtml, x.bak, x.sql, a.php.b, Site-Default; pages feed.php, x.bak; an xml render) makes nothing on disk, no row, logs the skip with the copy path; cachePage() returns null; near misses x-y, x.old, feed.phpx, xbak written below the base dir, indexed', !in_array(false, $cpSeen, true) && count($cpSeen) === 16, json_encode($cpSeen) . ' ' . files($bAbs));
+$bReset();
+$sp->remove('staticBaseDir');
+$cpSeen = array();
+foreach($cpDeniedShapes as $cpShape) {
+	list($cpPg, $cpS) = $cpShape;
+	$log0 = logText($tmp);
+	$cpSeg = $cpRender($cpPg, $cpS);
+	$cpRel = $cpPg->path . ($cpSeg === '' ? '' : "$cpSeg/") . 'index.html';
+	$cpSeen["root $cpPg->name/$cpS"] = is_file("$tmpRoot$cpRel") && $sp->index()->hasFile($cpRel) && strpos($since($log0), $cpWhy) === false;
+}
+check('...the same renders with no base dir: written at <root><path>/index.html, indexed, no such skip (root mode unchanged)', !in_array(false, $cpSeen, true) && count($cpSeen) === 9, json_encode($cpSeen) . ' ' . files("$tmpRoot$Pdir"));
+$sp->wipeCaches();
+$bReset();
+
 //publishing below it
 $sp->set('staticBaseDir', $bRel);
 $sp->index()->clearRows();
@@ -3151,6 +3228,36 @@ $hSeen['httpHost upper'] = is_file($hA('example.test')) && in_array('example.tes
 $sp->wipeCaches();
 $hSeen['wiped'] = files($bAbs) === '/' . StaticPages::baseDirMarker;
 check('host key on: example.test:8080 is stored as example.test_8080, a Host header EXAMPLE.Test and an httpHost Example.TEST as example.test; a wipe removes them', !in_array(false, $hSeen, true) && count($hSeen) === 4, json_encode($hSeen) . ' ' . files($bAbs));
+
+//a copy path a stock deny line matches, the host dir included [decided by user, Q42 b, Q44 a]
+$hSeen = array();
+$hSet('example.test', $hList);
+$cpBefore = files($bAbs);
+$log0 = logText($tmp);
+$cpRender($A, 'feed.php');
+$hSeen['denied'] = files($bAbs) === $cpBefore && !count($sp->index()->indexedFiles(null)) && strpos($since($log0), "skip $Pdir/a/: $cpWhy /$bRel/example.test$Pdir/a/feed.php/index.html") !== false;
+$cpRender($A, 'feed.phpx');
+$hSeen['near'] = is_file("$bAbs/example.test$Pdir/a/feed.phpx/index.html") && array_values($sp->index()->indexedFiles(null)) === array("/example.test$Pdir/a/feed.phpx/index.html");
+$sp->wipeCaches();
+$hSet('docs.php.example.test', array('docs.php.example.test'));
+$cpBefore = files($bAbs);
+$log0 = logText($tmp);
+publish($sp, $A);
+$hSeen['docs.php page'] = files($bAbs) === $cpBefore && !count($sp->index()->indexedFiles(null)) && strpos($since($log0), "skip $Pdir/a/: $cpWhy /$bRel/docs.php.example.test$Pdir/a/index.html") !== false;
+$sp->set('rootFiles', "robots.txt {$A->path}");
+$tpl->contentType = 'txt';
+$log0 = logText($tmp);
+publish($sp, $A, array(), $txtBody);
+$hSeen['docs.php root file'] = files($bAbs) === $cpBefore && !count($sp->index()->indexedFiles(null)) && strpos($since($log0), "skip $Pdir/a/: $cpWhy /$bRel/docs.php.example.test/robots.txt") !== false;
+$hSet('php.example.test', array('php.example.test'));
+publish($sp, $A, array(), $txtBody);
+$hSeen['php root file'] = is_file("$bAbs/php.example.test/robots.txt") && $sp->index()->hasFile('/php.example.test/robots.txt');
+$tpl->contentType = $tplType;
+$sp->wipeCaches();
+$sp->remove('rootFiles');
+$hSet('example.test', $hList);
+$hSeen['wiped'] = files($bAbs) === '/' . StaticPages::baseDirMarker;
+check('host key on: a URL segment feed.php below <base>/example.test/ skipped, logged; feed.phpx written, row /example.test/...; host docs.php.example.test: a page render and a robots.txt root file render skipped, logged; php.example.test writes its robots.txt', !in_array(false, $hSeen, true) && count($hSeen) === 6, json_encode($hSeen) . ' ' . files($bAbs));
 
 //the home page of an XML template
 $hSet('example.test', $hList);

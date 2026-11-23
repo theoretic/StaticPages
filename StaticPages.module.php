@@ -880,6 +880,18 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			}
 		}
 
+		//base mode: the copy path as the web server tests it after the block's internal rewrite,
+		//"/<base>[/<host>]<page path><url segments>/<file>" or "/<base>[/<host>]/<root file>". A path a
+		//deny line of stock 15A matches would answer every visitor 403 where PHP serves the page:
+		//not written [decided by user, Q42 b, Q44 a, Q45 a]. Root mode is not asked (Q46 a)
+		if( $this->staticBaseDir() !== '' ){
+			$copyPath = '/' . $this->staticBaseDir() . substr( $path, strlen($base) );
+			if( $this->stockDeniedPath($copyPath) ){
+				$this->logSkip( $page, "the stock .htaccess denies its copy path $copyPath to visitors (403 Forbidden)" );
+				return;
+			}
+		}
+
 		//a base directory without its marker is no place to write to: no wipe would delete what
 		//lands there. One that does not exist yet is created here, with the marker [decided by
 		//user, Q34 A (b)]
@@ -1391,11 +1403,20 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//fixed here, as publish never reads the .htaccess and the generator reads no disk. Tested
 		//as stock tests them, on that path, without regard to letter case; site-default in any
 		//letter case too, although its stock line has no [NC] [decided by user, Q43]
-		$path = '/' . $value . '/a/index.html';
-		foreach( self::stockDenied as $pattern ){
-			if( preg_match( '#' . $pattern . '#i', $path ) ) return array('', 'a directory the stock .htaccess denies to visitors (403 Forbidden)');
-		}
+		if( $this->stockDeniedPath( '/' . $value . '/a/index.html' ) ) return array('', 'a directory the stock .htaccess denies to visitors (403 Forbidden)');
 		return array($value, '');
+	}
+
+	/** #pw-internal */
+	public function stockDeniedPath($path){
+		//true when a condition of stockDenied matches $path, a path below the site root starting
+		//with /, as stock tests the request path after a rewrite: without regard to letter case,
+		//site-default too [decided by user, Q43, Q45 a]. Asked by baseDirSyntax() and, in base
+		//mode, by cachePage() on each copy path [decided by user, Q42 b, Q44 a]
+		foreach( self::stockDenied as $pattern ){
+			if( preg_match( '#' . $pattern . '#i', (string) $path ) ) return true;
+		}
+		return false;
 	}
 
 	/** #pw-internal The deny conditions of stock 15A (3.0.274) that can match a copy path, as written there */
