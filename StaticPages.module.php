@@ -766,7 +766,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$segments = explode( '/', $page->path . $urlSegmentStr );
 		if( in_array( '..', $segments, true ) || in_array( '.', $segments, true ) ) return;
 
-		$dir = $this->rootPath() . $page->path;
+		//$base: what $path is made relative to and pruned up to, the static root; a root file's
+		//copy stays in the site root
+		$base = $this->staticRoot();
+		$dir = $base . $page->path;
 		if( $urlSegmentStr !='' ) $dir.= "$urlSegmentStr/";
 		$path = $dir.$staticFile;
 
@@ -781,7 +784,8 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 				$this->logSkip( $page, 'the page is listed in Replace these root files with pages as ' . implode( ', ', $rootFiles ) . ", a $type render is not written" );
 				return;
 			}
-			$dir = $this->rootPath() . '/';
+			$base = $this->rootPath();
+			$dir = $base . '/';
 			$path = $dir . $rootFile;
 		}
 
@@ -796,7 +800,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 				$this->logSkip( $page, 'no index tables: only html is cached with the manifest' );
 				return;
 			}
-			$relative = substr( $path, strlen($this->rootPath()) );
+			$relative = substr( $path, strlen($base) );
 			if( ( file_exists($path) || is_link($path) ) && !$this->index()->hasFile($relative) ){
 				$this->logSkip( $page, "a file the index does not know is in the way: $relative" );
 				return;
@@ -827,14 +831,14 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			if( !$dirExisted )
 				$this->wiper()->pruneEmptyDirs(
 					$this->normalizePath( rtrim($dir, '/\\') ),
-					$this->normalizePath( $this->rootPath() )
+					$this->normalizePath($base)
 					);
 
 			$this->logSkip( $page, "could not write $path" );
 			return;
 		}
 
-		$relative = substr( $path, strlen($this->rootPath()) );
+		$relative = substr( $path, strlen($base) );
 
 		if( $this->index()->ensureTables() ){
 			//a file the index does not know about is never removed again, short of a full scan
@@ -1228,6 +1232,16 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	public function rootPath(){
 		//filesystem path to the site root, no trailing slash
 		return rtrim( $this->wire()->config->paths->root, '/\\' );
+	}
+
+	/** #pw-internal */
+	public function staticRoot(){
+		//filesystem path to where static copies of pages live, no trailing slash: publishing,
+		//the index's and the manifest's relative paths, deletes, pruning, insideRoot() and the
+		//scan's root level use it. Tracked paths, the default of Non-static directories, the
+		//migration's root dir questions, scanTargets(), protected dirs, the root files and the
+		//.htaccess stay with rootPath(). The site root while no base directory is set
+		return $this->rootPath();
 	}
 
 	/** #pw-internal */

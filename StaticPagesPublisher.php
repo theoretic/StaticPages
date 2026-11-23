@@ -30,7 +30,7 @@ class StaticPagesPublisher extends Wire {
 		if( $createdDir === '' ) return;
 		$this->sp->wiper()->pruneEmptyDirs(
 			$this->sp->normalizePath( rtrim($createdDir, '/\\') ),
-			$this->sp->normalizePath( $this->sp->rootPath() )
+			$this->sp->normalizePath( $this->sp->staticRoot() )
 			);
 	}
 
@@ -276,8 +276,8 @@ class StaticPagesPublisher extends Wire {
 	}
 
 	public function logStaticFile($path){
-		//root-relative path, one entry per line
-		$relative = substr( $path, strlen($this->sp->rootPath()) );
+		//static root relative path, one entry per line; HTML copies only, never a root file
+		$relative = substr( $path, strlen($this->sp->staticRoot()) );
 		file_put_contents( $this->sp->manifestPath(), $relative . "\n", FILE_APPEND | LOCK_EX );
 	}
 

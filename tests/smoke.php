@@ -214,6 +214,8 @@ check('isProtectedPath nested entry', $w->isProtectedPath("$tmpRoot/about/keep/x
 check('isProtectedPath leaves a sibling with the same prefix alone', !$w->isProtectedPath("$tmpRoot/sitemap", $dirs));
 $sp->set('nonStaticDirs', "site\nvendor");
 
+check('staticRoot: the site root while no base directory is set', $sp->staticRoot() === $sp->rootPath(), $sp->staticRoot() . ' vs ' . $sp->rootPath());
+
 @mkdir("$tmpRoot/in", 0777, true);
 file_put_contents("$tmpRoot/in/index.html", 'x');
 file_put_contents("$tmp/outside.html", 'x');

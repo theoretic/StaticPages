@@ -73,8 +73,10 @@ class StaticPagesWiper extends Wire {
 		if( $htmlOnly ) $rootNames = array();
 		else if( $rootNames === null ) $rootNames = $this->sp->configValue('cacheNonHtml', 0) ? array_keys( $this->sp->rootFilesArray() ) : array();
 
-		$root = $this->sp->rootPath();
-		$rootNorm = rtrim( $this->sp->normalizePath($root), DIRECTORY_SEPARATOR );
+		//a copy of a page lives below the static root, a root file's copy in the site root
+		$root = $this->sp->staticRoot();
+		$siteRoot = $this->sp->rootPath();
+		$rootNorm = rtrim( $this->sp->normalizePath($siteRoot), DIRECTORY_SEPARATOR );
 		$nonStaticDirs = $this->sp->nonStaticDirsArray();
 		$dirs = array();
 		$failed = array();
@@ -90,6 +92,7 @@ class StaticPagesWiper extends Wire {
 			if( !in_array( basename($path), $names, true ) ){
 				if( !in_array( basename($path), $rootNames, true ) ) continue;
 				if( $relative !== '/' . basename($path) ) continue;
+				$path = $siteRoot . $relative;
 				if( rtrim( $this->sp->normalizePath( dirname($path) ), DIRECTORY_SEPARATOR ) !== $rootNorm ) continue;
 			}
 			if( !is_file($path) ) continue;
@@ -139,8 +142,8 @@ class StaticPagesWiper extends Wire {
 	}
 
 	public function relativePath($path){
-		//root relative, forward slashes, leading slash: the form the index and the log use
-		$root = rtrim( str_replace( '\\', '/', $this->sp->rootPath() ), '/' );
+		//static root relative, forward slashes, leading slash: the form the index and the log use
+		$root = rtrim( str_replace( '\\', '/', $this->sp->staticRoot() ), '/' );
 		$path = rtrim( str_replace( '\\', '/', $path ), '/' );
 		return strpos($path, $root) === 0 ? substr($path, strlen($root)) : $path;
 	}
@@ -267,8 +270,8 @@ class StaticPagesWiper extends Wire {
 
 	public function insideRoot($path){
 		//realpath() resolves links, junctions and dots: whatever a path says, it has to end up
-		//strictly below the site root to be deleted
-		$rootReal = realpath( $this->sp->rootPath() );
+		//strictly below the static root to be deleted
+		$rootReal = realpath( $this->sp->staticRoot() );
 		$real = realpath($path);
 		if( $rootReal === false || $real === false ) return false;
 		$prefix = rtrim( $rootReal, '/\\' ) . DIRECTORY_SEPARATOR;
@@ -694,7 +697,7 @@ class StaticPagesWiper extends Wire {
 
 		$result = $this->emptyResult($dryRun);
 
-		$root = $this->sp->rootPath();
+		$root = $this->sp->staticRoot();
 		$nonStaticDirs = $this->sp->nonStaticDirsArray();
 		//the root level: the HTML name and its temporary name alone, the home page is never
 		//written as anything else and index.xml or robots.txt at the root is no copy of a page.
@@ -796,7 +799,7 @@ class StaticPagesWiper extends Wire {
 		//the same pair as the root find
 		$match = '\\( -name ' . escapeshellarg( $this->sp->staticFileName() ) . ' -o -name ' . escapeshellarg( $this->sp->publisher()->tmpFileGlob() ) . ' \\)';
 
-		$root = escapeshellarg( $this->sp->rootPath() );
+		$root = escapeshellarg( $this->sp->staticRoot() );
 		$commands = array( "find $root -mindepth 1 -maxdepth 1 -type f $match -delete 2>/dev/null" );
 
 		if( count($targets) ){
@@ -838,7 +841,7 @@ class StaticPagesWiper extends Wire {
 			'$tmps = @(' . implode( ', ', array_map( $text, $this->tmpFileGlobs($names) ) ) . ')',
 			'function Wipe-Files([string]$dir, [bool]$all){ try { $files = [IO.Directory]::GetFiles($dir) } catch { return }; foreach($file in $files){ $n = [IO.Path]::GetFileName($file); $hit = $false; if($all){ foreach($x in $names){ if($n -eq $x){ $hit = $true } }; foreach($x in $tmps){ if($n -like $x){ $hit = $true } } } else { $hit = ($n -eq $name -or $n -like $tmp) }; if($hit){ try { [IO.File]::Delete($file) } catch {} } } }',
 			'function Wipe-Tree([string]$dir){ try { $subs = [IO.Directory]::GetDirectories($dir) } catch { return }; foreach($sub in $subs){ if(-not ([IO.File]::GetAttributes($sub) -band [IO.FileAttributes]::ReparsePoint)){ Wipe-Tree $sub } }; Wipe-Files $dir $true; try { if([IO.Directory]::GetFileSystemEntries($dir).Length -eq 0){ [IO.Directory]::Delete($dir) } } catch {} }',
-			'Wipe-Files ' . $text( $this->sp->rootPath() ) . ' $false',
+			'Wipe-Files ' . $text( $this->sp->staticRoot() ) . ' $false',
 		);
 		foreach( $targets as $target ) $lines[] = 'Wipe-Tree ' . $text($target);
 		$lines[] = "Write-Output 'StaticPages-scan-done'";
