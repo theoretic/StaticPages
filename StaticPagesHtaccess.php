@@ -35,6 +35,8 @@ stock rule 19):
     holds a character the stock 16A condition refuses (then it gets the stock 403)
   - everything else is left to the stock rules (a directory requested without its trailing
     slash gets mod_dir's 301 to the slashed form, as without the block)
+  - with a Static base directory the copies are looked for there (and below <base>/<host>/ with
+    Static files per host), the web root's directories only guard, see baseRules()
 A missing or outdated block may only cost speed, never correctness: without a rule a request
 reaches PHP.
 */
@@ -219,6 +221,10 @@ class StaticPagesHtaccess extends Wire {
 		$cookies = $this->loginCookies($notes);
 		if( count($cookies) ) $serve[] = array( '%{HTTP_COOKIE}', '!(^|;\s*)(' . implode( '|', array_map( array($this, 'escape'), $cookies ) ) . ')=' );
 
+		//"Static base directory" set: the copies are served from there, see baseRules()
+		$base = $this->baseDir($notes);
+		if( $base !== '' ) return array( 'rules' => $this->baseRules( $name, $serve, $base, $this->hostDirs($notes) ), 'notes' => $notes );
+
 		$rules = array();
 
 		//the home page: its dir holds ProcessWire's own index.php, which the stock
@@ -282,19 +288,7 @@ class StaticPagesHtaccess extends Wire {
 		//and a dir holding one would get it through DirectoryIndex for a POST, a query string and
 		//a logged in user. A hand-made index.html cannot be told from a copy: such a dir needs a
 		//rule of the site's own above the block, see README [decided by user, audit 1, A1.2]
-		$third = array(
-			array( '%{REQUEST_URI}', self::stockPageNameCond ),
-			array( '%{REQUEST_FILENAME}', '-d' ),
-			array( '%{REQUEST_FILENAME}/index.php', '!-f' ),
-			);
-		if( strtolower($name) !== 'index.htm' ) $third[] = array( '%{REQUEST_FILENAME}/index.htm', '!-f' );
-		$rules[] = array(
-			'comment' => 'Any other request for an existing directory, with its trailing slash, a URL the stock 16A condition accepts and without an index file of its own, goes to ProcessWire.',
-			'conds' => $third,
-			'pattern' => '^(.+/)$',
-			'target' => 'index.php?it=$1',
-			'flags' => '[L,QSA]',
-			);
+		$rules[] = $this->dirRule($name);
 
 		//"Replace these root files with pages": a request for the name that is no existing file
 		//goes to ProcessWire as the line's page; once the copy exists the stock rules serve it.
@@ -314,6 +308,152 @@ class StaticPagesHtaccess extends Wire {
 		return array( 'rules' => $rules, 'notes' => $notes );
 	}
 
+	protected function dirRule($name) {
+		//the rule handing an existing dir to ProcessWire, see rules()
+		$conds = array(
+			array( '%{REQUEST_URI}', self::stockPageNameCond ),
+			array( '%{REQUEST_FILENAME}', '-d' ),
+			array( '%{REQUEST_FILENAME}/index.php', '!-f' ),
+			);
+		if( strtolower($name) !== 'index.htm' ) $conds[] = array( '%{REQUEST_FILENAME}/index.htm', '!-f' );
+		return array(
+			'comment' => 'Any other request for an existing directory, with its trailing slash, a URL the stock 16A condition accepts and without an index file of its own, goes to ProcessWire.',
+			'conds' => $conds,
+			'pattern' => '^(.+/)$',
+			'target' => 'index.php?it=$1',
+			'flags' => '[L,QSA]',
+			);
+	}
+
+	/**
+	 * The rules with a Static base directory: the matrix of rules() against <base>/ and, with
+	 * "Static files per host", <base>/<host>/
+	 *
+	 * The -f tests need the site root on disk, which the block may not name (it would change with
+	 * a move and is no setting): a condition takes it from the request, as REQUEST_FILENAME plus
+	 * PATH_INFO with the rule's own match ($1) cut off its end [decided by user, Q39 G]; the
+	 * substitutions stay relative, as in the stock rule 19. The web root's guards stay: a dir
+	 * holding an index.php or an index.htm of its own is left to the stock rules, any other
+	 * existing dir goes to ProcessWire, so a copy left in the web root by the root layout (or a
+	 * hand-made index.html) is never served [Q39 D]. A root file line is served from its copy to
+	 * what a page copy is served to, anything else for its name goes to ProcessWire, whatever the
+	 * web root holds [Q39 E]. With the host key, one rule set per host of $config->httpHosts, the
+	 * Host header matched without regard to case; any other Host gets no copy [Q39 A].
+	 *
+	 * @param string $name The static file name, valid
+	 * @param array $serve The conditions under which a copy may answer
+	 * @param string $base See baseDir()
+	 * @param array|null $hosts See hostDirs()
+	 * @return array
+	 *
+	 */
+	protected function baseRules($name, array $serve, $base, $hosts) {
+		$sets = $hosts === null ? array( '' => '' ) : $hosts;
+		$guards = array( array( '%{REQUEST_FILENAME}/index.php', '!-f' ) );
+		//as in dirRule(): with Static file name index.htm a web root index.htm is a copy of the
+		//root layout, not a hand-made page
+		if( strtolower($name) !== 'index.htm' ) $guards[] = array( '%{REQUEST_FILENAME}/index.htm', '!-f' );
+		//the site root, with its slash, as %2: $1 cut off the end of the path the request maps to
+		$root = array( '$1::%{REQUEST_FILENAME}%{PATH_INFO}', '^(.*)::(.*)\1$' );
+		$names = array($name);
+		foreach( $this->scanNames() as $typed ) if( $typed !== $name ) $names[] = $typed;
+
+		$rules = array();
+		foreach( $sets as $host => $dir ){
+			$at = $base . '/' . ( $dir === '' ? '' : $dir . '/' );
+			$prefix = $this->escape($base) . '/' . ( $dir === '' ? '' : $this->escape($dir) . '/' );
+			$conds = $dir === '' ? $serve : array_merge( array( array( '%{HTTP_HOST}', '^' . $this->escape($host) . '$', '[NC]' ) ), $serve );
+			$rules[] = array(
+				'comment' => 'The home page, from its copy in ' . $at . '.',
+				'conds' => array_merge( $conds, array(
+					array( '%{REQUEST_FILENAME}/' . $prefix . $this->escape($name), '-f' ),
+					) ),
+				'pattern' => '^$',
+				'target' => $prefix . $this->escape($name),
+				'flags' => '[L]',
+				);
+			foreach( $names as $n ){
+				$file = $this->escape($n);
+				$rules[] = array(
+					'comment' => 'A page, from its ' . $n . ' copy in ' . $at . ', unless its directory in the web root holds an index file of its own.',
+					'conds' => array_merge( $conds, $guards, array(
+						$root,
+						array( '%2' . $prefix . '$1' . $file, '-f' ),
+						) ),
+					'pattern' => '^(.+/)$',
+					'target' => $prefix . '$1' . $file,
+					'flags' => '[L]',
+					);
+			}
+		}
+
+		//an existing dir of the web root: its copy, if any, is the root layout's, never served
+		$rules[] = $this->dirRule($name);
+
+		foreach( $this->rootFiles() as $file => $path ){
+			$escaped = $this->escape($file);
+			foreach( $sets as $host => $dir ){
+				$at = $base . '/' . ( $dir === '' ? '' : $dir . '/' );
+				$prefix = $this->escape($base) . '/' . ( $dir === '' ? '' : $this->escape($dir) . '/' );
+				$conds = $dir === '' ? $serve : array_merge( array( array( '%{HTTP_HOST}', '^' . $this->escape($host) . '$', '[NC]' ) ), $serve );
+				$rules[] = array(
+					'comment' => 'The root file ' . $file . ', from its copy in ' . $at . '.',
+					'conds' => array_merge( $conds, array(
+						array( '%{REQUEST_FILENAME}%{PATH_INFO}', '^(.*/)' . $escaped . '$' ),
+						array( '%1' . $prefix . $escaped, '-f' ),
+						) ),
+					'pattern' => '^' . $escaped . '$',
+					'target' => $prefix . $escaped,
+					'flags' => '[L]',
+					);
+			}
+			$rules[] = array(
+				'comment' => 'Any other request for the root file ' . $file . ' goes to the page ' . $path . '.',
+				'conds' => array(),
+				'pattern' => '^' . $escaped . '$',
+				'target' => 'index.php?it=' . $path,
+				'flags' => '[L,QSA]',
+				);
+		}
+
+		return $rules;
+	}
+
+	protected function baseDir(array &$notes) {
+		//"Static base directory" as the rules use it: StaticPages::baseDirSyntax(), the checks of
+		//checkBaseDir() that need no disk [decided by user, Q39 B]. A refused value gives the rules
+		//of the web root and a note, as the module then writes there [Q39 C]
+		$raw = $this->settings === null ? $this->sp->configValue('staticBaseDir', '') : ( isset($this->settings['staticBaseDir']) ? $this->settings['staticBaseDir'] : '' );
+		list( $dir, $why ) = $this->sp->baseDirSyntax($raw);
+		//one more line than baseDirSyntax(): its pattern's $ lets a segment end in a line feed
+		if( $dir !== '' && !preg_match( '#^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$#D', $dir ) ){
+			$dir = '';
+			$why = 'a character that is no letter, digit, . _ - or /';
+		}
+		if( $why !== '' ) $notes[] = 'The Static base directory setting is not used (' . $why . '): the rules serve copies from the web root.';
+		return $dir;
+	}
+
+	protected function hostDirs(array &$notes) {
+		//null while "Static files per host" is off; else host => dir for each host of
+		//$config->httpHosts, lower-cased, whose dir StaticPages::isHostDir() accepts, as
+		//StaticPages::staticHost() names it. Read only with a base directory, see rules()
+		$on = $this->settings === null ? $this->sp->configValue('staticHostKey', 0) : ( isset($this->settings['staticHostKey']) ? $this->settings['staticHostKey'] : 0 );
+		if( empty($on) ) return null;
+		$hosts = array();
+		$refused = 0;
+		foreach( (array) $this->wire()->config->httpHosts as $host ){
+			$host = strtolower( (string) $host );
+			if( isset($hosts[$host]) ) continue;
+			$dir = str_replace( ':', '_', $host );
+			if( $this->sp->isHostDir($dir) ) $hosts[$host] = $dir;
+			else $refused++;
+		}
+		if( $refused ) $notes[] = sprintf( '%d host(s) of $config->httpHosts are no plain host name: no copy is served to them.', $refused );
+		if( !count($hosts) ) $notes[] = 'Static files per host: $config->httpHosts names no plain host name, no copy is served.';
+		return $hosts;
+	}
+
 	/**
 	 * The block for Apache's .htaccess: the rule list as text, LF line ends, no final line end
 	 *
@@ -331,7 +471,7 @@ class StaticPagesHtaccess extends Wire {
 
 		foreach( $result['rules'] as $rule ){
 			$lines[] = '# ' . $rule['comment'];
-			foreach( $rule['conds'] as $cond ) $lines[] = 'RewriteCond ' . $cond[0] . ' ' . $cond[1];
+			foreach( $rule['conds'] as $cond ) $lines[] = 'RewriteCond ' . $cond[0] . ' ' . $cond[1] . ( isset($cond[2]) ? ' ' . $cond[2] : '' );
 			$lines[] = 'RewriteRule ' . $rule['pattern'] . ' ' . $rule['target'] . ' ' . $rule['flags'];
 		}
 

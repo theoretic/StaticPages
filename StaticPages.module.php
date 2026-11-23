@@ -482,7 +482,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 		if( !$status ) return;
 		//hand-made dirs: the block cannot tell their index.html from a copy [decided by user, audit 1, A1.2]
-		$f->notes = $this->_('A directory made by hand in the web root (a landing page, a static mini-site) holding an index.html cannot be told from a copy: the block hands it to ProcessWire for a query string, a POST and a logged-in user. Add a rule of your own above the block for each one, e.g. for landing/: "RewriteCond %{REQUEST_FILENAME} -d" and "RewriteRule ^landing/ - [L]" (README, Directories made by hand). A directory holding an index.htm is left to the stock rules, unless the static file name is index.htm.');
+		$f->notes = $this->_('A directory made by hand in the web root (a landing page, a static mini-site) holding an index.html cannot be told from a copy: the block hands it to ProcessWire for a query string, a POST and a logged-in user. Add a rule of your own above the block for each one, e.g. for landing/: "RewriteCond %{REQUEST_FILENAME} -d" and "RewriteRule ^landing/ - [L]" (README, Directories made by hand). A directory holding an index.htm is left to the stock rules, unless the static file name is index.htm. With a Static base directory such a directory goes to ProcessWire for every request, its own index.html, index.xml or index.txt is never served: the same rule of your own keeps it.');
 		$block = $modules->get('InputfieldMarkup');
 		$block->attr( 'name', '_htaccessBlock' );
 		$block->label = $this->_('The StaticPages block');
@@ -1350,15 +1350,8 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//not). Accepted: a relative path of plain names (letters, digits, . _ -, no leading dot),
 		//no empty, . or .. segment, that resolves below the site root, links and all, and is not
 		//the site root itself; a trailing slash is dropped. It need not exist yet
-		$value = str_replace( '\\', '/', trim( (string) $raw ) );
-		if( $value === '' ) return array('', '');
-		if( $value[0] === '/' || preg_match('#^[A-Za-z]:#', $value) ) return array('', 'an absolute path');
-		$value = rtrim( $value, '/' );
-		foreach( explode('/', $value) as $segment ){
-			if( $segment === '' ) return array('', 'an empty segment');
-			if( $segment === '.' || $segment === '..' ) return array('', 'a . or .. segment');
-			if( !preg_match('/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/', $segment) ) return array('', 'a segment that is no plain name (letters, digits, . _ -, no leading dot)');
-		}
+		list( $value, $why ) = $this->baseDirSyntax($raw);
+		if( $value === '' ) return array('', $why);
 		$root = $this->rootPath();
 		$rootReal = realpath($root);
 		if( $rootReal === false ) return array('', 'the site root cannot be resolved');
@@ -1375,6 +1368,22 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( file_exists($path) ){
 			if( !is_dir($path) ) return array('', 'it is no directory');
 			if( !$below( (string) realpath($path) ) ) return array('', 'it resolves to the site root itself');
+		}
+		return array($value, '');
+	}
+
+	/** #pw-internal */
+	public function baseDirSyntax($raw){
+		//checkBaseDir() without the disk: array(the value, '' when refused or empty; why it is
+		//refused). What the .htaccess generator, which reads no disk, asks [decided by user, Q39 B]
+		$value = str_replace( '\\', '/', trim( (string) $raw ) );
+		if( $value === '' ) return array('', '');
+		if( $value[0] === '/' || preg_match('#^[A-Za-z]:#', $value) ) return array('', 'an absolute path');
+		$value = rtrim( $value, '/' );
+		foreach( explode('/', $value) as $segment ){
+			if( $segment === '' ) return array('', 'an empty segment');
+			if( $segment === '.' || $segment === '..' ) return array('', 'a . or .. segment');
+			if( !preg_match('/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/', $segment) ) return array('', 'a segment that is no plain name (letters, digits, . _ -, no leading dot)');
 		}
 		return array($value, '');
 	}
