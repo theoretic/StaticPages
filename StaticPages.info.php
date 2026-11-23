@@ -9,8 +9,8 @@ namespace ProcessWire;
 
 $info = array(
 	'title'					=> 'StaticPages',
-	'version'				=> '0.10.0',
-	'summary'				=> 'Saves output to static html files. A page save deletes only the files whose render depended on the saved page; settings module config saves and tracked file changes delete them all.',
+	'version'				=> '0.11.0',
+	'summary'				=> 'Saves output to static files: html, and xml or plain text when switched on. A page save deletes only the files whose render depended on the saved page; settings module config saves and tracked file changes delete them all.',
 	'author'				=> 'AT / atis.pro',
 	'href'					=> 'http://atis.pro',
 	'singular'				=> true,

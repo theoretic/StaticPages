@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.11.0 (2026-11-23)
+
+Pages answering XML or plain text can be cached, and a page can answer for a file in the web
+root such as `robots.txt` or `sitemap.xml`. Both are off by default.
+
+### What happens on an existing site
+With the new settings at their defaults:
+
+- **Changed: a response typed by its `Content-Type` header alone is no longer cached as
+  `index.html`.** A template whose *Content-Type* setting says HTML, or nothing, but whose code
+  sends `header('Content-Type: application/xml')`, `application/json`, `text/plain` and the like
+  was cached as `index.html` and served to everybody as `text/html`. It is now skipped, and *Log
+  skipped pages* says `the response is sent as <MIME type>`. Such copies already on disk stay
+  until a save or a wipe deletes them.
+- **Changed: a template whose *Content-Type* setting is a key `$config->contentTypes` does not
+  know, or the MIME type `text/html` written out, is cached as HTML.** 0.10.0 skipped it
+  (`content type is '…'`).
+- **Unchanged**: the names of the copies (`index.html`, or *Static file name*), what a scan or a
+  wipe matches and walks, the default *Non-static directories*, the tracked paths, and the
+  StaticPages block in the root `.htaccess`, byte for byte. No config key, table or file changes
+  meaning, and there is nothing to migrate.
+
+### Added
+- **Cache XML and plain text responses** (`cacheNonHtml`, off). Checked, a render is written as
+  `index.xml` or `index.txt` (*Static file name* with its extension replaced) by its type: the
+  response's last `Content-Type` header, else the template's *Content-Type* setting, else HTML.
+  XML is `application/xml`, `text/xml` and the `…+xml` types but XHTML. JSON and other types are
+  never cached, nor is a render whose setting and header disagree. Never for the home page, never
+  without the index tables, never over a file the index does not record. *CSRF token tags* are
+  not stripped from it; the `fileContent` hook still runs. *Non-static page templates* wins, and
+  the settings save names the listed templates that answer XML or plain text. Checking or
+  unchecking the box deletes every copy on that save, *Dry run* checked or not. The block gets a
+  rule for each of the two names, after the HTML one.
+- **Replace these root files with pages** (`rootFiles`, empty): one `<file name> <page path>` per
+  line, `robots.txt /robots/`, `sitemap.xml /sitemap/`, used only with the box above checked.
+  The block routes the name to its page while no file of that name exists; the page's render is
+  written to the web root under that name, and the web server serves it from then on. A
+  hand-made file of that name is taken over on a settings save, only while the `.htaccess` holds
+  the route: it is renamed to its dot backup (`.robots.txt`, `.sitemap.xml`, 403 under the stock
+  rules), which is never overwritten. It comes back when the line is removed, when the box is
+  unchecked, and on uninstall. A wipe, forced or not, deletes the module's copy by its record and
+  renames nothing. *Dry run* holds the renames back and logs them. A site keeping its own rules
+  adds the route by hand; the save's warning names the two lines.
+- **README**: *XML and plain text*, *robots.txt and sitemap.xml*, the new skips under *Why is
+  nothing being generated*, a hand-made directory holding only an `index.xml` or `index.txt`
+  (served to a guest's `GET` with the box checked, where the stock rules answer 403), and the
+  nginx example extended for both settings, run on nginx 1.29 first.
+
+### Changed
+- A page directory that can not be created is logged as a skip (`could not create <dir>`), with
+  *Log skipped pages* on.
+- A manifest line naming anything but the HTML copy is not imported into the index.
+
+### Tests
+- `tests/smoke.php` checks the type of a render, the name sets, the writes and refusals, scans and
+  deletes by name and by record, the take-over and the give-back with their refusals and dry
+  runs, the uninstall order, a forced wipe with a root file copy, and the block with both
+  settings, the default block pinned by its hash.
+
 ## 0.10.0 (2026-11-17)
 
 The module looks after the web server rules that serve its static files itself: on Apache it

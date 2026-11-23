@@ -4,15 +4,15 @@ Lazy static pages generator for Processwire CMS.
 
 ## How does it work
 
-Normally Processwire renders any page any time it's requested. StaticPages module allows Processwire to render certain pages only once. When it happens, StaticPages creates a static html file located corresponding to the URL which has been requested. The following requeststs to this URL will not be handled by Processwire. The previously created html file will be returned by the server.
+Normally Processwire renders any page any time it's requested. StaticPages module allows Processwire to render certain pages only once. When it happens, StaticPages creates a static file located corresponding to the URL which has been requested: `index.html`, or, with *Cache XML and plain text responses* on, `index.xml` or `index.txt` for a page answering XML or plain text (see *XML and plain text*). The following requeststs to this URL will not be handled by Processwire. The previously created file will be returned by the server.
 
 Module reacts to the following events:
 
-- Page render: a new static html file is created, and the pages its render depended on are recorded with it.
+- Page render: a new static file is created, and the pages its render depended on are recorded with it.
 - Page save, delete, sort, trash or restore: the static files that depended on that page are deleted, and only those. See *What a save deletes* below.
 - Single field save: the same. Inline admin edits and `$page->setAndSave()` never reach a page save. Can be switched off in the module settings.
-- Config save of a listed module: all previously generated html files will be deleted. Modules like SettingsFactory keep site-wide settings in their own module config data and save no page, so a page save event never happens even though the settings end up in the markup. List such modules in the *Wipe on config save of these modules* setting, one class name per line.
-- Tracked file change: all previously generated html files will be deleted. Editing a template or an asset file fires no ProcessWire event at all, so nothing would tell the module its static files went stale. The patterns listed in the *Track changes in these paths* setting are checked on admin requests by file name, modification time and size; file contents are never read. `*` matches inside one path segment, `**` matches any number of segments including none.
+- Config save of a listed module: all previously generated static files will be deleted. Modules like SettingsFactory keep site-wide settings in their own module config data and save no page, so a page save event never happens even though the settings end up in the markup. List such modules in the *Wipe on config save of these modules* setting, one class name per line.
+- Tracked file change: all previously generated static files will be deleted. Editing a template or an asset file fires no ProcessWire event at all, so nothing would tell the module its static files went stale. The patterns listed in the *Track changes in these paths* setting are checked on admin requests by file name, modification time and size; file contents are never read. `*` matches inside one path segment, `**` matches any number of segments including none.
 
 A save does not delete anything itself. It queues what went stale, and the files are deleted
 once the response has been sent: under php-fpm and LiteSpeed the connection is closed first,
@@ -157,6 +157,108 @@ still writing is answered from the previous complete file, or from PHP, never fr
 half-written one. A write that fails takes the directory it created back down with it,
 so a request can never meet an empty directory either.
 
+## XML and plain text
+
+With *Cache XML and plain text responses* checked (it is off by default) a page answering XML or
+plain text is cached too: XML as `index.xml`, plain text as `index.txt`, where its `index.html`
+would be. The names are *Static file name* with its extension replaced. Unchecked, such a response
+is not cached at all.
+
+There is nothing to map. The type of a render is, in this order:
+
+- what the response's last `Content-Type` header says, when the template sends one
+  (`header('Content-Type: application/rss+xml')`);
+- else what the template's *Content-Type* setting says (*Templates > Files*): a key of
+  `$config->contentTypes` such as `xml` or `txt`, or a MIME type written out;
+- else HTML.
+
+`text/html` is HTML, `text/plain` is plain text, and `application/xml`, `text/xml` and every
+`…+xml` type but `application/xhtml+xml` (`application/rss+xml`, `application/atom+xml`) are XML.
+Anything else, JSON included, is never cached. When the setting and the header both say something
+and disagree, the render is not cached either. The web server serves the copy by its extension:
+`index.xml` goes out as `application/xml`, also for a feed PHP sent as `application/rss+xml`.
+
+The pages and their files:
+
+- a page, `/sitemap/`: `sitemap/index.xml`, served for `/sitemap/`;
+- a page with URL segments, `/feed/rss/`: `feed/rss/index.xml`;
+- the home page: never, the site root holds no `index.xml` or `index.txt`;
+- a page listed in *Replace these root files with pages*: one file in the web root, see
+  *robots.txt and sitemap.xml* below.
+
+An XML or plain text copy is never written on a site without the index tables (the manifest knows
+HTML copies only), and never over a file the index does not record, a hand-made `index.xml` say.
+*CSRF token tags* are not stripped from it, they are HTML; the `fileContent` hook sees it as any
+render. See *Why is nothing being generated* for the log lines.
+
+*Non-static page templates* wins: a page of a listed template is never cached, whatever its type.
+A settings save with the box checked names the listed templates whose *Content-Type* setting says
+XML or plain text.
+
+Checking or unchecking the box deletes every static copy, when the settings are saved, *Dry run*
+checked or not. Turned on, a response cached as `index.html` by its header would stay next to its
+new `index.xml`; turned off, a directory holding an `index.xml` would no longer count as a page's
+copy and its files would be protected from every wipe (see *Non-static directories*). A copy goes by
+its record whatever the box says. Unchecked, the names a scan matches, the protected directories
+and the StaticPages block are those of 0.10.0.
+
+Checked, the StaticPages block gets a rule for each of the two names after the HTML one: a
+directory holding both an `index.html` and an `index.xml` is answered from the `index.html`, one
+holding an `index.xml` and an `index.txt` from the `index.xml`. A site that keeps its own rules
+copies these from the block on the settings form; for nginx see *Without .htaccess*.
+
+## robots.txt and sitemap.xml
+
+*Replace these root files with pages* lets a page answer for a file in the web root: one line per
+file, the file name and the page's path, `robots.txt /robots/` or `sitemap.xml /sitemap/`. Without
+a path the page is the one named like the file, `/sitemap.xml/`. A name is lower case, ends in
+`.xml` or `.txt`, is no path and no dot file, and is neither *Static file name* nor one of its
+`index.xml`, `index.txt` names. The list works only while *Cache XML and plain text responses* is
+checked. A settings save warns about every line it ignores, every path that is no page, and every
+line while that box is unchecked.
+
+While the box is checked, the StaticPages block hands a request for `/robots.txt` to the page as
+long as no file of that name exists:
+
+```apache
+# The root file robots.txt, from the page /robots/ while it is no existing file.
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^robots\.txt$ index.php?it=/robots/ [L,QSA]
+```
+
+The page's render, for a guest's `/robots.txt` or `/robots/`, is written to `robots.txt` in the web
+root, never to `robots/index.txt`, and only when its type is the one the name ends in: a plain
+text render for `robots.txt`, an XML one for `sitemap.xml`. From then on the web server serves the
+file to every request for `/robots.txt`, also with a query string, a `POST` or the login cookie, as
+it serves any existing file. The copy is recorded as any copy is: a save of a page it depends on
+deletes it, and the next request renders it again.
+
+**The take-over.** A `robots.txt` made by hand is in the way. A settings save, from an admin request
+or a CLI run, with the box checked and the line listed, renames it to `.robots.txt`, its dot
+backup, and the page's copy takes its place. Only when the index tables exist, when the file is
+no directory, when no `.robots.txt` exists (a backup is never overwritten), and when the root
+`.htaccess` hands `/robots.txt` to the page: the StaticPages block as the settings make it, or the
+hand-written route below. Otherwise the file stays where it is and the save warns why.
+ProcessWire's `.htaccess` refuses every path that starts with a dot, so `/.robots.txt` answers 403;
+on a server without that rule (nginx without its equivalent) anybody can fetch it.
+
+**When the original comes back.** A save that removes the line, a save that unchecks the box, and
+uninstalling the module delete the module's copy by its record and rename `.robots.txt` back to
+`robots.txt`. A file `robots.txt` in the way stops the rename, and the save warns. A wipe, forced
+or not, deletes the copy and renames nothing: the original stays `.robots.txt`, and the page
+answers until it is cached again. A save that only changes the line's page path deletes the copy
+and renames nothing either. With *Dry run* checked a save still deletes the copy, and holds back
+and logs the renames. A `robots.txt` the index does not record is never written over or deleted.
+
+**A site that keeps its own rules** (*Keep them*, or no block at all) adds the route itself, above
+the `# PW-PAGENAME` line, one pair of lines per file, and the take-over waits for it. The save's
+warning names the lines:
+
+```apache
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^robots\.txt$ index.php?it=/robots/ [L,QSA]
+```
+
 ## Why is nothing being generated
 
 A rendered page is **not** cached when any of these is true. The *Log skipped pages*
@@ -170,7 +272,28 @@ module looks like it is doing nothing, and off again afterwards on a busy front 
 - The response carries a status other than 200, or the page is the ProcessWire 404 page.
   A static file is served with 200 for as long as it exists, so an error page frozen into
   one would be handed out as if it were the real thing.
-- The template answers a content type other than html, or the request is an ajax request.
+- The request is an ajax request.
+- The response is XML or plain text and *Cache XML and plain text responses* is off. The log
+  says `content type is '<key>'` when the template's *Content-Type* setting says so, and
+  `the response is sent as <MIME type>` when only the response's `Content-Type` header does.
+  Up to 0.10.0 any response typed by its header alone (XML, plain text, JSON) was written as
+  `index.html` and served as HTML.
+- The response is neither HTML, XML nor plain text, switch on or off: JSON, a PDF, an image
+  (`content type is '<key>'`, `the response is sent as <MIME type>`).
+- The template's *Content-Type* setting and the response's `Content-Type` header disagree:
+  `the template says <key>, the response is sent as <MIME type>`. Which one is right, the
+  module can not tell.
+- An XML or plain text response for the home page, the root level holds HTML only:
+  `a non-html copy of the home page is not written`.
+- An XML or plain text response on a site without the index tables, the manifest knows HTML
+  copies only: `no index tables: only html is cached with the manifest`.
+- An XML or plain text copy would replace a file the index does not record, a hand-made
+  `index.xml` say: `a file the index does not know is in the way: <path>`.
+- The page is listed in *Replace these root files with pages*, and the render's type is not the
+  one the listed file name ends in:
+  `the page is listed in Replace these root files with pages as <file names>, a <type> render is not written`.
+- The page's directory can not be created, for want of permissions or with a file of that name
+  in the way: `could not create <dir>`.
 - The request carries GET or POST variables, or it is a paginated page beyond the first.
 - The request carries a cookie listed in *Never cache with these cookies* (one name per line,
   `*` and `?` as wildcards): output depending on a currency, region or consent cookie would be
@@ -343,7 +466,9 @@ What it does:
 
 - A `GET` or `HEAD` request without a query string, from a visitor who is not logged in, is
   answered from the page's static copy when there is one: `/` from `index.html`, `/a/b/` from
-  `a/b/index.html`.
+  `a/b/index.html`. With *Cache XML and plain text responses* checked, also from `a/b/index.xml`
+  and `a/b/index.txt`, and a file of *Replace these root files with pages* goes to its page while
+  it does not exist: see *XML and plain text* and *robots.txt and sitemap.xml*.
 - A query string, any other method (a form's `POST`) and the login cookie
   (`<session name>_challenge`, for the http and the https session name) go to ProcessWire, which
   renders the page. The cookie condition is there only while `$config->sessionChallenge` is on, as
@@ -363,7 +488,8 @@ Missing or outdated, the block only costs speed: without it every request reache
 block goes immediately before the `# PW-PAGENAME` line, inside the `mod_rewrite` section. Further
 down it would take the stock conditions of section 17 for itself. Its rules are relative to the
 `.htaccess` directory, so a ProcessWire installed in a subdirectory gets the same answers. *Static
-file name* and the session settings are the values it is made from, and the settings form shows
+file name*, *Cache XML and plain text responses*, *Replace these root files with pages* and the
+session settings are the values it is made from, and the settings form shows
 it under *The StaticPages block*.
 
 ### Directories made by hand
@@ -378,6 +504,10 @@ the block:
   (`?utm_source=…`), a `POST` or the login cookie hands it to ProcessWire, which answers 404 where
   the stock rules served the file; with *Static file name* other than `index.html`, every request
   does. The same holds for an `index.htm` when *Static file name* is `index.htm`.
+- with *Cache XML and plain text responses* checked, one holding an `index.xml` or an `index.txt`
+  and no `index.html` is taken for a page's copy too: a guest's `GET` or `HEAD` without a query
+  string gets that file, where the stock rules answered 403, and everything else goes to
+  ProcessWire.
 
 The block is written without asking on a site that has none yet (see below), so check the web
 root for such directories. Each one gets a rule of the site's own above the block, immediately
@@ -492,8 +622,9 @@ written, restored), a message and the backup's name.
 
 Uninstalling the module first keeps every request from writing a static copy while it runs. It
 then takes the block and the `# StaticPages-replaced: ` prefixes out of the `.htaccess`, after a
-backup, and deletes the static copies the index (or the manifest) records. Last, it drops the
-tables. Copies nothing recorded stay where they are. The backups stay too.
+backup, and deletes the static copies the index (or the manifest) records. It renames the
+originals of *Replace these root files with pages* back (`.robots.txt` to `robots.txt`). Last, it
+drops the tables. Copies nothing recorded stay where they are. The backups stay too.
 
 ### Without .htaccess: nginx and other servers
 
@@ -519,17 +650,29 @@ the Apache block for reference. The same behaviour for nginx, an example to add 
   if ($sp = "1/fphd") { rewrite ^ /index.html last; }
   # A page, from its copy, unless its directory holds an index.php of its own.
   if ($sp = "1/fd") { rewrite ^ ${uri}index.html last; }
+  # With "Cache XML and plain text responses" on: a page from its index.xml, then its index.txt copy.
+  if (-f $document_root${uri}index.xml) { set $sp "${sp}m"; }
+  if ($sp = "1/dm") { rewrite ^ ${uri}index.xml last; }
+  if (-f $document_root${uri}index.txt) { set $sp "${sp}e"; }
+  if ($sp = "1/de") { rewrite ^ ${uri}index.txt last; }
   if (-f $document_root${uri}index.htm) { set $sp "${sp}t"; }
   # Any other existing directory, with its trailing slash, without an index.php or index.htm of its own, goes to ProcessWire.
-  if ($sp ~ "^1?/f?d$") { rewrite ^/(.*)$ /index.php?it=$1 last; }
+  if ($sp ~ "^1?/f?dm?e?$") { rewrite ^/(.*)$ /index.php?it=$1 last; }
+  # With "Cache XML and plain text responses" on, one line per line of "Replace these root files
+  # with pages": the root file robots.txt, from the page /robots/ while it is no existing file.
+  location = /robots.txt { try_files $uri /index.php?it=/robots/&$args; }
 ```
 
 `$sp` collects what is known about the request: `1` for a guest's `GET` or `HEAD` without a query
 string, `/` for a trailing slash, `f` and `p` for an `index.html` and an `index.php` in that
 directory, `h` for the home page, `d` for an existing directory, `x` for a URL the stock 16A rule
-refuses, and, after the copy rules, `t` for an `index.htm` in that directory. With *Static file
-name* changed, replace `index.html` in it; with `index.htm`, leave out the `t` line, as the
-block does. A directory made by hand needs a line of its own, as on Apache (see *Directories made
+refuses, `m` and `e` for an `index.xml` and an `index.txt`, and, after the copy rules, `t` for an
+`index.htm` in that directory. With *Cache XML and plain text responses* unchecked, leave out the
+four `m` and `e` lines and the `location` lines, as the block does. The `location` line hands
+`/robots.txt` to its page while no such file exists, and serves the file once it does: one per
+line of *Replace these root files with pages*, with that line's file name and page path. With
+*Static file name* changed, replace `index.html`, `index.xml` and `index.txt` in it; with
+`index.htm`, leave out the `t` line, as the block does. A directory made by hand needs a line of its own, as on Apache (see *Directories made
 by hand* above): `if ($uri ~ "^/landing/") { set $sp "${sp}n"; }` after the `x` line.
 
 Do **not** comment out the `!-d` line of the stock rule 19, as earlier versions of this README
@@ -615,7 +758,9 @@ of the same name further down, such as `/parachutes/site/`, is wiped as usual; a
 slashes around a name are ignored, and a line holding blanks protects each word as well. Until the
 setting is saved, the list defaults to every root dir except those that only hold static copies of
 first level pages (in every language, `/en/` included); a page dir that also holds other files (an
-`/api/` page next to `api/` endpoints) stays protected. Saving the setting stores the list as shown,
+`/api/` page next to `api/` endpoints) stays protected. A static copy is an `index.html` (*Static
+file name*), and an `index.xml` or `index.txt` only while *Cache XML and plain text responses* is
+checked. Saving the setting stores the list as shown,
 and the save warns when it names a dir that only holds static copies: those copies would never be
 wiped. Nothing is cached below a listed dir.
 
@@ -626,15 +771,19 @@ The list is not what keeps a full disk scan out of a dir, see below.
 A scan only runs when asked for (*Force static pages deletion on module save*, `wipeCaches(true)`)
 or when there is neither index nor manifest. It deletes the home page's copy at the root and walks
 only root dirs that are static copies of pages: named like a first level page in any language, and
-holding nothing but static files (and the temporary files a killed write left). Everything else is
+holding nothing but static copies (and the temporary files a killed write left). Everything else is
 left alone, listed or not, and the scan logs the unlisted dirs it left alone. Before 0.8.0 it
 walked every root dir the list did not name, and the list is a snapshot from the last config save:
 a dir added since (`vendor/`, a hand made landing page) lost every `index.html` and every empty dir
 in it. A static copy below a dir that is not a page copy (url segments of the home page, say) is
-only removed through the index.
+only removed through the index. Inside those dirs the scan deletes the files named `index.html`
+(*Static file name*), and `index.xml` and `index.txt` only while *Cache XML and plain text
+responses* is checked; at the root level the `index.html` alone. A file of *Replace these root
+files with pages* goes by its index record: the scan deletes the module's `robots.txt` copy, never
+a hand-made one, and renames nothing.
 
 Nothing is ever deleted that `realpath()` does not put below the site root, or that is not named
-like the static file. With *Use shell commands* the scan is one `find` on Linux, macOS and BSD, or
+like a static copy. With *Use shell commands* the scan is one `find` on Linux, macOS and BSD, or
 one PowerShell process on Windows, handed only those dirs; every argument goes through
 `escapeshellarg()`, and the PHP walk takes over when no shell runs (`shell_exec` disabled, say).
 On Windows the PHP walk is the faster of the two, PowerShell takes a few tenths of a second to
@@ -648,7 +797,9 @@ the same checks as the real scan (always the PHP walk), nothing deleted, no row 
 file and dir it would delete written to the `static-pages` log, with the root dirs it leaves alone.
 `wipeCaches(false, true)` does the same for a wipe by the index or the manifest. The call returns
 the list under `paths` and `leftAlone`. Run one on a copy of a site before trusting a forced wipe
-there: it should list page `index.html` files and their dirs, nothing else.
+there: it should list page `index.html` files and their dirs, nothing else (with *Cache XML and
+plain text responses* checked, their `index.xml` and `index.txt` files and the module's copies of
+*Replace these root files with pages* as well).
 
 ## Limits of path tracking
 
