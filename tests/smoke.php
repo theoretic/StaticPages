@@ -2068,6 +2068,76 @@ else @unlink($fsManifest);
 rrmdir("$tmpRoot/$fsSeg");
 $sp->index()->clearRows();
 
+////  the default Non-static directories leave out a dir the module made (0.12.0)
+
+//Non-static directories never saved: the home page with a URL segment writes
+//<root>/<segment>/index.html, a root dir no page is named like; a save of the home page must
+//delete it, the protected dir check must not keep it
+$sp->remove('nonStaticDirs');
+$ndSeen = array($fsHome());
+$ndListed = in_array($fsSeg, $sp->nonStaticDirsArray(), true);
+$sp->wiper()->wipeIndexed(array("p:{$home->id}"));
+$ndSeen = array_merge($ndSeen, array($ndListed, is_file("$tmpRoot/$fsSeg/index.html"), $sp->index()->hasFile("/$fsSeg/index.html")));
+check('Non-static directories never saved: the dir of the home page with a URL segment is not in the default list, wipeIndexed() with p:<home> deletes its recorded index.html, row gone', $ndSeen === array(true, false, false, false), json_encode($ndSeen) . ' ' . files($tmpRoot));
+rrmdir("$tmpRoot/$fsSeg");
+
+//the forced wipe's record pass reads the list before the rows go as well [decided by user, Q50 (a)]
+$ndScan = array($fsHome());
+$sp->wipeCaches(true);
+$ndScan = array_merge($ndScan, array(is_file("$tmpRoot/$fsSeg/index.html"), $sp->index()->hasFile("/$fsSeg/index.html")));
+check('Non-static directories never saved: a forced wipe deletes the recorded index.html of the home page with a URL segment, row gone', $ndScan === array(true, false, false), json_encode($ndScan) . ' ' . files($tmpRoot));
+rrmdir("$tmpRoot/$fsSeg");
+
+//kept in the list: a hand-made dir nothing recorded (landing/), a recorded dir holding a foreign
+//file, a record differing in letter case only, a dir name with LIKE wildcards in it
+$ndHand = "sp-hand-" . getmypid();
+$ndWild = "sp_w%-" . getmypid();
+putFiles($tmpRoot, array("/$ndHand/index.html", "/$fsSeg/index.html", "/$fsSeg/notes.txt", "/$ndWild/index.html"));
+recordAll($sp, array("/$fsSeg/index.html", '/' . strtoupper($ndHand) . '/index.html', '/spXwX-' . getmypid() . '/index.html'));
+$ndDefault = $sp->defaultNonStaticDirs();
+check('default list: a root dir holding a recorded index.html and a foreign file stays listed', in_array($fsSeg, $ndDefault, true), json_encode($ndDefault));
+check('default list: a hand-made dir holding only an unrecorded index.html stays listed, a record of it in other letter case does not count', in_array($ndHand, $ndDefault, true), json_encode($ndDefault));
+check('default list: a dir named with LIKE wildcards stays listed, a record matching the wildcards does not count', in_array($ndWild, $ndDefault, true), json_encode($ndDefault));
+@unlink("$tmpRoot/$fsSeg/notes.txt");
+$ndDefault = $sp->defaultNonStaticDirs();
+check('...the recorded dir leaves the list once the foreign file is gone', !in_array($fsSeg, $ndDefault, true), json_encode($ndDefault));
+
+//base mode: index paths are relative to the base dir, the list keeps today's default [decided by user, Q49 B (a)]
+$sp->set('staticBaseDir', 'site/assets/static');
+$ndBase = array($sp->staticBaseDir(), in_array($fsSeg, $sp->defaultNonStaticDirs(), true));
+$sp->remove('staticBaseDir');
+check('default list, a base dir set: a root dir matching a record stays listed', $ndBase === array('site/assets/static', true), json_encode($ndBase));
+
+//tables not known ready without a query: today's default, nothing checked or created [decided by user, Q49 C (a)]
+$ndReady = new \ReflectionProperty(StaticPagesIndex::class, 'tablesReady');
+$ndReady->setAccessible(true);
+$ndReadyAtStart = $ndReady->getValue($sp->index());
+$ndSchema = $sp->get('indexSchema');
+$ndReady->setValue($sp->index(), null);
+$sp->remove('indexSchema');
+$ndUnknown = array(in_array($fsSeg, $sp->defaultNonStaticDirs(), true), $ndReady->getValue($sp->index()));
+$ndReady->setValue($sp->index(), false);
+$ndUnknown[] = in_array($fsSeg, $sp->defaultNonStaticDirs(), true);
+$ndReady->setValue($sp->index(), $ndReadyAtStart);
+if($ndSchema !== null) $sp->set('indexSchema', $ndSchema);
+check('default list, indexSchema unset and tables not checked, or tables failed: a root dir matching a record stays listed, the tables are not checked', $ndUnknown === array(true, null, true) && $modules->getConfig('StaticPages', 'indexSchema') !== null, json_encode($ndUnknown));
+check('...and with the tables known again the dir leaves the list', !in_array($fsSeg, $sp->defaultNonStaticDirs(), true));
+
+//the settings form's default, computed on the temporary root, leaves the module-made dir out
+$ndForm = new InputfieldWrapper();
+$ndField = $modules->get('InputfieldTextarea');
+$ndField->attr('name', 'nonStaticDirs');
+$ndForm->add($ndField);
+$sp->hookConfigInputfields(new HookEvent(array('object' => $modules, 'method' => 'getModuleConfigInputfields', 'arguments' => array('StaticPages'), 'return' => $ndForm)));
+$ndFormValue = explode("\n", (string) $ndField->attr('value'));
+check('the settings form\'s default list leaves the module-made dir out and keeps the hand-made one', !in_array($fsSeg, $ndFormValue, true) && in_array($ndHand, $ndFormValue, true), json_encode($ndFormValue));
+
+rrmdir("$tmpRoot/$fsSeg");
+rrmdir("$tmpRoot/$ndHand");
+rrmdir("$tmpRoot/$ndWild");
+$sp->index()->clearRows();
+$sp->set('nonStaticDirs', "site\nvendor");
+
 //the default Non-static directories
 putFiles($tmpRoot, array("$Pdir/index.html", "$Pdir/a/index.xml"));
 $sp->set('cacheNonHtml', 1);

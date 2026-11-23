@@ -661,6 +661,36 @@ class StaticPagesIndex extends Wire {
 		}
 	}
 
+	public function hasFileBelow($prefix){
+		//whether the index has a row whose path starts with $prefix ('/<dir>/'), byte for byte:
+		//letter case counts whatever the column's collation, LIKE wildcards in $prefix are
+		//literal [decided by user, Q49 D (a)]. One LIMIT 1 query. A failed query answers false:
+		//the dir stays protected
+		$prefix = (string) $prefix;
+		if( $prefix === '' ) return false;
+		$like = strtr( $prefix, array('!' => '!!', '%' => '!%', '_' => '!_') ) . '%';
+		try {
+			$query = $this->wire()->database->prepare('SELECT 1 FROM `' . StaticPages::tableFiles . "` WHERE CAST(path AS BINARY) LIKE CAST(:prefix AS BINARY) ESCAPE '!' LIMIT 1");
+			$query->bindValue(':prefix', $like);
+			$query->execute();
+			$found = $query->fetchColumn() !== false;
+			$query->closeCursor();
+			return $found;
+		}
+		catch( \Throwable $e ){
+			$this->sp->logDrain( "could not look up files below $prefix: " . $e->getMessage() );
+			if( $this->isMissingTable($e) ) $this->tablesFailed($e);
+			return false;
+		}
+	}
+
+	public function tablesKnownReady(){
+		//whether the index tables are there as far as this request knows without a query:
+		//checked this request, or indexSchema says so (see ensureTables()). Never creates them
+		if( $this->tablesReady !== null ) return $this->tablesReady;
+		return (int) $this->sp->get('indexSchema') === StaticPages::schemaVersion;
+	}
+
 	public function indexedFiles($tags){
 		//hash => root relative path. $tags null: every indexed file. Otherwise the files
 		//carrying one of $tags, and the '*' ones

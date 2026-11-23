@@ -50,12 +50,16 @@ class StaticPagesWiper extends Wire {
 
 		if( $dryRun ) return $this->deleteStaticFiles($files, true);
 
+		//the protected dirs read while the rows are still there: the default list leaves out a
+		//root dir by its records (isRecordedCopyDir()) [decided by user, Q50 (a)]
+		$protectedDirs = $this->protectedDirs();
+
 		//rows first, files second: a render recording the same path meanwhile leaves a row for a
 		//file that is gone, which is harmless, and never a file that nothing knows about
 		if( !$this->sp->index()->dropIndexRows( array_keys($files) ) )
 			throw new WireException('the index rows could not be dropped, the queue is kept');
 
-		return $this->deleteStaticFiles($files);
+		return $this->deleteStaticFiles($files, false, false, null, $protectedDirs);
 	}
 
 	public function emptyResult($dryRun = false){
@@ -78,7 +82,7 @@ class StaticPagesWiper extends Wire {
 		return $this->sp->staticBaseDir() === '' ? $this->sp->nonStaticDirsArray() : array();
 	}
 
-	public function deleteStaticFiles(array $files, $dryRun = false, $htmlOnly = false, ?array $rootNames = null){
+	public function deleteStaticFiles(array $files, $dryRun = false, $htmlOnly = false, ?array $rootNames = null, ?array $protectedDirs = null){
 		//$dryRun: nothing is deleted, the result lists what would go under 'paths', root
 		//relative, dirs with a trailing slash. A file is deleted under a name of
 		//knownFileNames(), whether or not the switch is on: a copy written while it was on
@@ -86,7 +90,8 @@ class StaticPagesWiper extends Wire {
 		//line never deletes anything else. A root file name ("Replace these root files with
 		//pages", robots.txt) only directly in the site root, only while it is listed and the
 		//switch is on, never for a manifest line; $rootNames: those names instead (the give
-		//back of a name leaving the list)
+		//back of a name leaving the list). $protectedDirs: protectedDirs() as read by a caller
+		//before it dropped the rows, null reads it here
 
 		$result = $this->emptyResult($dryRun);
 
@@ -103,7 +108,7 @@ class StaticPagesWiper extends Wire {
 		$root = $this->sp->staticRoot();
 		$siteRoot = $root;
 		$rootNorm = rtrim( $this->sp->normalizePath($siteRoot), DIRECTORY_SEPARATOR );
-		$nonStaticDirs = $this->protectedDirs();
+		$nonStaticDirs = $protectedDirs ?? $this->protectedDirs();
 		//"Static files per host": a root file's copy also one host dir down, /<host>/robots.txt
 		//[decided by user, Q38 C (b)]
 		$hostKey = $this->sp->hostKeyOn();
@@ -520,12 +525,20 @@ class StaticPagesWiper extends Wire {
 		if( $root === '' || !is_dir($root) || !is_readable($root) ) return array();
 
 		$pageDirs = $this->rootPageDirs();
+		//a root dir no page is named like, made by the module (the home page with a URL segment
+		//writes <root>/<segment>/index.html), leaves the list too: see isRecordedCopyDir().
+		//Only while the copies live in the site root (index paths are relative to staticRoot(),
+		//with a base dir set this list keeps 0.11.0's default), and only when the index tables
+		//are known to be there without a query: computing the default never creates tables
+		//[decided by user, Q49 B (a), C (a)]
+		$byIndex = $this->sp->staticBaseDir() === '' && $this->sp->index()->tablesKnownReady();
 		$dirs = array();
 		try {
 			foreach( new \DirectoryIterator($root) as $fileInfo ){
 				if( $fileInfo->isDot() || !$fileInfo->isDir() ) continue;
 				$name = $fileInfo->getFilename();
 				if( $this->isStaticCopyDir($name, $pageDirs) ) continue;
+				if( $byIndex && $this->isRecordedCopyDir($name) ) continue;
 				$dirs[] = $name;
 			}
 		}
@@ -566,6 +579,24 @@ class StaticPagesWiper extends Wire {
 		//to the api/ endpoints) must leave that dir protected. Static copies: the names of
 		//scanFileNames() and their temporary names, the HTML ones alone while the switch is off
 		if( !isset($pageDirs[$name]) ) return false;
+		return $this->holdsOnlyStaticCopies($name);
+	}
+
+	public function isRecordedCopyDir($name){
+		//a root dir no page is named like that holds nothing but static copies (the content test
+		//of isStaticCopyDir()) and under which the index records a file: the dir the module made
+		//for the home page with a URL segment. A dir nothing was recorded under stays protected
+		//whatever it holds (a hand-made landing/ holding an index.html); a record differing in
+		//letter case only does not count [decided by user, Q49 D (a)]. Used by the default list
+		//alone, scanTargets() does not walk such a dir: the forced scan's record pass deletes its
+		//files [decided by user, Q49 F (a)]
+		$name = (string) $name;
+		if( $name === '' ) return false;
+		if( !$this->holdsOnlyStaticCopies($name) ) return false;
+		return $this->sp->index()->hasFileBelow( '/' . $name . '/' );
+	}
+
+	public function holdsOnlyStaticCopies($name){
 		$names = $this->sp->scanFileNames();
 		if( !count($names) ) return false;
 		$dir = $this->sp->rootPath() . DIRECTORY_SEPARATOR . $name;
@@ -675,6 +706,10 @@ class StaticPagesWiper extends Wire {
 			return count($byRecord) ? $this->mergeDryRuns($result, $byRecord) : $result;
 		}
 
+		//the protected dirs read before the rows go, for the record passes below [decided by
+		//user, Q50 (a)]
+		$protectedDirs = $this->protectedDirs();
+
 		//rows first: a render recording while the scan runs keeps a row for a file the scan then
 		//removes, which is harmless, and never the reverse
 		if( $this->sp->index()->ensureTables() ) $this->sp->index()->clearRows();
@@ -684,9 +719,9 @@ class StaticPagesWiper extends Wire {
 		if( is_file($manifest) ) @file_put_contents( $manifest, '', LOCK_EX );
 
 		//rows gone first: a copy that can not be unlinked gets its row back
-		$rootResult = count($rootCopies) ? $this->deleteStaticFiles($rootCopies) : null;
-		if( count($recorded) ) $rootResult = $this->addCounts( $rootResult ?? $this->emptyResult(), $this->deleteStaticFiles($recorded) );
-		if( count($manifestLines) ) $rootResult = $this->addCounts( $rootResult ?? $this->emptyResult(), $this->deleteStaticFiles($manifestLines, false, true) );
+		$rootResult = count($rootCopies) ? $this->deleteStaticFiles($rootCopies, false, false, null, $protectedDirs) : null;
+		if( count($recorded) ) $rootResult = $this->addCounts( $rootResult ?? $this->emptyResult(), $this->deleteStaticFiles($recorded, false, false, null, $protectedDirs) );
+		if( count($manifestLines) ) $rootResult = $this->addCounts( $rootResult ?? $this->emptyResult(), $this->deleteStaticFiles($manifestLines, false, true, null, $protectedDirs) );
 
 		$targets = $this->scanTargets();
 		if( count($this->leftAlone) )
