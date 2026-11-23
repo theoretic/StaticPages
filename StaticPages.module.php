@@ -57,6 +57,17 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	//.htaccess check after its response writes nothing (StaticPagesHtaccess::check())
 	private $uninstallRun = false;
 
+	//"Static base directory" read from this value instead of the loaded setting, see withBaseDir();
+	//null: the loaded setting
+	private $baseDirOverride = null;
+
+	//the refused base directory values logged in this request, see staticBaseDir()
+	private $baseDirLogged = array();
+
+	//the file that marks a base directory as the module's own: without it nothing is written into
+	//the base directory and nothing deleted from it [decided by user, Q34 A (b)]
+	const baseDirMarker = '.staticpages';
+
 	//the dependency index, see StaticPagesIndex::ensureTables()
 	const tableFiles = 'static_pages_files';
 	const tableTags = 'static_pages_tags';
@@ -487,7 +498,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$stored = $this->wire()->modules->getConfig( $this->className() );
 		$this->rootFilesSave = array( 'stored' => is_array($stored) ? $stored : array(), 'dryRun' => !empty($data['wipeDryRun']) );
 
-		$this->wipeOnSwitchChange($data);
+		$this->wipeOnSwitchChange( $data, $this->rootFilesSave['stored'] );
 
 		//the choice for hand-written .htaccess rules is one shot as well, and never stored. Taken
 		//here with the dry run box, before that is cleared; acted on after the save. Keep stores
@@ -520,24 +531,36 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( $changed ) $event->arguments(1, $data);
 	}
 
-	private function wipeOnSwitchChange(array $data){
+	private function wipeOnSwitchChange(array $data, array $storedConfig){
 		//a save of the whole config changing the stored "Cache XML and plain text responses"
 		//wipes every copy before the new value is stored, Dry run checked or not. Off to on: a
 		//response cached as index.html by its header would stay next to its new index.xml. On
 		//to off: a dir holding index.xml stops being a static copy dir, lands in the default
 		//Non-static directories, and its files would be protected from every wipe. An absent
-		//key is off. A single key save (saveConfig with a key and a value) never gets here
+		//key is off. A single key save (saveConfig with a key and a value) never gets here.
+		//The same for a changed "Static base directory" (as used, a refused value is none): the
+		//copies under the old root go, the stored value says where that is [decided by user, Q16 (a)]
 		$modules = $this->wire()->modules;
 		$stored = !empty( $modules->getConfig( $this->className(), 'cacheNonHtml' ) );
 		$new = !empty( $data['cacheNonHtml'] );
-		if( $stored === $new ) return;
-		$this->logDrain( 'Cache XML and plain text responses turned ' . ( $new ? 'on' : 'off' ) . ': every static copy is wiped' );
+		$oldBase = $this->staticBaseDir($storedConfig);
+		$newBase = $this->staticBaseDir($data);
+		if( $stored === $new && $oldBase === $newBase ) return;
+		$what = array();
+		if( $stored !== $new ){
+			$this->logDrain( 'Cache XML and plain text responses turned ' . ( $new ? 'on' : 'off' ) . ': every static copy is wiped' );
+			$what[] = 'Cache XML and plain text responses';
+		}
+		if( $oldBase !== $newBase ){
+			$this->logDrain( 'Static base directory changed from ' . ( $oldBase === '' ? 'none' : $oldBase ) . ' to ' . ( $newBase === '' ? 'none' : $newBase ) . ': every static copy under the old root is wiped' );
+			$what[] = 'Static base directory';
+		}
 		try {
-			$this->wipeCaches();
+			$this->withBaseDir( isset($storedConfig['staticBaseDir']) ? $storedConfig['staticBaseDir'] : '', fn() => $this->wipeCaches() );
 		}
 		catch( \Throwable $e ){
-			$this->logDrain( 'the wipe on Cache XML and plain text responses failed: ' . $e->getMessage() );
-			$this->error( 'StaticPages: the wipe on "Cache XML and plain text responses" failed: ' . $e->getMessage() );
+			$this->logDrain( 'the wipe on ' . implode(' and ', $what) . ' failed: ' . $e->getMessage() );
+			$this->error( 'StaticPages: the wipe on "' . implode('" and "', $what) . '" failed: ' . $e->getMessage() );
 		}
 	}
 
@@ -577,23 +600,47 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$new = $this->rootFilesArray($data);
 		$on = !empty($data['cacheNonHtml']);
 		$switchedOff = !empty($stored['cacheNonHtml']) && !$on;
+		$oldRaw = isset($stored['staticBaseDir']) ? $stored['staticBaseDir'] : '';
+		$newRaw = isset($data['staticBaseDir']) ? $data['staticBaseDir'] : '';
 		try {
-			foreach( $old as $name => $path ){
-				if( isset($new[$name]) && !$switchedOff ){
-					//the name stays listed for another page: the old page's recorded copy goes,
-					//nothing is renamed, the take-over stands [decided by user, Q26]
-					if( $new[$name] !== $path ) $this->wiper()->deleteRootFileCopy( $name, "settings save, page path $path changed to {$new[$name]}" );
-					continue;
-				}
-				$this->wiper()->giveBackRootFile( $name, $dryRun );
+			if( $this->staticBaseDir($data) !== '' ){
+				//base directory mode: the copies live in the base directory, nothing in the web
+				//root is taken over or renamed back. The save that switches to it gives the web
+				//root's dot backups back first [decided by user, Q34 C (a)], Dry run as Q16 (a)
+				if( $this->staticBaseDir($stored) === '' ) $this->withBaseDir( $oldRaw, function() use ($old, $dryRun) {
+					foreach( $old as $name => $path ) $this->wiper()->giveBackRootFile( $name, $dryRun, 'settings save, Static base directory set' );
+				} );
+				$this->withBaseDir( $newRaw, function() use ($old, $new, $switchedOff) {
+					foreach( $old as $name => $path ){
+						if( isset($new[$name]) && !$switchedOff && $new[$name] === $path ) continue;
+						$this->wiper()->deleteRootFileCopy( $name, isset($new[$name]) && !$switchedOff ? "settings save, page path $path changed to {$new[$name]}" : 'settings save' );
+					}
+				} );
+				return;
 			}
-			if( !$on ) return;
-			foreach( $new as $name => $path ) $this->wiper()->takeOverRootFile( $name, $path, $data, $dryRun );
+			$this->withBaseDir( $newRaw, function() use ($old, $new, $on, $switchedOff, $dryRun, $data) {
+				$this->rootFilesInSiteRoot( $old, $new, $on, $switchedOff, $dryRun, $data );
+			} );
 		}
 		catch( \Throwable $e ){
 			$this->logDrain( 'root files on settings save: ' . $e->getMessage() );
 			$this->error( 'StaticPages, root files: ' . $e->getMessage() );
 		}
+	}
+
+	private function rootFilesInSiteRoot(array $old, array $new, $on, $switchedOff, $dryRun, array $data){
+		//rootFilesOnSave() without a base directory
+		foreach( $old as $name => $path ){
+			if( isset($new[$name]) && !$switchedOff ){
+				//the name stays listed for another page: the old page's recorded copy goes,
+				//nothing is renamed, the take-over stands [decided by user, Q26]
+				if( $new[$name] !== $path ) $this->wiper()->deleteRootFileCopy( $name, "settings save, page path $path changed to {$new[$name]}" );
+				continue;
+			}
+			$this->wiper()->giveBackRootFile( $name, $dryRun );
+		}
+		if( !$on ) return;
+		foreach( $new as $name => $path ) $this->wiper()->takeOverRootFile( $name, $path, $data, $dryRun );
 	}
 
 	public function hookAfterSaveConfig($event) {
@@ -611,6 +658,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->warnIgnoredWipeAll( $event->arguments(1) );
 			$this->warnNonStaticTyped( $event->arguments(1) );
 			$this->warnRootFiles( $event->arguments(1) );
+			$this->baseDirOnSave( $event->arguments(1) );
 			$this->htaccessOnSave( $event->arguments(1) );
 			$this->rootFilesOnSave( $event->arguments(1) );
 			if( !$this->wire()->input->post('forceWipeOnModuleSave') ) return;
@@ -766,8 +814,8 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$segments = explode( '/', $page->path . $urlSegmentStr );
 		if( in_array( '..', $segments, true ) || in_array( '.', $segments, true ) ) return;
 
-		//$base: what $path is made relative to and pruned up to, the static root; a root file's
-		//copy stays in the site root
+		//$base: what $path is made relative to and pruned up to, the static root, which also
+		//holds a root file's copy: the site root, or the base directory
 		$base = $this->staticRoot();
 		$dir = $base . $page->path;
 		if( $urlSegmentStr !='' ) $dir.= "$urlSegmentStr/";
@@ -784,7 +832,6 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 				$this->logSkip( $page, 'the page is listed in Replace these root files with pages as ' . implode( ', ', $rootFiles ) . ", a $type render is not written" );
 				return;
 			}
-			$base = $this->rootPath();
 			$dir = $base . '/';
 			$path = $dir . $rootFile;
 		}
@@ -807,10 +854,18 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			}
 		}
 
+		//a base directory without its marker is no place to write to: no wipe would delete what
+		//lands there. One that does not exist yet is created here, with the marker [decided by
+		//user, Q34 A (b)]
+		if( !$this->baseDirReady(true) ){
+			$this->logSkip( $page, 'the Static base directory ' . $this->staticBaseDir() . ' holds no marker file ' . self::baseDirMarker . ', nothing is written into it' );
+			return;
+		}
+
 		//a file in a dir listed in Non-static directories is never deleted by any wipe: it
 		//would be served stale for good. Only a saved list is asked, working out the default
-		//costs a walk of the site root
-		if( $this->nonStaticDirs !== null && $this->wiper()->isProtectedPath( rtrim($dir, '/\\'), $this->nonStaticDirsArray() ) ){
+		//costs a walk of the site root. Not below a base directory [decided by user, Q34 B (a)]
+		if( $this->nonStaticDirs !== null && $this->staticBaseDir() === '' && $this->wiper()->isProtectedPath( rtrim($dir, '/\\'), $this->nonStaticDirsArray() ) ){
 			$this->logSkip( $page, 'its dir is listed in Non-static directories, no wipe would ever delete the file' );
 			return;
 		}
@@ -1239,9 +1294,141 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//filesystem path to where static copies of pages live, no trailing slash: publishing,
 		//the index's and the manifest's relative paths, deletes, pruning, insideRoot() and the
 		//scan's root level use it. Tracked paths, the default of Non-static directories, the
-		//migration's root dir questions, scanTargets(), protected dirs, the root files and the
-		//.htaccess stay with rootPath(). The site root while no base directory is set
-		return $this->rootPath();
+		//migration's root dir questions and the .htaccess stay with rootPath(). The site root
+		//while no base directory is set; with one, the base directory, which also holds the
+		//root file copies (<base>/robots.txt) and is all a scan walks
+		$base = $this->staticBaseDir();
+		return $base === '' ? $this->rootPath() : $this->rootPath() . '/' . $base;
+	}
+
+	/** #pw-internal */
+	public function staticBaseDir(?array $data = null){
+		//"Static base directory" as used: site root relative, forward slashes, no slash at either
+		//end; '' for none and for a value checkBaseDir() refuses, which is logged once per value
+		//and request. $data: the array a settings save is storing, read instead of the setting
+		if( $data !== null ) $raw = isset($data['staticBaseDir']) ? $data['staticBaseDir'] : '';
+		else if( $this->baseDirOverride !== null ) $raw = $this->baseDirOverride;
+		else $raw = $this->configValue('staticBaseDir', '');
+		$raw = trim( (string) $raw );
+		list( $dir, $why ) = $this->checkBaseDir($raw);
+		if( $why !== '' && !isset( $this->baseDirLogged[$raw] ) ){
+			$this->baseDirLogged[$raw] = true;
+			$this->logDrain( 'Static base directory "' . preg_replace( '/[\x00-\x1f]/', ' ', $raw ) . "\" refused: $why; static copies stay in the site root" );
+		}
+		return $dir;
+	}
+
+	/** #pw-internal */
+	public function checkBaseDir($raw){
+		//array(the base directory as used, '' when refused or empty; why it is refused, '' when
+		//not). Accepted: a relative path of plain names (letters, digits, . _ -, no leading dot),
+		//no empty, . or .. segment, that resolves below the site root, links and all, and is not
+		//the site root itself; a trailing slash is dropped. It need not exist yet
+		$value = str_replace( '\\', '/', trim( (string) $raw ) );
+		if( $value === '' ) return array('', '');
+		if( $value[0] === '/' || preg_match('#^[A-Za-z]:#', $value) ) return array('', 'an absolute path');
+		$value = rtrim( $value, '/' );
+		foreach( explode('/', $value) as $segment ){
+			if( $segment === '' ) return array('', 'an empty segment');
+			if( $segment === '.' || $segment === '..' ) return array('', 'a . or .. segment');
+			if( !preg_match('/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/', $segment) ) return array('', 'a segment that is no plain name (letters, digits, . _ -, no leading dot)');
+		}
+		$root = $this->rootPath();
+		$rootReal = realpath($root);
+		if( $rootReal === false ) return array('', 'the site root cannot be resolved');
+		$rootReal = rtrim( $rootReal, '/\\' );
+		$windows = DIRECTORY_SEPARATOR === '\\';
+		$same = fn($a, $b) => $windows ? strcasecmp($a, $b) === 0 : $a === $b;
+		$below = fn($real) => strlen($real) > strlen($rootReal) + 1 && $same( substr( $real, 0, strlen($rootReal) + 1 ), $rootReal . DIRECTORY_SEPARATOR );
+		//the deepest part that exists already is resolved: a link on the way counts
+		$path = $root . '/' . $value;
+		$probe = $path;
+		while( !file_exists($probe) && !is_link($probe) && strlen($probe) > strlen($root) ) $probe = dirname($probe);
+		$real = realpath($probe);
+		if( $real === false || !( $same( rtrim($real, '/\\'), $rootReal ) || $below($real) ) ) return array('', 'it resolves outside the site root');
+		if( file_exists($path) ){
+			if( !is_dir($path) ) return array('', 'it is no directory');
+			if( !$below( (string) realpath($path) ) ) return array('', 'it resolves to the site root itself');
+		}
+		return array($value, '');
+	}
+
+	/** #pw-internal */
+	public function baseDirReady($create = false){
+		//true without a base directory, and while the base directory holds the marker file.
+		//$create: a base directory that does not exist yet is made here, with the marker. A
+		//directory that exists without the marker is never marked here: only a settings save
+		//marks one, and only when it is empty [decided by user, Q34 A (b)]
+		if( $this->staticBaseDir() === '' ) return true;
+		$dir = $this->staticRoot();
+		$marker = $dir . '/' . self::baseDirMarker;
+		if( is_file($marker) && !is_link($marker) ) return true;
+		if( !$create || file_exists($dir) || is_link($dir) ) return false;
+		return $this->makeBaseDir($dir);
+	}
+
+	private function makeBaseDir($dir){
+		//creates $dir with its parents and puts the marker in it; a request creating it at the
+		//same time is no failure
+		$mode = octdec($this->newDirPermissions);
+		if( !$mode ) $mode = 0755;
+		if( !@mkdir($dir, $mode, true) && !is_dir($dir) ){
+			$this->logDrain( "Static base directory: could not create $dir" );
+			return false;
+		}
+		clearstatcache();
+		return $this->markBaseDir($dir);
+	}
+
+	private function markBaseDir($dir){
+		//true when $dir holds the marker, or was empty and holds it now; a dir holding anything
+		//else is never marked
+		$marker = $dir . '/' . self::baseDirMarker;
+		if( is_file($marker) && !is_link($marker) ) return true;
+		if( is_link($dir) || !is_dir($dir) ) return false;
+		try {
+			if( (new \FilesystemIterator($dir))->valid() ) return false;
+		}
+		catch( \Throwable $e ){
+			return false;
+		}
+		if( @file_put_contents( $marker, "StaticPages base directory: static copies below this directory are deleted only while this file is here.\n", LOCK_EX ) === false ){
+			$this->logDrain( "Static base directory: could not write the marker $marker" );
+			return false;
+		}
+		$this->logDrain( "Static base directory: $dir marked with " . self::baseDirMarker );
+		return true;
+	}
+
+	private function withBaseDir($raw, callable $fn){
+		//$fn() with "Static base directory" read as $raw: a settings save acts on the stored value
+		//before the save and on the saved one after it, while the loaded setting is still the old
+		$before = $this->baseDirOverride;
+		$this->baseDirOverride = trim( (string) $raw );
+		try {
+			return $fn();
+		}
+		finally {
+			$this->baseDirOverride = $before;
+		}
+	}
+
+	private function baseDirOnSave(array $data){
+		//a settings save naming a base directory: a refused value is told; a missing directory is
+		//created with the marker, an empty one marked; one holding anything without the marker
+		//stays as it is, nothing is written into it or deleted from it, and the save warns
+		$raw = trim( (string) ( isset($data['staticBaseDir']) ? $data['staticBaseDir'] : '' ) );
+		list( $dir, $why ) = $this->checkBaseDir($raw);
+		if( $why !== '' ){
+			$this->warning( sprintf( $this->_('StaticPages: Static base directory "%1$s" is not used: %2$s. Static copies stay in the site root.'), $raw, $why ) );
+			return;
+		}
+		if( $dir === '' ) return;
+		$path = $this->rootPath() . '/' . $dir;
+		$ok = ( !file_exists($path) && !is_link($path) ) ? $this->makeBaseDir($path) : $this->markBaseDir($path);
+		if( $ok ) return;
+		$this->warning( sprintf( $this->_('StaticPages: Static base directory "%1$s" holds files but no marker file %2$s, or could not be created: nothing is written into it and nothing deleted from it. Name a new or an empty directory.'), $dir, self::baseDirMarker ) );
+		$this->logDrain( "Static base directory $dir: no marker " . self::baseDirMarker . ' and not empty, or not created: not used for writing or deleting' );
 	}
 
 	/** #pw-internal */

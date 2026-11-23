@@ -2636,6 +2636,259 @@ $rootReset();
 rrmdir("$tmpRoot$Pdir");
 check('root files block: no robots.txt, .robots.txt, sitemap.xml, .htaccess or backup left on the temporary root, the stored config as before', !file_exists($robots) && !file_exists($dotRobots) && !file_exists("$tmpRoot/sitemap.xml") && !file_exists($htFile) && !htBackups($tmpRoot) && $modules->getConfig('StaticPages') == $rootBase, files($tmpRoot));
 
+////  Static base directory (0.12.0)
+
+//every base directory is below the temporary root. Non-static directories lists site (set at
+//the top): the base directory site/assets/static lies inside a listed dir [decided by user, Q34]
+$bRel = 'site/assets/static';
+$bAbs = "$tmpRoot/$bRel";
+$bMarker = "$bAbs/" . StaticPages::baseDirMarker;
+$siteExisted = is_dir("$tmpRoot/site");
+$bConfig = $modules->getConfig('StaticPages');
+$bSave = function(array $set) use ($modules, $bConfig, $wire, $noticeTexts) {
+	$d = $bConfig;
+	foreach($set as $k => $v) $d[$k] = $v;
+	$from = count($wire->notices);
+	$modules->saveConfig('StaticPages', $d);
+	return $noticeTexts($from);
+};
+$bReset = function() use ($sp, $tmpRoot, $Pdir) {
+	$sp->index()->clearRows();
+	rrmdir("$tmpRoot/site/assets/static");
+	rrmdir("$tmpRoot/site/assets/other");
+	rrmdir("$tmpRoot$Pdir");
+	clearstatcache();
+};
+$sp->remove('staticBaseDir');
+$bReset();
+$B = $mk($P, 'b9', 'B9');
+$sp->drain();
+$sp->index()->clearRows();
+
+//refused values: the site root stays the static root, the reason is logged
+@mkdir("$tmpRoot/site/assets", 0777, true);
+file_put_contents("$tmpRoot/site/assets/file.txt", 'x');
+$refusedBase = array('..' => 'a . or .. segment', 'a/../b' => 'a . or .. segment', '/site/assets/static' => 'an absolute path', str_replace('\\', '/', $tmpRoot) . '/x' => 'an absolute path', '.' => 'a . or .. segment', 'a//b' => 'an empty segment', 'site/.static' => 'no plain name', 'site/assets/file.txt' => 'it is no directory');
+$refusedSeen = array();
+foreach($refusedBase as $value => $why) {
+	$log0 = logText($tmp);
+	$sp->set('staticBaseDir', $value);
+	$refusedSeen[$value] = $sp->staticRoot() === $sp->rootPath() && $sp->staticBaseDir() === '' && strpos($since($log0), "Static base directory \"$value\" refused: ") !== false && strpos($since($log0), $why) !== false;
+}
+@unlink("$tmpRoot/site/assets/file.txt");
+check('Static base directory: .., a/../b, an absolute path, ., a//b, a dot segment, a file: staticRoot() stays rootPath(), the reason logged', !in_array(false, $refusedSeen, true), json_encode($refusedSeen));
+$sp->set('staticBaseDir', "$bRel/");
+check('...site/assets/static/ is used as site/assets/static, a dir that does not exist yet', $sp->staticBaseDir() === $bRel && $sp->staticRoot() === $sp->rootPath() . "/$bRel" && !is_dir($bAbs));
+
+//a link leading out of the root: a symlink, or on Windows a junction where symlinks need a privilege
+$outside = "$tmp/outside";
+@mkdir($outside, 0777, true);
+$link = "$tmpRoot/linkout";
+$linked = @symlink($outside, $link);
+if(!$linked && PHP_OS_FAMILY === 'Windows') {
+	@exec('cmd /c mklink /J ' . escapeshellarg(str_replace('/', '\\', $link)) . ' ' . escapeshellarg(str_replace('/', '\\', $outside)) . ' 2>NUL', $o, $code);
+	clearstatcache();
+	$linked = is_dir($link) && realpath($link) !== false && stripos(str_replace('\\', '/', realpath($link)), str_replace('\\', '/', realpath($outside))) === 0;
+}
+if($linked) {
+	$linkSeen = array();
+	foreach(array('linkout', 'linkout/sub') as $value) {
+		$log0 = logText($tmp);
+		$sp->set('staticBaseDir', $value);
+		$linkSeen[$value] = $sp->staticRoot() === $sp->rootPath() && strpos($since($log0), 'it resolves outside the site root') !== false;
+	}
+	if(!@rmdir($link)) @unlink($link);
+	clearstatcache();
+	check('...a path leading out of the site root through a link (linkout, linkout/sub) is refused, logged', !in_array(false, $linkSeen, true) && !file_exists($link) && is_dir($outside), json_encode($linkSeen));
+} else {
+	echo "skip a base directory through a link: this platform made neither a symlink nor a junction\n";
+}
+@rmdir($outside);
+
+//publishing below it
+$sp->set('staticBaseDir', $bRel);
+$sp->index()->clearRows();
+publish($sp, $A);
+$bA = "$bAbs$Pdir/a/index.html";
+$rows = $sp->index()->indexedFiles(null);
+check('base dir site/assets/static (inside the listed site): a publish creates it with the marker .staticpages and writes <base>/<P>/a/index.html; the index path is relative to it; nothing in the web root', is_file($bA) && is_file($bMarker) && array_values($rows) === array("$Pdir/a/index.html") && !is_dir("$tmpRoot$Pdir"), json_encode($rows) . ' ' . files($bAbs));
+$saveA('A5');
+check('...saving the page removes the file and its empty dirs; the base dir and the marker stay', !is_file($bA) && !is_dir("$bAbs$Pdir") && is_file($bMarker) && !count($sp->index()->indexedFiles(null)), files($bAbs));
+
+//a full scan, both walks: the HTML name at the top level of the base dir, every scan name below
+//[decided by user, Q34 D (a)]
+$sp->set('cacheNonHtml', 1);
+foreach(array(0, 1) as $shell) {
+	$sp->set('useShell', $shell);
+	putFiles($tmpRoot, array("/$bRel/x/y/index.html", "/$bRel/q/index.xml", "/$bRel/index.html", "/$bRel/index.xml", "/$bRel/robots.txt", "/$bRel/x/keep.css", '/site/assets/other/z/index.html', "$Pdir/w/index.html"));
+	$sp->wipeCaches(true);
+	$scan = array(
+		'gone' => !file_exists("$bAbs/x/y") && !file_exists("$bAbs/q") && !file_exists("$bAbs/index.html"),
+		'kept' => is_file("$bAbs/index.xml") && is_file("$bAbs/robots.txt") && is_file("$bAbs/x/keep.css") && is_file($bMarker),
+		'outside' => is_file("$tmpRoot/site/assets/other/z/index.html") && is_file("$tmpRoot$Pdir/w/index.html"),
+	);
+	$label = $shell ? (PHP_OS_FAMILY === 'Windows' ? 'PowerShell' : 'find') : 'PHP walk';
+	check("...a forced scan ($label) removes unrecorded copies below it (x/y/index.html, q/index.xml, the top level index.html); keeps the top level index.xml, a hand-made robots.txt, other files and the marker; a sibling dir and the web root untouched", !in_array(false, $scan, true), json_encode($scan) . ' ' . files($bAbs));
+	foreach(array("/$bRel/index.xml", "/$bRel/robots.txt", "/$bRel/x/keep.css") as $x) @unlink("$tmpRoot$x");
+	@rmdir("$bAbs/x");
+}
+$sp->set('useShell', 0);
+
+//a dry run lists paths below the base dir only
+putFiles($tmpRoot, array("/$bRel/x/y/index.html", "$Pdir/a/index.html"));
+recordAll($sp, array("$Pdir/a/index.html"));
+@mkdir("$bAbs$Pdir/a", 0777, true);
+file_put_contents($bA, 'x');
+$dryScan = $sp->wipeCaches(true, true);
+$dryIndex = $sp->wipeCaches(false, true);
+sort($dryScan['paths']);
+check('...a dry run (scan and index) lists base relative paths of files below it only, deletes nothing', $dryScan['paths'] === array("$Pdir/", "$Pdir/a/", "$Pdir/a/index.html", '/x/', '/x/y/', '/x/y/index.html') && $dryIndex['paths'] === array("$Pdir/a/index.html", "$Pdir/a/", "$Pdir/") && is_file($bA) && is_file("$bAbs/x/y/index.html") && is_file("$tmpRoot$Pdir/a/index.html"), json_encode(array($dryScan['paths'], $dryIndex['paths'])));
+
+//without the marker nothing is deleted, by any way, and nothing written
+@unlink($bMarker);
+$log0 = logText($tmp);
+$sp->wipeCaches();
+$sp->wipeCaches(true);
+$sp->set('useShell', 1);
+$sp->wipeCaches(true);
+$sp->set('useShell', 0);
+$sp->queue()->enqueue(StaticPages::modeAll);
+$sp->drain();
+$noMarker = array(is_file($bA), is_file("$bAbs/x/y/index.html"), $sp->index()->hasFile("$Pdir/a/index.html"), substr_count($since($log0), "deleted nothing: the Static base directory $bRel holds no marker file .staticpages"));
+$sp->index()->clearRows();
+$log0 = logText($tmp);
+publish($sp, $B);
+$noMarker[] = !is_dir("$bAbs$Pdir/b9") && strpos($since($log0), "skip $Pdir/b9/: the Static base directory $bRel holds no marker file .staticpages") !== false;
+check('a base dir without the marker: wipeCaches(), wipeCaches(true) (PHP walk, shell) and a drain delete nothing, keep the row and log it; a publish writes nothing, skip logged', $noMarker === array(true, true, true, 4, true), json_encode($noMarker));
+$bReset();
+
+//a settings save: a changed value wipes under the old root first, the same value twice nothing
+$sp->remove('staticBaseDir');
+$sp->set('cacheNonHtml', 0);
+$bConfig['cacheNonHtml'] = 0;
+unset($bConfig['staticBaseDir']);
+$modules->saveConfig('StaticPages', $bConfig);
+$webFiles = array("$Pdir/a/index.html", "$Pdir/b9/index.html");
+putFiles($tmpRoot, $webFiles);
+recordAll($sp, $webFiles);
+$present = fn(array $list, $root) => count(array_filter($list, fn($x) => is_file("$root$x")));
+$seen = array();
+$seenHook = $wire->addHookBefore('Modules::saveConfig', function($e) use (&$seen, $modules, $present, $webFiles, $tmpRoot) {
+	if(is_array($e->arguments(1))) $seen[] = array($modules->getConfig('StaticPages', 'staticBaseDir'), $present($webFiles, $tmpRoot));
+}, array('priority' => 200));
+$log0 = logText($tmp);
+$texts = $bSave(array('staticBaseDir' => $bRel));
+$sp->set('staticBaseDir', $bRel);
+check('a save setting the base dir removes the files indexed under the web root before the value is stored, logged; it creates the base dir with the marker', $present($webFiles, $tmpRoot) === 0 && $seen === array(array(null, 0)) && !count($sp->index()->indexedFiles(null)) && $modules->getConfig('StaticPages', 'staticBaseDir') === $bRel && strpos($since($log0), "Static base directory changed from none to $bRel: every static copy under the old root is wiped") !== false && is_file($bMarker), json_encode($seen) . ' ' . $since($log0));
+$baseFiles = array("/$bRel$Pdir/a/index.html");
+putFiles($tmpRoot, $baseFiles);
+recordAll($sp, array("$Pdir/a/index.html"));
+$bSave(array('staticBaseDir' => $bRel));
+$bSave(array('staticBaseDir' => "$bRel/"));
+check('...the same value twice, and with a trailing slash, removes nothing', $present($baseFiles, $tmpRoot) === 1 && count($sp->index()->indexedFiles(null)) === 1);
+$log0 = logText($tmp);
+$bSave(array('staticBaseDir' => '', 'wipeDryRun' => 1));
+$dryRunHeld->setValue($sp->htaccess(), false);
+$sp->remove('staticBaseDir');
+$stored = $modules->getConfig('StaticPages');
+check('Q16 (a): a save clearing the base dir with Dry run checked still wipes under the old root, stores the new value, clears Dry run; the base dir and the marker stay', $present($baseFiles, $tmpRoot) === 0 && !count($sp->index()->indexedFiles(null)) && (string) $stored['staticBaseDir'] === '' && empty($stored['wipeDryRun']) && strpos($since($log0), "Static base directory changed from $bRel to none") !== false && is_file($bMarker), json_encode($stored));
+$wire->removeHook($seenHook);
+//a save naming a dir that holds files and no marker: not marked, warned
+$bReset();
+putFiles($tmpRoot, array("/$bRel/hand.txt"));
+$texts = $bSave(array('staticBaseDir' => $bRel));
+$unmarked = array(is_file($bMarker), $hasAny($texts, 'holds files but no marker file .staticpages'));
+@unlink("$bAbs/hand.txt");
+$texts = $bSave(array('staticBaseDir' => $bRel));
+$unmarked[] = is_file($bMarker);
+$texts = $bSave(array('staticBaseDir' => 'a/../b'));
+$unmarked[] = $hasAny($texts, 'Static base directory "a/../b" is not used: a . or .. segment');
+check('a save naming a dir that holds a file and no marker leaves it unmarked and warns; once empty the next save marks it; a refused value warns', $unmarked === array(false, true, true, true), json_encode($unmarked));
+$bSave(array('staticBaseDir' => $bRel));
+$sp->set('staticBaseDir', $bRel);
+
+//XML in base dir mode
+$tpl->contentType = 'xml';
+$sp->set('cacheNonHtml', 1);
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1));
+publish($sp, $A, array(), $body);
+$xmlBase = "$bAbs$Pdir/a/index.xml";
+$xmlWritten = (string) @file_get_contents($xmlBase) === $body && $sp->index()->hasFile("$Pdir/a/index.xml");
+$saveA('A6');
+check('base dir mode: an XML render is written to <base>/<P>/a/index.xml and removed by a save', $xmlWritten && !is_file($xmlBase) && !is_dir("$bAbs$Pdir"), files($bAbs));
+$tpl->contentType = $tplType;
+
+//root files in base dir mode: the copy is <base>/robots.txt, the web root's own file untouched
+$R = $mk($P, 'r9', 'R9');
+$sp->drain();
+$bLine = "robots.txt {$R->path}";
+$sp->set('rootFiles', $bLine);
+$rootReset($original);
+$log0 = logText($tmp);
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'rootFiles' => $bLine));
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'rootFiles' => $bLine));
+$rootCase = array('save' => $bytesOf($robots) === $original && $bytesOf($dotRobots) === null);
+$tpl->contentType = 'txt';
+publish($sp, $R, array(), $txtBody);
+$rootCase['written'] = $bytesOf("$bAbs/robots.txt") === $txtBody && $sp->index()->hasFile('/robots.txt') && $bytesOf($robots) === $original;
+$sp->wipeCaches();
+$rootCase['wipe'] = $bytesOf("$bAbs/robots.txt") === null && $bytesOf($robots) === $original;
+foreach(array(0, 1) as $shell) {
+	$sp->set('useShell', $shell);
+	publish($sp, $R, array(), $txtBody);
+	$sp->wipeCaches(true);
+	$rootCase["scan $shell"] = $bytesOf("$bAbs/robots.txt") === null && !$sp->index()->hasFile('/robots.txt') && $bytesOf($robots) === $original;
+}
+$sp->set('useShell', 0);
+publish($sp, $R, array(), $txtBody);
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'rootFiles' => ''));
+$rootCase['name removed'] = $bytesOf("$bAbs/robots.txt") === null && !$sp->index()->hasFile('/robots.txt') && $bytesOf($robots) === $original;
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'rootFiles' => $bLine));
+publish($sp, $R, array(), $txtBody);
+$tpl->contentType = $tplType;
+publish($sp, $A);
+$rootCase['before uninstall'] = $bytesOf("$bAbs/robots.txt") === $txtBody && is_file("$bAbs$Pdir/a/index.html");
+htClean($tmpRoot);
+$log0 = logText($tmp);
+$out = htUninstall($sp);
+$rootCase['uninstall'] = $bytesOf("$bAbs/robots.txt") === null && !is_file("$bAbs$Pdir/a/index.html") && !count($sp->index()->indexedFiles(null)) && $bytesOf($robots) === $original && is_dir($bAbs) && is_file($bMarker);
+$rootCase['no dot file'] = $bytesOf($dotRobots) === null && strpos($since($log0), 'taken over') === false && strpos($since($log0), 'renamed back') === false;
+htForget($tmp);
+check('base dir mode, robots.txt listed: a hand-made /robots.txt stays byte-identical through two saves, a render to <base>/robots.txt, a wipe, a forced scan (both walks), a save removing the name and onUninstall(); no /.robots.txt appears; onUninstall() removes the recorded copies and leaves the base dir and its marker', !in_array(false, $rootCase, true), json_encode($rootCase) . ' ' . $since($log0));
+
+//[decided by user, Q34 C (a)] the save switching to a base dir gives a root-era backup back
+$sp->remove('staticBaseDir');
+$rootReset();
+$bSave(array('staticBaseDir' => '', 'cacheNonHtml' => 1, 'rootFiles' => $bLine));
+$switched = array();
+foreach(array(0, 1) as $dry) {
+	$rootReset($txtBody, $original);
+	recordAll($sp, array('/robots.txt'));
+	$log0 = logText($tmp);
+	$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'rootFiles' => $bLine) + ($dry ? array('wipeDryRun' => 1) : array()));
+	$dryRunHeld->setValue($sp->htaccess(), false);
+	$switched[$dry] = $dry
+		? array($bytesOf($robots), $bytesOf($dotRobots) === $original, strpos($since($log0), 'dry run: settings save, Static base directory set: root file robots.txt: .robots.txt would be renamed back to robots.txt, nothing was') !== false)
+		: array($bytesOf($robots) === $original, $bytesOf($dotRobots), strpos($since($log0), 'settings save, Static base directory set: root file robots.txt: .robots.txt renamed back to robots.txt') !== false);
+	$bSave(array('staticBaseDir' => '', 'cacheNonHtml' => 1, 'rootFiles' => $bLine));
+}
+check('Q34 C (a): the save switching to a base dir deletes the web root copy and renames /.robots.txt back byte for byte, logged; with Dry run checked the copy goes and the rename is held back, logged', $switched === array(array(true, null, true), array(null, true, true)), json_encode($switched));
+$rootReset();
+
+$tpl->contentType = $tplType;
+$sp->remove('rootFiles');
+$sp->remove('cacheNonHtml');
+$sp->remove('staticBaseDir');
+$modules->saveConfig('StaticPages', $rootBase);
+$pages->delete($pages->get($R->id), true);
+$pages->delete($pages->get($B->id), true);
+$sp->drain();
+$sp->index()->clearRows();
+$bReset();
+if(!$siteExisted) { @rmdir("$tmpRoot/site/assets"); @rmdir("$tmpRoot/site"); }
+htClean($tmpRoot);
+check('base dir block: the stored config as before, no base dir, robots.txt, .robots.txt or .htaccess left on the temporary root', $modules->getConfig('StaticPages') == $rootBase && !is_dir($bAbs) && !file_exists($robots) && !file_exists($dotRobots) && !file_exists($htFile) && $sp->staticRoot() === $sp->rootPath(), files($tmpRoot));
+
 ////  .htaccess manager (0.10.0)
 
 //when the manager runs: install, the check after a superuser's admin request or a CLI run, a
@@ -3194,6 +3447,9 @@ check('the switch "Cache XML and plain text responses" is a checkbox whose notes
 $field = $form ? $form->getChildByName('rootFiles') : null;
 $notes = $field ? (string) $field->notes : '';
 check('"Replace these root files with pages" is an empty textarea whose notes name the dot backup .robots.txt and when it can be fetched', $field instanceof InputfieldTextarea && (string) $field->attr('value') === '' && strpos($notes, '.robots.txt') !== false && strpos($notes, 'can be fetched') !== false && strpos($notes, 'without the stock rule') !== false, $notes);
+$field = $form ? $form->getChildByName('staticBaseDir') : null;
+$notes = $field ? (string) $field->notes : '';
+check('"Static base directory" is an empty text field whose notes name the marker .staticpages and say a copy is not served yet', $field instanceof InputfieldText && !($field instanceof InputfieldTextarea) && (string) $field->attr('value') === '' && strpos($notes, '.staticpages') !== false && strpos($notes, 'not served') !== false, $notes);
 
 //the settings form groups its fields in fieldsets (0.8.2), the force wipe and the main switch
 //ungrouped at the bottom. ProcessModule stores getAll(): wrappers are left out of it, so a
@@ -3212,7 +3468,7 @@ if($form) foreach($form->children() as $child) {
 $layout = array_slice($layout, -8, null, true);
 $expected = array(
 	'_general' => array('priority'),
-	'_static' => array('newDirPermissions', 'staticFile', 'cacheNonHtml', 'rootFiles'),
+	'_static' => array('newDirPermissions', 'staticFile', 'cacheNonHtml', 'rootFiles', 'staticBaseDir'),
 	'_exclusions' => array('nonStaticDirs', 'nonStaticTemplates', 'trackedPaths', 'noCacheCookies'),
 	'_system' => array('csrfPatterns', 'useShell', 'wipeDryRun', 'logSkips'),
 	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields', 'ignoreTemplates'),

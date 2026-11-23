@@ -18,6 +18,12 @@ outside every dir listed in Non-static directories. The scan only walks root dir
 static copies of pages, worked out when it runs: see scanTargets(). A root file listed in
 "Replace these root files with pages" (robots.txt) goes by its index record only, directly in
 the site root; its hand-made original is kept as .robots.txt, see takeOverRootFile().
+
+With a "Static base directory" every one of these happens below it instead: realpath() against
+the base directory, the scan walks only the base directory, Non-static directories does not
+apply there, a root file's copy is <base>/robots.txt and nothing in the web root is taken over,
+renamed or deleted. Without the marker file (StaticPages::baseDirMarker) in the base directory
+nothing at all is deleted [decided by user, Q34].
 */
 
 class StaticPagesWiper extends Wire {
@@ -39,6 +45,9 @@ class StaticPagesWiper extends Wire {
 		$files = $this->sp->index()->indexedFiles($tags);
 		if( !count($files) ) return $this->emptyResult($dryRun);
 
+		//the rows stay as well: the files they name are still there
+		if( $this->baseDirRefuses('the wipe by the index') ) return $this->emptyResult($dryRun);
+
 		if( $dryRun ) return $this->deleteStaticFiles($files, true);
 
 		//rows first, files second: a render recording the same path meanwhile leaves a row for a
@@ -53,6 +62,20 @@ class StaticPagesWiper extends Wire {
 		$result = array('files' => 0, 'bytes' => 0, 'dirs' => 0);
 		if( $dryRun ) $result += array('dryRun' => true, 'paths' => array(), 'leftAlone' => array());
 		return $result;
+	}
+
+	public function baseDirRefuses($what){
+		//true, logged, when a base directory is set and holds no marker file: nothing is deleted
+		//from it, by any way of finding files [decided by user, Q34 A (b)]
+		if( $this->sp->baseDirReady() ) return false;
+		$this->sp->logDrain( "$what deleted nothing: the Static base directory " . $this->sp->staticBaseDir() . ' holds no marker file ' . StaticPages::baseDirMarker );
+		return true;
+	}
+
+	public function protectedDirs(){
+		//Non-static directories as the deletes use it: none below a base directory, where only
+		//static copies live [decided by user, Q34 B (a)]
+		return $this->sp->staticBaseDir() === '' ? $this->sp->nonStaticDirsArray() : array();
 	}
 
 	public function deleteStaticFiles(array $files, $dryRun = false, $htmlOnly = false, ?array $rootNames = null){
@@ -73,11 +96,14 @@ class StaticPagesWiper extends Wire {
 		if( $htmlOnly ) $rootNames = array();
 		else if( $rootNames === null ) $rootNames = $this->sp->configValue('cacheNonHtml', 0) ? array_keys( $this->sp->rootFilesArray() ) : array();
 
-		//a copy of a page lives below the static root, a root file's copy in the site root
+		if( $this->baseDirRefuses('a delete') ) return $result;
+
+		//a copy of a page lives below the static root, a root file's copy directly in it: the
+		//site root, or the base directory
 		$root = $this->sp->staticRoot();
-		$siteRoot = $this->sp->rootPath();
+		$siteRoot = $root;
 		$rootNorm = rtrim( $this->sp->normalizePath($siteRoot), DIRECTORY_SEPARATOR );
-		$nonStaticDirs = $this->sp->nonStaticDirsArray();
+		$nonStaticDirs = $this->protectedDirs();
 		$dirs = array();
 		$failed = array();
 		$deleted = array();
@@ -194,6 +220,9 @@ class StaticPagesWiper extends Wire {
 
 		$manifest = $this->sp->manifestPath();
 
+		//the manifest stays as well: the files it lists are still there
+		if( $this->baseDirRefuses('the wipe by the manifest') ) return $this->emptyResult($dryRun);
+
 		if( $dryRun ){
 			$lines = @file( $manifest, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
 			return $this->deleteStaticFiles( array_unique( $lines === false ? array() : $lines ), true, true );
@@ -298,11 +327,13 @@ class StaticPagesWiper extends Wire {
 	 * @param string $path Its page path
 	 * @param array $data The settings being stored
 	 * @param bool $dryRun
-	 * @return string 'none' (no file), 'recorded' (the module's copy), 'taken', 'dry run',
-	 *   'refused'
+	 * @return string 'none' (no file, or a Static base directory is set), 'recorded' (the
+	 *   module's copy), 'taken', 'dry run', 'refused'
 	 *
 	 */
 	public function takeOverRootFile($name, $path, array $data, $dryRun = false){
+		//with a base directory the copy is <base>/<name>: the web root's file is not touched
+		if( $this->sp->staticBaseDir() !== '' ) return 'none';
 		$file = $this->sp->rootPath() . "/$name";
 		$backup = $this->sp->rootPath() . "/.$name";
 		$line = "$name $path";
@@ -351,7 +382,8 @@ class StaticPagesWiper extends Wire {
 	 * @param string $name
 	 * @param bool $dryRun
 	 * @param string $context For the log: 'settings save', 'uninstall'
-	 * @return string 'none' (no backup), 'given back', 'dry run', 'in the way', 'failed'
+	 * @return string 'none' (no backup), 'given back', 'dry run', 'in the way', 'failed', 'base dir'
+	 *   (a Static base directory is set: the copy went, nothing renamed)
 	 *
 	 */
 	public function giveBackRootFile($name, $dryRun = false, $context = 'settings save'){
@@ -361,6 +393,13 @@ class StaticPagesWiper extends Wire {
 		$log = "$context: root file $name";
 
 		$this->deleteRootFileCopy($name, $context);
+
+		//with a base directory nothing in the web root is renamed: the save that sets one gives
+		//the backups back before it is used [decided by user, Q34 C (a)]
+		if( $this->sp->staticBaseDir() !== '' ){
+			if( file_exists($backup) || is_link($backup) ) $this->sp->logDrain( "$log: .$name is not renamed back, a Static base directory is set" );
+			return 'base dir';
+		}
 
 		if( !file_exists($backup) && !is_link($backup) ){
 			$this->sp->logDrain( "$log: no backup .$name to give back" );
@@ -402,6 +441,7 @@ class StaticPagesWiper extends Wire {
 		$relative = "/$name";
 		$log = "$context: root file $name";
 		if( !$this->sp->index()->ensureTables() || !$this->sp->index()->hasFile($relative) ) return false;
+		if( $this->baseDirRefuses("$log: the copy") ) return false;
 		$gone = false;
 		if( $this->sp->index()->dropIndexRows( array( md5($relative) ) ) ){
 			$deleted = $this->deleteStaticFiles( array($relative), false, false, array($name) );
@@ -554,6 +594,9 @@ class StaticPagesWiper extends Wire {
 			return $this->emptyResult($dryRun);
 		}
 
+		//the rows and the manifest stay as well: the files they name are still there
+		if( $this->baseDirRefuses('the full scan') ) return $this->emptyResult($dryRun);
+
 		//the listed root files the index records (robots.txt): no scan matches their names, they
 		//go by their record, read before the rows are cleared. The original kept as .robots.txt
 		//stays where it is, a wipe renames nothing
@@ -583,9 +626,9 @@ class StaticPagesWiper extends Wire {
 			$this->sp->logDrain( 'full scan left alone root dirs no list names, they are no static copies of pages: ' . implode(', ', $this->leftAlone) );
 
 		//a protected entry naming a dir below the root level: only the php walk looks at every
-		//dir on its way down, the shells are handed whole root dirs
+		//dir on its way down, the shells are handed whole root dirs. None below a base directory
 		$nested = false;
-		foreach( $this->sp->nonStaticDirsArray() as $nonStaticDir )
+		foreach( $this->protectedDirs() as $nonStaticDir )
 			if( strpbrk( trim( $nonStaticDir, '/\\' ), '/\\' ) !== false ) $nested = true;
 
 		if( $this->sp->useShell && !$nested ){
@@ -640,6 +683,11 @@ class StaticPagesWiper extends Wire {
 
 		$this->leftAlone = array();
 
+		//a base directory: every dir in it, which is the base directory itself below its top
+		//level. Its top level is the root level of wipeScanPHP() and the shells, the HTML name
+		//alone [decided by user, Q34 B (a), D (a)]
+		if( $this->sp->staticBaseDir() !== '' ) return $this->baseDirTargets();
+
 		$root = $this->sp->rootPath();
 		$windows = DIRECTORY_SEPARATOR === '\\';
 
@@ -687,6 +735,29 @@ class StaticPagesWiper extends Wire {
 		return $targets;
 	}
 
+	public function baseDirTargets(){
+		//the dirs directly in the base directory, links left out as in the site root
+		$root = $this->sp->staticRoot();
+		$rootReal = realpath($root);
+		if( $rootReal === false || !is_dir($rootReal) ) return array();
+		$targets = array();
+		try {
+			foreach( new \DirectoryIterator($root) as $entry ){
+				if( $entry->isDot() || !$entry->isDir() || $entry->isLink() ) continue;
+				$name = $entry->getFilename();
+				$path = $root . DIRECTORY_SEPARATOR . $name;
+				$real = realpath($path);
+				if( $real === false || strcasecmp( $real, $rootReal . DIRECTORY_SEPARATOR . $name ) !== 0 ) continue;
+				$targets[] = $path;
+			}
+		}
+		catch( \Throwable $e ){
+			return array();
+		}
+		sort($targets);
+		return $targets;
+	}
+
 	public function leftAlone(){
 		return $this->leftAlone;
 	}
@@ -698,8 +769,8 @@ class StaticPagesWiper extends Wire {
 		$result = $this->emptyResult($dryRun);
 
 		$root = $this->sp->staticRoot();
-		$nonStaticDirs = $this->sp->nonStaticDirsArray();
-		//the root level: the HTML name and its temporary name alone, the home page is never
+		$nonStaticDirs = $this->protectedDirs();
+		//the root level (the site root's, or the base directory's): the HTML name and its temporary name alone, the home page is never
 		//written as anything else and index.xml or robots.txt at the root is no copy of a page.
 		//Inside the targets: every name of scanFileNames()
 		$staticFile = $this->sp->staticFileName();

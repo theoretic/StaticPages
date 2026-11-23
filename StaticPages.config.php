@@ -97,6 +97,16 @@ $config = array(
 						'value'					=> '',
 					),
 
+					array(
+						'name'					=> 'staticBaseDir',
+						'type'					=> 'text',
+						'label'					=> $this->_('Static base directory'),
+						'description'			=> $this->_('Empty: static files are written into the web root. A path relative to the web root, e.g. "site/assets/static": static files are written below it instead.'),
+						'notes'					=> $this->_('Plain names separated by "/", no "." or ".." segment, no absolute path; it has to lie below the web root, also through links. StaticPages creates the directory with a marker file .staticpages, or marks an empty one on this save; a directory holding files and no marker is never written into nor deleted from. Changing this setting deletes every static copy under the old place first. With a base directory set, Non-static directories does not apply inside it, and a root file listed above is written into it, the web root\'s own file is not touched. The root .htaccess does not serve files from a base directory yet: they are written, not served.'),
+						'columnWidth'			=> 100,
+						'value'					=> '',
+					),
+
 				),
 			),
 
