@@ -251,17 +251,36 @@ class StaticPagesTracker extends Wire {
 		return $paths;
 	}
 
-	public function isExcludedFromTracking($path){
+	public function staticDirPrefix(){
+		//the base directory with a trailing separator while the module uses it: a "Static base
+		//directory" is set, accepted and holds the marker [decided by user, Q36 (a)]; '' else.
+		//A dir named by mistake, without the marker, stays tracked like any other
+		if( $this->sp->staticBaseDir() === '' || !$this->sp->baseDirReady() ) return '';
+		return rtrim( $this->sp->normalizePath( $this->sp->staticRoot() ), DIRECTORY_SEPARATOR ) . DIRECTORY_SEPARATOR;
+	}
+
+	public function isExcludedFromTracking($path, $staticPrefix = null){
 		//ProcessWire and this module write into these dirs themselves. The manifest,
 		//WireCache.maint, the FileCompiler output, the temp, session and log files all
 		//change on ordinary requests, and a pattern covering them would detect a change,
-		//wipe, change the state again by wiping, and never settle
+		//wipe, change the state again by wiping, and never settle.
+		//$staticPrefix: staticDirPrefix(), asked here when not given
 
 		//a generated static file is not a source file either: a name a scan matches, index.xml
 		//and index.txt only while "Cache XML and plain text responses" is on
 		if( in_array( basename($path), $this->sp->scanFileNames(), true ) ) return true;
 
 		$path = $this->sp->normalizePath($path);
+
+		//nor is anything below the base directory in use: the marker, copies, root file copies.
+		//A marker left behind after the setting is cleared or changed is hashed again, one
+		//"Tracked path changed" wipe [decided by user, Q37 (a)]
+		if( $staticPrefix === null ) $staticPrefix = $this->staticDirPrefix();
+		if( $staticPrefix !== '' ){
+			$head = substr( $path, 0, strlen($staticPrefix) );
+			if( DIRECTORY_SEPARATOR === '\\' ? strcasecmp($head, $staticPrefix) === 0 : $head === $staticPrefix ) return true;
+		}
+
 		$paths = $this->wire()->config->paths;
 
 		foreach( array('cache', 'logs', 'sessions', 'tmp') as $key ){
@@ -291,9 +310,12 @@ class StaticPagesTracker extends Wire {
 
 		$entries = array();
 
+		//asked once per pattern, not once per file
+		$staticPrefix = $this->staticDirPrefix();
+
 		foreach( $this->trackedPathWalk($baseDir, $pattern, $base) as $path ){
 
-			if( $this->isExcludedFromTracking($path) ) continue;
+			if( $this->isExcludedFromTracking($path, $staticPrefix) ) continue;
 
 			$relative = ltrim( str_replace( '\\', '/', substr($path, strlen($root)) ), '/' );
 			if( !preg_match($regex, $relative) ) continue;

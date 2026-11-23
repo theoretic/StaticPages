@@ -2875,6 +2875,96 @@ foreach(array(0, 1) as $dry) {
 check('Q34 C (a): the save switching to a base dir deletes the web root copy and renames /.robots.txt back byte for byte, logged; with Dry run checked the copy goes and the rename is held back, logged', $switched === array(array(true, null, true), array(null, true, true)), json_encode($switched));
 $rootReset();
 
+//tracked paths skip the base dir while the module uses it: set, accepted, marked [decided by
+//user, Q35, Q36 (a)]. Tracked line site/assets/, which covers site/assets/static
+$bReset();
+$sp->remove('staticBaseDir');
+$bSave(array('staticBaseDir' => '', 'cacheNonHtml' => 1, 'rootFiles' => $bLine));
+$tTracked = $sp->get('trackedPaths');
+$sp->set('trackedPaths', 'site/assets/');
+$tPat = 'site/assets/**/*';
+$tHash = function($pattern = null) use ($sp, $tPat) {
+	clearstatcache();
+	return $sp->tracker()->hashPattern($pattern === null ? $tPat : $pattern);
+};
+$tModeAll = fn(array $rows) => count(array_filter($rows, fn($r) => (int) $r['mode'] === (int) StaticPages::modeAll)) > 0;
+$sp->checkTrackedPaths(true);
+$sp->drain();
+$tH0 = $tHash();
+$tMax = queueMaxId($sp);
+$tSeen = array('pattern' => $sp->tracker()->trackedPathsArray() === array($tPat), 'no base dir yet' => !is_dir($bAbs));
+$bSave(array('staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'rootFiles' => $bLine));
+$sp->set('staticBaseDir', $bRel);
+$tSeen['marker'] = is_file($bMarker) && $tHash() === $tH0;
+$sp->checkTrackedPaths(true);
+publish($sp, $A);
+$tSeen['publish'] = is_file($bA) && $tHash() === $tH0;
+$sp->checkTrackedPaths(true);
+$tpl->contentType = 'txt';
+publish($sp, $R, array(), $txtBody);
+$tpl->contentType = $tplType;
+$tSeen['root file'] = $bytesOf("$bAbs/robots.txt") === $txtBody && $tHash() === $tH0;
+$sp->checkTrackedPaths(true);
+$sp->wipeCaches(true);
+$tSeen['wipe'] = !is_file($bA) && $bytesOf("$bAbs/robots.txt") === null && is_file($bMarker) && $tHash() === $tH0;
+$sp->checkTrackedPaths(true);
+$tSeen['queued'] = queueRowsAfter($sp, $tMax);
+check('tracked path site/assets/ over the base dir site/assets/static: the hash stays the one taken before the base dir existed through the save making the marker, a publish, a root file render to <base>/robots.txt and a forced wipe; checkTrackedPaths(true) after each queues nothing', $tSeen === array('pattern' => true, 'no base dir yet' => true, 'marker' => true, 'publish' => true, 'root file' => true, 'wipe' => true, 'queued' => array()), json_encode($tSeen));
+
+//a source file beside the base dir still counts, also one whose name starts like it
+$sp->drain();
+$tSeen = array();
+foreach(array('site/assets/src.css', 'site/assets/static-src/a.css') as $x) {
+	$tMax = queueMaxId($sp);
+	putFiles($tmpRoot, array("/$x"));
+	$tSeen[$x] = $tHash() !== $tH0;
+	$sp->checkTrackedPaths(true);
+	$tSeen["$x queued"] = $tModeAll(queueRowsAfter($sp, $tMax));
+	$sp->drain();
+	@unlink("$tmpRoot/$x");
+	$sp->checkTrackedPaths(true);
+	$sp->drain();
+}
+rrmdir("$tmpRoot/site/assets/static-src");
+check('...base mode on: site/assets/src.css and site/assets/static-src/a.css each change the hash, checkTrackedPaths(true) queues modeAll', !in_array(false, $tSeen, true) && count($tSeen) === 4 && $tHash() === $tH0, json_encode($tSeen));
+
+//a tracked line that does not cover the base dir hashes alike with and without it
+putFiles($tmpRoot, array('/site/assets/css/f.css'));
+$tCss = $tHash('site/assets/css/*.css');
+$sp->remove('staticBaseDir');
+$tCssNone = $tHash('site/assets/css/*.css');
+$sp->set('staticBaseDir', $bRel);
+rrmdir("$tmpRoot/site/assets/css");
+check('...a tracked line site/assets/css/*.css: the same hash with the base dir set and without it', $tCss === $tCssNone && $tCss !== md5(''), json_encode(array($tCss, $tCssNone)));
+
+//[decided by user, Q37 (a)] a save clearing the base dir leaves the dir and the marker: the
+//marker is hashed again, one "Tracked path changed" wipe
+$bSave(array('staticBaseDir' => '', 'cacheNonHtml' => 1, 'rootFiles' => $bLine));
+$sp->remove('staticBaseDir');
+$tLeft = array(is_file($bMarker), $tHash() !== $tH0);
+@unlink($bMarker);
+$tLeft[] = $tHash() === $tH0;
+check('Q37 (a): after a save clearing the base dir, the dir and its marker stay and the marker changes the hash; without the marker it is the one from before', $tLeft === array(true, true, true), json_encode($tLeft));
+
+//no base dir, a refused value, or an unmarked dir named as base dir: a hand-made file there
+//is a source file as before
+$tSeen = array();
+foreach(array('none' => null, 'refused a/../b' => 'a/../b', 'unmarked, named' => $bRel) as $label => $value) {
+	if($value === null) $sp->remove('staticBaseDir');
+	else $sp->set('staticBaseDir', $value);
+	putFiles($tmpRoot, array("/$bRel/hand.txt"));
+	$tBefore = $tHash();
+	file_put_contents("$bAbs/hand.txt", "rewritten $label, longer");
+	$tSeen[$label] = !is_file($bMarker) && !$sp->tracker()->staticDirPrefix() && $tHash() !== $tBefore;
+}
+$sp->remove('staticBaseDir');
+$bReset();
+$sp->checkTrackedPaths(true);
+$sp->drain();
+if($tTracked === null) $sp->remove('trackedPaths');
+else $sp->set('trackedPaths', $tTracked);
+check('...no base dir, the refused value a/../b, and Q36 (a) the unmarked dir holding hand.txt named as base dir: rewriting site/assets/static/hand.txt changes the hash', !in_array(false, $tSeen, true) && count($tSeen) === 3, json_encode($tSeen));
+
 $tpl->contentType = $tplType;
 $sp->remove('rootFiles');
 $sp->remove('cacheNonHtml');
