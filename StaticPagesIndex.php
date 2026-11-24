@@ -34,7 +34,10 @@ fits the 40 characters of the tag column, whatever the page or field id.
 
 A find gets composite tags only with Narrow finds on (narrowTags()): its scope, or *, times s
 and what it filters and sorts on, plus x:<what> for what it reaches through a page reference,
-parent. or children.; a find not understood gets 'any'. Off, it gets the scope alone.
+parent. or children.; a find not understood gets 'any'. Off, it gets the scope alone. With no
+parent, template or tree limit, a find asking a custom field for a value is limited to the
+templates carrying that field (derivedScopes()); a fieldgroup save, a new template and a
+template given another fieldgroup wipe every file, since such a scope may then be too narrow.
 */
 
 class StaticPagesIndex extends Wire {
@@ -64,6 +67,18 @@ class StaticPagesIndex extends Wire {
 
 	//more tags than this for one find with Narrow finds on: its scope is *, then 'any'
 	const maxFindTags = 64;
+
+	//a field carried by more templates than this gives no derived scope, see derivedScopes()
+	const maxDerivedTemplates = 20;
+
+	//the fieldtypes whose match query in core 3.0.274 was read for derivedScopes(), by exact
+	//class: FieldtypeToggle matches pages lacking the field for a value it does not know, and a
+	//subclass, a language variant or a fieldtype of a site may override the query alike (Q65)
+	const derivedFieldtypes = array('FieldtypeText', 'FieldtypeTextarea', 'FieldtypePageTitle', 'FieldtypeEmail', 'FieldtypeURL', 'FieldtypeInteger', 'FieldtypeFloat', 'FieldtypeDecimal', 'FieldtypeCheckbox', 'FieldtypeDatetime', 'FieldtypePage', 'FieldtypeOptions');
+
+	//the ids of the templates carrying a field, field id => ids, until a fieldgroup or template
+	//save: see fieldTemplateIds()
+	protected $fieldTemplates = array();
 
 	public function __construct(StaticPages $sp) {
 		parent::__construct();
@@ -218,8 +233,9 @@ class StaticPagesIndex extends Wire {
 		//tagged p:, and nothing else can enter it, whatever else it asks
 		$scopes = $this->scopeTags($selectors, $count);
 		if( !count($scopes) ) return array();
-		//no parent, template or tree limit: every page may enter it
-		if( $scopes === array('any') ) $scopes = array('*');
+		//no parent, template or tree limit: the templates carrying a field it asks a value of,
+		//else every page may enter it
+		if( $scopes === array('any') ) $scopes = $this->derivedScopes($selectors);
 
 		$whats = array('s' => true);
 		$foreign = array();
@@ -234,6 +250,77 @@ class StaticPagesIndex extends Wire {
 		}
 
 		return $this->budgetTags( $scopes, array_keys($whats), array_keys($foreign) );
+	}
+
+	public function derivedScopes(Selectors $selectors){
+		//t:<id> for each template carrying a field the find asks a value of (requiredField()):
+		//only a page having the field can match. The smallest such list; none, or one over
+		//maxDerivedTemplates: * (every page may enter the find)
+		$lists = array();
+		foreach( $selectors as $selector ){
+			$field = $this->requiredField($selector);
+			if( $field ) $lists[] = $this->fieldTemplateIds($field);
+		}
+		$ids = $this->smallestScope($lists);
+		return $ids === null ? array('*') : array_map( fn($id) => "t:$id", $ids );
+	}
+
+	public function requiredField($selector){
+		//the custom field of a selector only pages having it can match, null for any other.
+		//Core's PageFinder (PageFinder.php:1915-2017, PageFinder2.php:2081-2178, the same) joins
+		//a field's table with an inner join for =, %=, *= and ~= when the selector is not
+		//negated, names one field and no subfield, and has no value the fieldtype calls empty:
+		//an empty value goes through whereEmptyValuePossible(), which matches pages lacking the
+		//field. Holds for the match queries of derivedFieldtypes
+		if( !$selector instanceof Selector || $selector->not ) return null;
+		if( $selector->quote === '(' || $selector->quote === '[' ) return null;
+		if( !in_array( $selector->operator(), array('=', '%=', '*=', '~='), true ) ) return null;
+		$fields = $selector->fields();
+		if( count($fields) !== 1 ) return null;
+		$name = (string) reset($fields);
+		if( !preg_match( '/^[a-z_][a-z0-9_]*$/i', $name ) ) return null;
+		$field = $this->wire()->fields->get($name);
+		if( !$field instanceof Field || !$field->id ) return null;
+		$type = $field->type;
+		if( !$type instanceof Fieldtype || !in_array( $type->className(), self::derivedFieldtypes, true ) ) return null;
+		$values = $selector->values(true);
+		if( !count($values) ) return null;
+		foreach( $values as $value ){
+			if( !is_scalar($value) || (string) $value === '' || $type->isEmptyValue($field, $value) ) return null;
+		}
+		return $field;
+	}
+
+	public function fieldTemplateIds(Field $field){
+		//the ids of the templates whose fieldgroup carries $field, one query per field until
+		//forgetFieldTemplates()
+		$id = (int) $field->id;
+		if( !isset($this->fieldTemplates[$id]) ){
+			$ids = array();
+			foreach( $field->getTemplates() as $template ) $ids[] = (int) $template->id;
+			sort($ids);
+			$this->fieldTemplates[$id] = $ids;
+		}
+		return $this->fieldTemplates[$id];
+	}
+
+	public function forgetFieldTemplates(){
+		//a fieldgroup or template was saved: which template carries which field may have changed
+		$this->fieldTemplates = array();
+	}
+
+	public function smallestScope(array $lists){
+		//the shortest of lists of template ids, null when there is none or it holds more than
+		//maxDerivedTemplates. An empty list (a field on no template) is passed over: * is never
+		//narrower than what a find matches
+		$best = null;
+		foreach( $lists as $ids ){
+			$ids = array_values( (array) $ids );
+			if( !count($ids) ) continue;
+			if( $best === null || count($ids) < count($best) ) $best = $ids;
+		}
+		if( $best === null || count($best) > self::maxDerivedTemplates ) return null;
+		return $best;
 	}
 
 	public function sortNames(Selector $selector){

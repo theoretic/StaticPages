@@ -1236,8 +1236,10 @@ function cleanup() {
 	realPaths(false);
 	$pages = $wire->pages;
 	foreach(array_reverse($fixtures) as $f) if($f->id && $pages->get($f->id)->id) $pages->delete($pages->get($f->id), true);
-	global $smokeTemplates;
+	global $smokeTemplates, $smokeFieldgroups, $smokeFields;
 	foreach((array) $smokeTemplates as $t) if($t->id && $wire->templates->get($t->id)) $wire->templates->delete($t);
+	foreach(array_reverse((array) $smokeFieldgroups) as $g) if($g->id && $wire->fieldgroups->get($g->id)) $wire->fieldgroups->delete($g);
+	foreach(array_reverse((array) $smokeFields) as $f) if($f->id && $wire->fields->get($f->id)) $wire->fields->delete($f);
 	$sp->drain();
 	$wire->modules->configs->saveConfig('StaticPages', $configAtStart);
 	//the restored config may say the migration is pending; this process ran it on the temp root
@@ -4277,9 +4279,15 @@ if(count($nrTexts) >= 2 && $nrPageField) {
 	$pf = $nrPageField->name;
 	$PF = "f:{$nrPageField->id}";
 	$par = "par:{$P->id}";
+	//featured=1: the templates carrying A when its fieldtype is one of the read ones and they are
+	//1 to 20, else * (step 18, Q65)
+	$aScopes = array();
+	foreach($fA->getTemplates() as $t) $aScopes[] = "t:{$t->id}";
+	if(!in_array(wireClassName($fA->type, false), StaticPagesIndex::derivedFieldtypes, true) || count($aScopes) > 20) $aScopes = array();
+	if(!count($aScopes)) $aScopes = array('*');
 	$nrOn = array(
-		//the examples of the design, featured=1 with * scope until the fieldgroup scope exists
-		array("$a=1", 1, array("*/$A_", '*/s')),
+		//the examples of the design
+		array("$a=1", 1, array_merge(array_map(fn($s) => "$s/$A_", $aScopes), array_map(fn($s) => "$s/s", $aScopes))),
 		array("$a!=1", 1, array("*/$A_", '*/s')),
 		array("$a=''", 1, array("*/$A_", '*/s')),
 		array("template={$tpl->name}, sort=-$b, limit=10", 1, array("$T/$B_", "$T/s")),
@@ -4426,6 +4434,201 @@ if(count($nrTexts) >= 2 && $nrPageField) {
 } else {
 	echo "skip the narrowFinds checks: template {$tpl->name} has fewer than two text fields, or no page reference field exists\n";
 }
+
+////  fieldgroup-derived scope (0.13.0)
+
+//a checkbox field sp_smoke_feat_<pid>, carried by one template of its own, sp-smoke-feat-<pid>
+//(fieldgroup of the same name: title and the checkbox); a second template sp-smoke-feat2-<pid>
+//on a fieldgroup holding title alone, given the first fieldgroup to check Templates::saved. All
+//made by the API here, removed at the end of the block and by cleanup()
+$ix = $sp->index();
+$smokeFieldgroups = $smokeFields = array();
+$fdHooks = array();
+foreach(array(array($wire->fieldgroups, 'save'), array($wire->templates, 'added'), array($wire->templates, 'saved')) as $hk)
+	$fdHooks[] = count(array_filter($hk[0]->getHooks($hk[1]), fn($h) => ($h['toObject'] ?? null) instanceof StaticPages));
+check('Fieldgroups::save, Templates::added and Templates::saved are each hooked once', $fdHooks === array(1, 1, 1), json_encode($fdHooks));
+$fdModeAll = fn(array $rows) => in_array(StaticPages::modeAll, array_map(fn($row) => (int) $row['mode'], $rows), true);
+//what $fn queued, from a fresh queue
+$fdQueued = function(callable $fn) use ($sp) {
+	freshQueue($sp);
+	$max = queueMaxId($sp);
+	$fn();
+	return queueRowsAfter($sp, $max);
+};
+$fdName = 'sp_smoke_feat_' . getmypid();
+$fdField = $wire->wire(new Field());
+$fdField->type = $modules->get('FieldtypeCheckbox');
+$fdField->name = $fdName;
+$fdField->label = 'StaticPages smoke';
+$wire->fields->save($fdField);
+$smokeFields[] = $fdField;
+$fdGroup = $wire->wire(new Fieldgroup());
+$fdGroup->name = 'sp-smoke-feat-' . getmypid();
+$fdGroup->add($wire->fields->get('title'));
+$fdGroup->add($fdField);
+$fdRows = $fdQueued(fn() => $wire->fieldgroups->save($fdGroup));
+$smokeFieldgroups[] = $fdGroup;
+$fdGroup2 = $wire->wire(new Fieldgroup());
+$fdGroup2->name = 'sp-smoke-feat2-' . getmypid();
+$fdGroup2->add($wire->fields->get('title'));
+$wire->fieldgroups->save($fdGroup2);
+$smokeFieldgroups[] = $fdGroup2;
+$fdTpl = $wire->wire(new Template());
+$fdTpl->name = 'sp-smoke-feat-' . getmypid();
+$fdTpl->fieldgroup = $fdGroup;
+$fdRowsT = $fdQueued(fn() => $wire->templates->save($fdTpl));
+$smokeTemplates[] = $fdTpl;
+$fdTpl2 = $wire->wire(new Template());
+$fdTpl2->name = 'sp-smoke-feat2-' . getmypid();
+$fdTpl2->fieldgroup = $fdGroup2;
+$wire->templates->save($fdTpl2);
+$smokeTemplates[] = $fdTpl2;
+check('a new fieldgroup and a new template each queue modeAll', $fdModeAll($fdRows) && $fdModeAll($fdRowsT), json_encode(array($fdRows, $fdRowsT)));
+$fdOn = $nsMk($P, 'fd1', 'FD1', $fdTpl);
+$fdOff = $nsMk($P, 'fd0', 'FD0', $fdTpl);
+$pages->uncacheAll();
+$fdP = $pages->get($fdOn->id);
+$fdP->of(false);
+$fdP->set($fdName, 1);
+$pages->save($fdP);
+$sp->drain();
+$sp->index()->clearRows();
+
+//the probe: core's own finds on the sandbox. Non-empty =: only the page of the template carrying
+//the field; an empty value (0 is empty for a checkbox) also matches pages lacking it; the
+//query joins the field's table with an inner join
+$pages->uncacheAll();
+$fdIds = fn($selector) => array_map('intval', $pages->findIDs($selector));
+$fdTable = $fdField->getTable();
+$fdSql = $pages->getPageFinder()->find($wire->wire(new Selectors("$fdName=1")), array('returnQuery' => true))->getQuery();
+$fdZero = $fdIds("$fdName=0, has_parent={$P->id}, include=all");
+$fdProbe = array(
+	'one' => $fdIds("$fdName=1, has_parent={$P->id}, include=all") === array((int) $fdOn->id),
+	'zero' => in_array((int) $A->id, $fdZero, true) && in_array((int) $fdOff->id, $fdZero, true) && !in_array((int) $fdOn->id, $fdZero, true),
+	'join' => preg_match('/(^|\s)JOIN `?' . preg_quote($fdTable, '/') . '`? AS /', $fdSql) === 1 && !preg_match('/LEFT JOIN `?' . preg_quote($fdTable, '/') . '`? /', $fdSql),
+);
+check('probe: core finds a non-empty checkbox value only on the template carrying it (an inner join), and 0 on pages lacking the field too', !in_array(false, $fdProbe, true), json_encode($fdProbe) . ' ' . substr(preg_replace('/\s+/', ' ', $fdSql), 0, 400));
+
+//selectorTags(), Narrow finds on: a field carried by one template, then the cases giving *
+$FT = "t:{$fdTpl->id}";
+$FF = 'f:' . (int) $fdField->id;
+$TI = 'f:' . (int) $wire->fields->get('title')->id;
+$fdRowsOn = array(
+	array("$fdName=1", 1, array("$FT/$FF", "$FT/s")),
+	array("title%=x, $fdName=1", 1, array("$FT/$FF", "$FT/$TI", "$FT/s")),
+	array("$fdName!=1", 1, array("*/$FF", '*/s')),
+	array("$fdName=''", 1, array("*/$FF", '*/s')),
+	array("$fdName=0", 1, array("*/$FF", '*/s')),
+	array("!$fdName=1", 1, array("*/$FF", '*/s')),
+	array("$fdName>0", 1, array("*/$FF", '*/s')),
+	array("$fdName|title=1", 1, array("*/$FF", "*/$TI", '*/s')),
+	array("template={$tpl->name}, $fdName=1", 1, array("t:{$tpl->id}/$FF", "t:{$tpl->id}/s")),
+	array("parent={$P->id}, $fdName=1", 1, array("par:{$P->id}/$FF", "par:{$P->id}/s")),
+	array("id={$A->id}, $fdName=1", 1, array()),
+);
+$bad = $nrDiff($fdRowsOn, 1);
+check('narrowFinds on: ' . count($fdRowsOn) . " rows, $fdName=1 gives t:<its template>/f:<field> and /s; !=, an empty value, 0, a negation, >, an OR-field give *; a parent, template or specific find as before", !count($bad), json_encode($bad));
+$bad = $nrDiff(array(array("$fdName=1", 1, array('any'))), 0);
+check('narrowFinds off: the same find gives any, as 0.12.0', !count($bad), json_encode($bad));
+
+//more than 20 templates: a stubbed list of 21 for the field; the cap of smallestScope()
+(function($id) { $this->fieldTemplates[$id] = range(1, 21); })->call($ix, (int) $fdField->id);
+$bad = $nrDiff(array(array("$fdName=1", 1, array("*/$FF", '*/s'))), 1);
+(function($id) { $this->fieldTemplates[$id] = range(1, 20); })->call($ix, (int) $fdField->id);
+$bad = array_merge($bad, $nrDiff(array(array("$fdName=1", 1, array_merge(array_map(fn($i) => "t:$i/$FF", range(1, 20)), array_map(fn($i) => "t:$i/s", range(1, 20))))), 1));
+$ix->forgetFieldTemplates();
+$fdCap = array(
+	'21' => $ix->smallestScope(array(range(1, 21))) === null,
+	'smallest' => $ix->smallestScope(array(range(1, 21), array(5, 6), array(7, 8, 9))) === array(5, 6),
+	'none' => $ix->smallestScope(array()) === null && $ix->smallestScope(array(array())) === null,
+	'real' => $ix->fieldTemplateIds($fdField) === array((int) $fdTpl->id),
+);
+check('a field carried by more than 20 templates (a stubbed list of 21) gives * scope, 20 give t: each; the smallest list wins, an empty one is passed over', !count($bad) && !in_array(false, $fdCap, true), json_encode(array($bad, $fdCap)));
+
+//a fieldtype not among the read ones gives *: FieldtypeToggle, when installed, whose match query
+//finds pages lacking the field for a value it does not know
+if($modules->isInstalled('FieldtypeToggle')) {
+	$fdTog = $wire->wire(new Field());
+	$fdTog->type = $modules->get('FieldtypeToggle');
+	$fdTog->name = 'sp_smoke_tog_' . getmypid();
+	$fdTog->label = 'StaticPages smoke';
+	$wire->fields->save($fdTog);
+	$smokeFields[] = $fdTog;
+	$fdGroup->add($fdTog);
+	$wire->fieldgroups->save($fdGroup);
+	$pages->uncacheAll();
+	$fdTogProbe = in_array((int) $A->id, $fdIds("{$fdTog->name}=maybe, has_parent={$P->id}, include=all"), true);
+	$bad = $nrDiff(array(array("{$fdTog->name}=1", 1, array('*/f:' . (int) $fdTog->id, '*/s'))), 1);
+	check('FieldtypeToggle: core finds tog=maybe on a page lacking the field (probe), and tog=1 gives * scope', $fdTogProbe && !count($bad), json_encode(array($fdTogProbe, $bad)));
+	$fdGroup->remove($fdTog);
+	$wire->fieldgroups->save($fdGroup);
+	$wire->fields->delete($fdTog);
+} else {
+	echo "skip the FieldtypeToggle row: not installed here\n";
+}
+
+//the hooks: a fieldgroup saved unchanged, a template given another fieldgroup (and back), a
+//template saved with its fieldgroup unchanged
+$fdRows = $fdQueued(fn() => $wire->fieldgroups->save($fdGroup));
+$fdRows2 = $fdQueued(function() use ($wire, $fdTpl2, $fdGroup) { $fdTpl2->fieldgroup = $fdGroup; $wire->templates->save($fdTpl2); });
+$fdRows3 = $fdQueued(function() use ($wire, $fdTpl2, $fdGroup2) { $fdTpl2->fieldgroup = $fdGroup2; $wire->templates->save($fdTpl2); });
+$fdRows4 = $fdQueued(fn() => $wire->templates->save($fdTpl));
+$fdTpl2Back = (int) $wire->templates->get($fdTpl2->id)->fieldgroup->id === (int) $fdGroup2->id;
+check('a fieldgroup saved unchanged queues modeAll, a template given another fieldgroup queues modeAll (and back), one saved with its fieldgroup unchanged queues nothing', $fdModeAll($fdRows) && $fdModeAll($fdRows2) && $fdModeAll($fdRows3) && !count($fdRows4) && $fdTpl2Back, json_encode(array($fdRows, $fdRows2, $fdRows3, $fdRows4, $fdTpl2Back)));
+$sp->drain();
+$sp->index()->clearRows();
+
+//end to end, Narrow finds on: a copy of P whose render ran $fdName=1 survives a new page of a
+//template lacking the field, and goes with a new page of the template carrying it
+$sp->set('narrowFinds', 1);
+$fdPublish = function() use ($sp, $wire, $pages, $P, $fdName) {
+	$sp->index()->collect(true);
+	$wire->pages->uncacheAll();
+	$Pp = $pages->get($P->id);
+	$wire->wire('page', $Pp);
+	$found = $pages->find("$fdName=1");
+	$sp->queue()->startGen();
+	$sp->cachePage(new HookEvent(array('object' => $Pp, 'method' => 'render', 'return' => '<html><body>derived</body></html>')));
+	$sp->index()->collect(false);
+	return $found;
+};
+$fdRel = "$Pdir/index.html";
+$fdGot = array();
+$fdMade = array();
+foreach(array(array($tpl, 'fdx'), array($fdTpl, 'fdy')) as $run) {
+	list($t, $name) = $run;
+	$found = $fdPublish();
+	$tags = tagsOf($sp, $fdRel);
+	$recorded = is_file("$tmpRoot$fdRel") && $found->count() === 1 && (int) $found->first()->id === (int) $fdOn->id
+		&& in_array("$FT/$FF", $tags, true) && in_array("$FT/s", $tags, true) && !in_array('*/s', $tags, true) && !in_array('any', $tags, true);
+	$fdMade[] = $nsMk($P, $name, strtoupper($name), $t);
+	$sp->drain();
+	$gone = !is_file("$tmpRoot$fdRel");
+	$fdGot[$t->name] = array('recorded' => $recorded, 'removed' => $gone, 'tags' => $tags);
+	$sp->index()->dropIndexRows(array(md5($fdRel)));
+	@unlink("$tmpRoot$fdRel");
+}
+$sp->remove('narrowFinds');
+check("narrowFinds on: a copy of a render that ran $fdName=1 survives a new page of {$tpl->name} (no such field) and goes with a new page of the template carrying it", $fdGot[$tpl->name]['recorded'] && !$fdGot[$tpl->name]['removed'] && $fdGot[$fdTpl->name]['recorded'] && $fdGot[$fdTpl->name]['removed'], json_encode($fdGot));
+
+foreach(array_reverse(array_merge(array($fdOn, $fdOff), $fdMade)) as $p) $pages->delete($pages->get($p->id), true);
+$sp->drain();
+$wire->templates->delete($fdTpl);
+$wire->templates->delete($fdTpl2);
+$wire->fieldgroups->delete($fdGroup);
+$wire->fieldgroups->delete($fdGroup2);
+$wire->fields->delete($fdField);
+$sp->index()->clearRows();
+$wire->pages->uncacheAll();
+$fdEnd = array(
+	'templates' => !$wire->templates->get($fdTpl->name) && !$wire->templates->get($fdTpl2->name),
+	'fieldgroups' => !$wire->fieldgroups->get($fdGroup->name) && !$wire->fieldgroups->get($fdGroup2->name),
+	'fields' => !$wire->fields->get($fdName) && !$wire->fields->get('sp_smoke_tog_' . getmypid()),
+	'pages' => !$pages->count('name=fd0|fd1|fdx|fdy, has_parent=' . (int) $P->id . ', include=all'),
+	'disk' => !is_file("$tmpRoot$fdRel"),
+	'setting' => $sp->get('narrowFinds') === null,
+);
+check('derived scope block: its pages, templates, fieldgroups and fields gone, no copy of P left, the setting as before', !in_array(false, $fdEnd, true), json_encode($fdEnd));
 
 ////  .htaccess manager (0.10.0)
 

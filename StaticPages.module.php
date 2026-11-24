@@ -173,6 +173,13 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//a single field save never reaches Pages::saved, inline admin edits and setAndSave() would leave stale files
 		if( $this->configValue('wipeOnSaveField', 1) ) $this->wire()->pages->addHookAfter('savedField', $this, 'hookSavedField');
 
+		//a find asking a field for a value may be recorded for the templates carrying that field
+		//(StaticPagesIndex::derivedScopes()): a field added to a template later, a new template
+		//or a template given another fieldgroup puts pages outside that scope. Every file goes
+		$this->wire()->fieldgroups->addHookAfter('save', $this, 'hookFieldgroupSaved');
+		$this->wire()->templates->addHookAfter('added', $this, 'hookTemplateAdded');
+		$this->wire()->templates->addHookAfter('saved', $this, 'hookTemplateSaved');
+
 		//saves only queue what went stale, the files are removed once the response is out
 		register_shutdown_function(array($this, 'shutdown'));
 	}
@@ -414,6 +421,32 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$page = $event->arguments(0);
 		if( (int) $page->numChildren < 1 ) return;
 		if( $this->index()->ignoresSave($page) ) return;
+		return $this->queue()->enqueue(self::modeAll);
+	}
+
+	public function hookFieldgroupSaved($event) {
+		return $this->fieldsMoved();
+	}
+
+	public function hookTemplateAdded($event) {
+		//core calls added() for a new template, then saved()
+		return $this->fieldsMoved();
+	}
+
+	public function hookTemplateSaved($event) {
+		//only a template given another fieldgroup: core removes the data of the fields it lost
+		//(Templates.php:392), its pages may now have fields they did not have
+		$template = $event->arguments(0);
+		if( !$template instanceof Template ) return;
+		$previous = $template->fieldgroupPrevious;
+		$fieldgroup = $template->fieldgroup;
+		if( !$previous instanceof Fieldgroup || !$fieldgroup instanceof Fieldgroup ) return;
+		if( (int) $previous->id === (int) $fieldgroup->id ) return;
+		return $this->fieldsMoved();
+	}
+
+	protected function fieldsMoved() {
+		$this->index()->forgetFieldTemplates();
 		return $this->queue()->enqueue(self::modeAll);
 	}
 
