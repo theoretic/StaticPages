@@ -81,6 +81,10 @@ With the new settings at their defaults:
 ### Fixed
 - **A root file named like an old no-slash copy** (`/sitemap_index.xml`) was deleted by its record
   also while unlisted or with *Cache XML and plain text responses* off; now only while listed and on.
+- **A drain with the base directory's marker missing dropped the queue**, deleting nothing: the
+  files stayed stale after the marker was back. It now keeps the rows, logs once per drain
+  (`the drain (queue kept) deleted nothing: ...`), and the first drain after the marker is back
+  takes them.
 
 ### Tests
 - `tests/smoke.php` checks the tags a save queues (the `Pages::added` path, repeater items, a

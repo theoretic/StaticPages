@@ -78,6 +78,14 @@ class StaticPagesQueue extends Wire {
 			//found the lock taken and is not going to drain them
 			for( $round = 0; $round < 10; $round++ ){
 
+				//a base directory without its marker: the wiper deletes nothing, so the rows stay
+				//for the first drain after the marker is back. One log line per drain, none while
+				//the queue is empty; the rows are not read
+				if( !$this->sp->baseDirReady() ){
+					if( !$round && $this->hasRows() ) $this->sp->wiper()->baseDirRefuses('the drain (queue kept)');
+					break;
+				}
+
 				$query = $database->prepare('SELECT id, mode, tags FROM `' . StaticPages::tableQueue . '` ORDER BY id LIMIT 10000');
 				$query->execute();
 				$rows = $query->fetchAll(\PDO::FETCH_ASSOC);
@@ -208,6 +216,14 @@ class StaticPagesQueue extends Wire {
 	}
 
 ////  the drain's surroundings
+
+	public function hasRows(){
+		$query = $this->wire()->database->prepare('SELECT 1 FROM `' . StaticPages::tableQueue . '` LIMIT 1');
+		$query->execute();
+		$found = (bool) $query->fetchColumn();
+		$query->closeCursor();
+		return $found;
+	}
 
 	public function hasOrphans(){
 		//no table yet means nothing queued, and this must not create one on every admin request

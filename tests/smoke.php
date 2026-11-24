@@ -3252,6 +3252,24 @@ $log0 = logText($tmp);
 publish($sp, $B);
 $noMarker[] = !is_dir("$bAbs$Pdir/b9") && strpos($since($log0), "skip $Pdir/b9/: the Static base directory $bRel holds no marker file .staticpages") !== false;
 check('a base dir without the marker: wipeCaches(), wipeCaches(true) (PHP walk, shell) and a drain delete nothing, keep the row and log it; a publish writes nothing, skip logged', $noMarker === array(true, true, true, 4, true), json_encode($noMarker));
+
+//the drain keeps its queue rows while the marker is missing, one log line per drain, and the
+//first drain after the marker is back takes them (N1.5)
+$queueCount = fn() => (int) $wire->database->query('SELECT COUNT(*) FROM `' . StaticPages::tableQueue . '`')->fetchColumn();
+$sp->index()->recordStaticFile("$Pdir/a/index.html", 0, array('p:4294967290'));
+freshQueue($sp);
+$sp->queue()->enqueue(StaticPages::modeTags, array('p:4294967290'));
+$nqRows = $queueCount();
+$log0 = logText($tmp);
+$sp->drain();
+$sp->drain();
+clearstatcache();
+$nqSeen = array('rows' => $nqRows >= 2 && $queueCount() === $nqRows, 'file' => is_file($bA), 'logged' => substr_count($since($log0), "the drain (queue kept) deleted nothing: the Static base directory $bRel holds no marker file .staticpages"));
+file_put_contents($bMarker, '');
+$sp->drain();
+clearstatcache();
+$nqSeen += array('after' => array($queueCount(), is_file($bA), $sp->index()->hasFile("$Pdir/a/index.html")));
+check('...a drain without the marker keeps the queue rows (two or more) and logs once per drain; the drain after the marker is back deletes the file and empties the queue', $nqSeen === array('rows' => true, 'file' => true, 'logged' => 2, 'after' => array(0, false, false)), json_encode($nqSeen));
 $bReset();
 
 //a forced scan with the index read first, below the base dir: every copy lies inside the scan,
