@@ -793,6 +793,39 @@ check('the settings form builds without a .htaccess (none) and with a directory 
 check('the settings form builds without index tables and still shows the .htaccess state', strpos($values['no tables'][0], 'State: candidate') !== false && $values['no tables'][1] === true, substr($values['no tables'][0], 0, 120));
 check('the settings form tells the operator to add a rule above the block for a directory made by hand', strpos($notesNoTables, 'made by hand') !== false && strpos($notesNoTables, 'RewriteRule ^landing/ - [L]') !== false && strpos($notesNoTables, 'index.htm') !== false, $notesNoTables);
 check('...and that with a Static base directory such a directory goes to ProcessWire for every request (step 11)', strpos($notesNoTables, 'With a Static base directory such a directory goes to ProcessWire for every request') !== false, $notesNoTables);
+
+//a state text holding a quote (unrecognised: "ProcessWire's") is entity encoded once, whether
+//core's __() hands it back encoded already (LanguageSupport, a language set) or raw (core
+//encoding switched off, as without LanguageSupport) [audit 1, N1.2]
+$n12File = "$tmpRoot/sp-ht-unrec/.htaccess";
+@mkdir(dirname($n12File), 0777, true);
+file_put_contents($n12File, "Options -Indexes\n");
+$config->paths->root = "$root/";
+$sp->htaccess()->file = $n12File;
+$n12EncodeWas = wireLangEntityEncode();
+$n12 = array();
+foreach(array('core' => '', 'raw' => false) as $n12Mode => $n12Set) {
+	if($n12Set !== '') wireLangEntityEncode($n12Set);
+	$n12Core = $sp->_("The .htaccess is not recognised as ProcessWire's. Nothing is written.");
+	$form = $modules->getModuleConfigInputfields('StaticPages');
+	$f = $form ? $form->getChildByName('_htaccess') : null;
+	$n12Value = $f ? (string) $f->value : '';
+	$n12[$n12Mode] = array(
+		'core encodes' => strpos($n12Core, "'") === false,
+		'state' => strpos($n12Value, 'State: unrecognised') !== false,
+		'once' => strpos($n12Value, 'recognised as ProcessWire&#039;s. Nothing is written.') !== false,
+		'twice' => strpos($n12Value, '&amp;') !== false,
+	);
+}
+wireLangEntityEncode($n12EncodeWas);
+$config->paths->root = $formRoot;
+$sp->htaccess()->file = '';
+@unlink($n12File);
+@rmdir(dirname($n12File));
+$n12Once = array('state' => true, 'once' => true, 'twice' => false);
+$n12Seen = array_map(fn($x) => array_diff_key($x, array('core encodes' => 1)), $n12);
+echo '     N1.2 core __() encodes here: ' . json_encode($n12['core']['core encodes']) . ", with encoding off: " . json_encode($n12['raw']['core encodes']) . "\n";
+check('the settings form encodes a state text holding a quote once, with core\'s translation encoding as this install has it and with it off', $n12Seen === array('core' => $n12Once, 'raw' => $n12Once) && $n12['raw']['core encodes'] === false, json_encode($n12));
 check('htaccessStatus() is the reader\'s status() of the root .htaccess', $sp->htaccessStatus()['state'] === 'candidate' && $sp->htaccessStatus()['file'] === $htFile);
 
 @unlink($htFile);

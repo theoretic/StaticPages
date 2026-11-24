@@ -505,13 +505,17 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$modules = $this->wire()->modules;
 		$sanitizer = $this->wire()->sanitizer;
 		$e = function($text) use ($sanitizer) { return $sanitizer->entities( (string) $text ); };
+		//a text of $this->_() before it goes through $e: core's __() hands it back entity encoded
+		//already on a LanguageSupport install with a language set, raw on others; decoded here, so
+		//$e encodes every text exactly once either way [audit 1, N1.2]
+		$tr = function($text) { return html_entity_decode( (string) $text, ENT_QUOTES | ENT_HTML5, 'UTF-8' ); };
 
 		$status = null;
 		try {
 			$status = $this->htaccessStatus();
 		}
 		catch( \Throwable $t ){
-			$html = '<p>' . $e( sprintf( $this->_('The .htaccess could not be checked: %s'), $t->getMessage() ) ) . '</p>';
+			$html = '<p>' . $e( sprintf( $tr( $this->_('The .htaccess could not be checked: %s') ), $t->getMessage() ) ) . '</p>';
 		}
 
 		if( $status ){
@@ -525,8 +529,9 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 				'current' => $this->_('The StaticPages block in the .htaccess is up to date.'),
 				'outdated' => $this->_('The StaticPages block in the .htaccess differs from the one these settings generate.'),
 				);
+			$says = array_map( $tr, $says );
 			$state = $status['state'];
-			$html = '<p><strong>' . $e( sprintf( $this->_('State: %s'), $state ) ) . '</strong> ' . $e( isset($says[$state]) ? $says[$state] : '' ) . '</p>';
+			$html = '<p><strong>' . $e( sprintf( $tr( $this->_('State: %s') ), $state ) ) . '</strong> ' . $e( isset($says[$state]) ? $says[$state] : '' ) . '</p>';
 			$html .= '<p>' . $e( $status['reason'] ) . ' <small>' . $e( $status['file'] ) . '</small></p>';
 
 			$numbered = function(array $lines) use ($e) {
@@ -535,17 +540,17 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 				return '<pre>' . $e( implode( "\n", $out ) ) . '</pre>';
 			};
 			if( count($status['candidates']) ){
-				$html .= '<p>' . $e( $this->_('Hand-written rules found (S1 names the static file, S2 hands requests to index.php beside the stock rule, S3 serves the static file through DirectoryIndex, S4 depends on the request method):') ) . '</p>';
+				$html .= '<p>' . $e( $tr( $this->_('Hand-written rules found (S1 names the static file, S2 hands requests to index.php beside the stock rule, S3 serves the static file through DirectoryIndex, S4 depends on the request method):') ) ) . '</p>';
 				foreach( $status['candidates'] as $group ){
-					$html .= '<p>' . $e( sprintf( $this->_('Lines %1$d to %2$d, %3$s'), $group['start'], $group['end'], implode( ', ', $group['signatures'] ) ) ) . '</p>';
+					$html .= '<p>' . $e( sprintf( $tr( $this->_('Lines %1$d to %2$d, %3$s') ), $group['start'], $group['end'], implode( ', ', $group['signatures'] ) ) ) . '</p>';
 					$html .= $numbered( $group['comments'] + $group['lines'] );
 				}
 				if( count($status['related']) ){
-					$html .= '<p>' . $e( $this->_('Also commented out, never a reason by itself:') ) . '</p>' . $numbered( $status['related'] );
+					$html .= '<p>' . $e( $tr( $this->_('Also commented out, never a reason by itself:') ) ) . '</p>' . $numbered( $status['related'] );
 				}
 			}
 			foreach( $status['routes'] as $route ){
-				$html .= '<p>' . $e( sprintf( $this->_('Line %1$d routes /%2$s to ProcessWire: a root file route, left as it is.'), $route['line'], $route['name'] ) ) . '</p>';
+				$html .= '<p>' . $e( sprintf( $tr( $this->_('Line %1$d routes /%2$s to ProcessWire: a root file route, left as it is.') ), $route['line'], $route['name'] ) ) . '</p>';
 			}
 			foreach( $status['notes'] as $note ) $html .= '<p>' . $e($note) . '</p>';
 		}

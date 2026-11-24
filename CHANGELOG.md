@@ -88,6 +88,9 @@ With the new settings at their defaults:
 - **A tracked path covering the site root (`*.txt`) counted the module's own root files**: the
   recorded copy `/robots.txt` and its backup `/.robots.txt`, a wipe after every render of that
   page. Both are left out now; a hand-made file the index does not record still counts.
+- **The *Root .htaccess* texts were entity encoded twice on multi-language installs**: a quote
+  showed as `&#039;` (`ProcessWire&#039;s`). Each text is now encoded once, with or without
+  LanguageSupport.
 
 ### Tests
 - `tests/smoke.php` checks the tags a save queues (the `Pages::added` path, repeater items, a
