@@ -295,6 +295,8 @@ runs `expire()`; with it running every minute a file is at most a minute late:
 ```php
 <?php
 // expire-static.php, outside the web root
+// a site config that reads $_SERVER['DOCUMENT_ROOT'] needs it: on the command line it is empty
+$_SERVER['DOCUMENT_ROOT'] = '/var/www/example.com';
 include '/var/www/example.com/index.php';
 $modules->get('StaticPages')->drain();
 ```
@@ -303,11 +305,21 @@ $modules->get('StaticPages')->drain();
 * * * * * php /var/www/expire-static.php
 ```
 
-A CLI run also checks the root `.htaccess`, see *When the module writes it*. `expire()` takes the
-drain lock, deletes through every check a delete goes through, and takes the files tagged `*`
-along, as every drain does; it changes no generation stamp and queues nothing. Files due that it
-can not delete (a base directory without its marker) are tried again a minute later, not on
-every request. Uninstalling deletes `expire.next`.
+Run it as the web server's user (the user PHP runs the site as, `www-data` on Debian), so that
+the files it writes get the owner and permissions the site's own requests give them. Each run is
+a full ProcessWire boot and does what every CLI run does: the lazy migration of an older install
+when one is pending, the queue, then `expire()`, which rewrites `expire.next` (deletes it when no
+time is left) and logs a line to the `static-pages` log when files were due. After the script
+comes the root `.htaccess` check of *When the module writes it*: three `stat()` calls while
+nothing changed; otherwise it acts as described there (the block added or rewritten after a
+backup `.htaccess.sp-<YmdHis>.bak`, no check request from the command line, a log line, a notice
+kept in the module's config for the next superuser admin page) and writes its stamp
+`htaccess-<md5>.seen` and `htaccess.reported` to `site/assets/cache/StaticPages/`.
+
+`expire()` takes the drain lock, deletes through every check a delete goes through, and takes the
+files tagged `*` along, as every drain does; it changes no generation stamp and queues nothing.
+Files due that it can not delete (a base directory without its marker) are tried again a minute
+later, not on every request. Uninstalling deletes `expire.next`.
 
 ## Upgrading
 
