@@ -4630,6 +4630,74 @@ $fdEnd = array(
 );
 check('derived scope block: its pages, templates, fieldgroups and fields gone, no copy of P left, the setting as before', !in_array(false, $fdEnd, true), json_encode($fdEnd));
 
+////  the any diagnostic (0.13.0)
+
+//a copy of P whose render ran a find falling back to any, one of A whose find is understood:
+//the counts, the log line naming the selector (Log skipped pages on, none with it off), the
+//note on the settings form, left out without index tables
+$sp->index()->clearRows();
+$adSelector = 'title%=sp-smoke-any-' . getmypid();
+$adFiles = array("$Pdir/index.html", "$Pdir/a/index.html");
+$adDirs = array("$tmpRoot$Pdir/a" => is_dir("$tmpRoot$Pdir/a"), "$tmpRoot$Pdir" => is_dir("$tmpRoot$Pdir"));
+$adBefore = files($tmpRoot);
+$adPublish = function(Page $page, $selector) use ($sp, $wire, $pages) {
+	$sp->index()->collect(true);
+	$wire->pages->uncacheAll();
+	$p = $pages->get($page->id);
+	$wire->wire('page', $p);
+	$pages->find($selector);
+	$sp->queue()->startGen();
+	$sp->cachePage(new HookEvent(array('object' => $p, 'method' => 'render', 'return' => '<html><body>any</body></html>')));
+	$sp->index()->collect(false);
+};
+$adLog = strlen(logText($tmp));
+$adPublish($P, $adSelector);
+$adPublish($A, "parent={$P->id}");
+$adLines = substr(logText($tmp), $adLog);
+$adCounts = $sp->index()->fileCounts();
+$adTags = array(tagsOf($sp, $adFiles[0]), tagsOf($sp, $adFiles[1]));
+check('fileCounts(): a copy of a render whose find is not understood and one of a render whose find is give total 2, any 1, * 0', $adCounts === array('total' => 2, 'any' => 1, '*' => 0) && in_array('any', $adTags[0], true) && !in_array('any', $adTags[1], true) && in_array("par:{$P->id}", $adTags[1], true), json_encode(array($adCounts, $adTags, $adBefore)));
+check('with Log skipped pages on, writing the copy logs the selector that fell back to any, once, and nothing for the find understood', substr_count($adLines, 'a find this module does not understand') === 1 && strpos($adLines, "any {$P->path}: ") !== false && strpos($adLines, $adSelector) !== false && strpos($adLines, "parent={$P->id}") === false, $adLines);
+
+$sp->set('logSkips', 0);
+$sp->index()->dropIndexRows(array(md5($adFiles[0])));
+@unlink($tmpRoot . $adFiles[0]);
+$adLog = strlen(logText($tmp));
+$adPublish($P, $adSelector);
+$adLines = substr(logText($tmp), $adLog);
+$adTags = tagsOf($sp, $adFiles[0]);
+$sp->set('logSkips', 1);
+check('with Log skipped pages off, the same copy is written with any and nothing is logged', is_file($tmpRoot . $adFiles[0]) && in_array('any', $adTags, true) && strpos($adLines, 'does not understand') === false, $adLines);
+
+//the settings form: built under the install's own root, the .htaccess part reads a missing file
+$adRoot = $config->paths->root;
+$config->paths->root = "$root/";
+$sp->htaccess()->file = "$tmpRoot/sp-ht-none/.htaccess";
+$form = $modules->getModuleConfigInputfields('StaticPages');
+$f = $form ? $form->getChildByName('_indexCounts') : null;
+$adNote = $f ? (string) $f->value : '';
+$adAfter = false;
+if($form && $f) foreach($form->children() as $child) {
+	if($child === $f) break;
+	$adAfter = (string) $child->attr('name') === '_wipe';
+}
+$tablesAtStart = $tablesReady->getValue($sp->index());
+$tablesReady->setValue($sp->index(), false);
+$form = $modules->getModuleConfigInputfields('StaticPages');
+$adNoTables = array('form' => (bool) $form, 'note' => $form ? (bool) $form->getChildByName('_indexCounts') : null, 'htaccess' => $form ? (bool) $form->getChildByName('_htaccess') : null);
+$tablesReady->setValue($sp->index(), $tablesAtStart);
+$config->paths->root = $adRoot;
+$sp->htaccess()->file = '';
+$adBody = preg_match('/function addIndexCounts\(.*?\n\t\}/s', (string) file_get_contents((new \ReflectionClass($sp))->getFileName()), $m) ? $m[0] : '';
+check('the settings form holds the note with those numbers, its text through $sanitizer->entities(), right after the Wipe fieldset', $f instanceof InputfieldMarkup && $adAfter && strpos($adNote, '2 static files are indexed. 1 of them carry the tag any') !== false && strpos($adNote, 'and 0 the tag *') !== false && strpos($adNote, 'Log skipped pages on') !== false && strpos($adBody, '$sanitizer->entities( sprintf(') !== false && strip_tags($adNote) === substr($adNote, 3, -4) && strpos($adNote, '&amp;') === false, $adNote);
+check('with tablesReady forced false the settings form builds, with the .htaccess state and without the note', $adNoTables === array('form' => true, 'note' => false, 'htaccess' => true), json_encode($adNoTables));
+
+$sp->index()->dropIndexRows(array_map('md5', $adFiles));
+foreach($adFiles as $rel) @unlink($tmpRoot . $rel);
+foreach($adDirs as $dir => $existed) if(!$existed) @rmdir($dir);
+$adEnd = array('rows' => $sp->index()->fileCounts() === array('total' => 0, 'any' => 0, '*' => 0), 'disk' => files($tmpRoot) === $adBefore, 'logSkips' => (int) $sp->get('logSkips') === 1);
+check('any diagnostic block: no index row and no copy left, the tree as before, Log skipped pages on again', !in_array(false, $adEnd, true), json_encode(array($adEnd, files($tmpRoot), $adBefore)));
+
 ////  .htaccess manager (0.10.0)
 
 //when the manager runs: install, the check after a superuser's admin request or a CLI run, a

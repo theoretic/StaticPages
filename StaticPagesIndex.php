@@ -124,18 +124,26 @@ class StaticPagesIndex extends Wire {
 		$this->finds[] = array( $items->getSelectors(), $items->count() );
 	}
 
-	public function findTags(){
-		//the tags of every find kept by pagesFound(), tag => true
+	public function findTags($page = null){
+		//the tags of every find kept by pagesFound(), tag => true. Given the page and with Log
+		//skipped pages on, each selector that fell back to 'any' is logged, once per call
 		$tags = array();
+		$logged = ( $page instanceof Page && $this->sp->configValue('logSkips', 0) ) ? array() : null;
 		$this->resolving = true;
 		try {
 			foreach( $this->finds as $find ){
 				try {
-					foreach( $this->selectorTags( $find[0], $find[1] ) as $tag ) $tags[$tag] = true;
+					$found = $this->selectorTags( $find[0], $find[1] );
 				}
 				catch( \Throwable $e ){
-					$tags['any'] = true;
+					$found = array('any');
 				}
+				foreach( $found as $tag ) $tags[$tag] = true;
+				if( $logged === null || !in_array('any', $found, true) ) continue;
+				$selector = $find[0] === null ? '' : (string) $find[0];
+				if( isset($logged[$selector]) ) continue;
+				$logged[$selector] = true;
+				$this->wire()->log->save( 'static-pages', "any {$page->path}: a find this module does not understand, selector \"$selector\"" );
 			}
 		}
 		finally {
@@ -472,7 +480,7 @@ class StaticPagesIndex extends Wire {
 	public function renderTags(Page $page){
 		//everything the request collected, for the file cachePage() just wrote
 
-		$tags = $this->deps + $this->findTags();
+		$tags = $this->deps + $this->findTags($page);
 
 		//pages loaded before collecting started, by modules initialised before this one
 		foreach( array_keys( (array) $this->wire()->pages->getCache() ) as $id ) $tags['p:' . (int) $id] = true;
@@ -1018,6 +1026,31 @@ class StaticPagesIndex extends Wire {
 		//checked this request, or indexSchema says so (see ensureTables()). Never creates them
 		if( $this->tablesReady !== null ) return $this->tablesReady;
 		return (int) $this->sp->get('indexSchema') === StaticPages::schemaVersion;
+	}
+
+	public function fileCounts(){
+		//for the settings form only, one query: the files the index knows ('total'), those
+		//carrying 'any', a find not understood ('any'), and those carrying '*' ('*'): nearly any
+		//page save removes both. Null when the query fails
+		try {
+			$query = $this->wire()->database->prepare(
+				'SELECT (SELECT COUNT(*) FROM `' . StaticPages::tableFiles . '`) AS n_total, ' .
+				'(SELECT COUNT(*) FROM `' . StaticPages::tableTags . '` WHERE tag = :any) AS n_any, ' .
+				'(SELECT COUNT(*) FROM `' . StaticPages::tableTags . '` WHERE tag = :all) AS n_all'
+				);
+			$query->bindValue(':any', 'any');
+			$query->bindValue(':all', '*');
+			$query->execute();
+			$row = $query->fetch(\PDO::FETCH_ASSOC);
+			$query->closeCursor();
+			if( !is_array($row) ) return null;
+			return array( 'total' => (int) $row['n_total'], 'any' => (int) $row['n_any'], '*' => (int) $row['n_all'] );
+		}
+		catch( \Throwable $e ){
+			$this->sp->logDrain( 'could not count the indexed files: ' . $e->getMessage() );
+			if( $this->isMissingTable($e) ) $this->tablesFailed($e);
+			return null;
+		}
 	}
 
 	public function indexedFiles($tags){

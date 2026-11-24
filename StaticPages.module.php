@@ -459,6 +459,26 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$field = $form->getChildByName('nonStaticDirs');
 		if( $field && trim( (string) $field->attr('value') ) === '' ) $field->attr( 'value', implode( "\n", $this->defaultNonStaticDirs() ) );
 		$this->addHtaccessStatus($form);
+		$this->addIndexCounts($form);
+	}
+
+	private function addIndexCounts(InputfieldWrapper $form){
+		//how many indexed files nearly any page save removes: read here, the one request that
+		//queries for it, never from StaticPages.config.php. Left out without index tables. No
+		//quote in the text: with LanguageSupport $this->_() hands it back entity encoded already
+		if( !$this->index()->tablesKnownReady() ) return;
+		$counts = $this->index()->fileCounts();
+		if( !$counts ) return;
+		$sanitizer = $this->wire()->sanitizer;
+		$f = $this->wire()->modules->get('InputfieldMarkup');
+		$f->attr( 'name', '_indexCounts' );
+		$f->label = $this->_('Indexed static files');
+		$f->value = '<p>' . $sanitizer->entities( sprintf(
+			$this->_('%1$d static files are indexed. %2$d of them carry the tag any, a find this module does not understand, and %3$d the tag *, no dependencies recorded: a save of nearly any page removes them, whatever it changed. With the setting Log skipped pages on, the static-pages log names the selector of each find not understood when its file is written.'),
+			$counts['total'], $counts['any'], $counts['*']
+			) ) . '</p>';
+		$wipe = $form->getChildByName('_wipe');
+		$wipe ? $form->insertAfter( $f, $wipe ) : $form->add($f);
 	}
 
 	private function addHtaccessStatus(InputfieldWrapper $form){
