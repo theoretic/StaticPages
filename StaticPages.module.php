@@ -163,6 +163,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 		//after the fact, with the changed field names: a save changing nothing removes nothing
 		$this->wire()->pages->addHookAfter('saved', $this, 'hookSaved');
+		$this->wire()->pages->addHookAfter('added', $this, 'hookAdded');
 		$this->wire()->pages->addHookAfter('deleted', $this, 'hookDeleted');
 		$this->wire()->pages->addHookAfter('sorted', $this, 'hookSorted');
 		//descendants have their trash status set in SQL, no save and no hook reaches them
@@ -383,6 +384,12 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//Pages::saved fires for a save that changed nothing as well
 		if( !count($changes) ) return;
 		return $this->index()->invalidatePage( $event->arguments(0), $changes );
+	}
+
+	public function hookAdded($event) {
+		//a new page is a structural save: core hands saved() whatever getChanges() held for it,
+		//possibly nothing, which hookSaved() passes over
+		return $this->index()->invalidatePage( $event->arguments(0), array(), 0, true );
 	}
 
 	public function hookSavedField($event) {

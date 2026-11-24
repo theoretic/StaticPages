@@ -23,6 +23,14 @@ loaded it. A find may also gain or lose P without having loaded it: a post added
 or edited into "featured=1" or into the latest five. So a save of a visible page also
 invalidates the tags a find able to return P was given: t:<P's template>, par:<P's parent>,
 tree:<each ancestor of P>, any. Before and after a move or a template change.
+
+Composite tags, emitted by a save next to those, for finds recorded by what they filter on:
+  <scope>/<what>  scope t:<id>, par:<id>, tree:<id> or *; what f:<field id>, n:<native name>,
+                  s (created, deleted, trashed, restored, status, parent or template changed),
+                  m (every save)
+  x:<what>        something about a page a find reaches through a subfield (never x:m)
+whatTag() names a change or a selector field the same way on both sides; every composite tag
+fits the 40 characters of the tag column, whatever the page or field id.
 */
 
 class StaticPagesIndex extends Wire {
@@ -221,7 +229,9 @@ class StaticPagesIndex extends Wire {
 		return array_keys($tags);
 	}
 
-	public function invalidatePage(Page $page, array $changes, $depth = 0){
+	public function invalidatePage(Page $page, array $changes, $depth = 0, $created = false, array $carried = array()){
+		//$created: a new page, from Pages::added, a structural save whatever $changes holds.
+		//$carried: whats a repeater item hands its owner, the repeater field among them
 
 		if( !$page->id ) return;
 
@@ -229,12 +239,13 @@ class StaticPagesIndex extends Wire {
 		//drain either. Asked once, before anything else: a repeater item counts as its owner's
 		if( !$depth && $this->ignoresSave($page) ) return;
 
-		//a repeater item is part of the content of the page owning it, and of nothing else
+		//a repeater item is part of the content of the page owning it, and of nothing else. The
+		//owner is not created by a new item: it gets the item's changes and the repeater field
 		if( $page instanceof RepeaterPage ){
 			$this->sp->queue()->enqueue( StaticPages::modeTags, array("p:{$page->id}") );
 			$owner = $page->getForPage();
 			if( $depth < 10 && $owner instanceof Page && $owner->id && $owner->id !== $page->id )
-				return $this->invalidatePage( $owner, $changes, $depth + 1 );
+				return $this->invalidatePage( $owner, $changes, $depth + 1, false, array_merge( $carried, $this->repeaterWhats($page) ) );
 			return;
 		}
 
@@ -250,8 +261,14 @@ class StaticPagesIndex extends Wire {
 		$template = $page->template;
 		$system = $template instanceof Template && ( $template->flags & Template::flagSystem );
 
-		if( !$system && ( !$hidden || count($structural) ) )
-			$tags = array_merge( $tags, $this->listingTags($page) );
+		$listed = !$hidden || count($structural) || $created;
+		$whats = $this->saveWhats( $changes, $created, $carried );
+
+		if( !$system && $listed )
+			$tags = array_merge( $tags, $this->listingTags($page), $this->changeTags($page, $whats) );
+
+		//a find reaching this page through a subfield, of any page: a user page as well
+		if( $listed ) $tags = array_merge( $tags, $this->foreignTags($whats) );
 
 		//a new name or parent changes the url of every descendant, and whatever links to one of
 		//them loaded it
@@ -280,6 +297,59 @@ class StaticPagesIndex extends Wire {
 		}
 
 		return $tags;
+	}
+
+	public function changeTags(Page $page, array $whats){
+		//every scope of listingTags() and *, times every what of the save: <scope>/<what>
+		$scopes = array_values( array_unique( array_diff( $this->listingTags($page), array('any') ) ) );
+		$scopes[] = '*';
+		$tags = array();
+		foreach( $scopes as $scope ) foreach( $whats as $what ) $tags[] = "$scope/$what";
+		return $tags;
+	}
+
+	public function foreignTags(array $whats){
+		//x:<what> for a find reaching the page through a subfield. A foreign modified makes that
+		//find depend on 'any', so no file carries x:m
+		$tags = array();
+		foreach( $whats as $what ) if( $what !== 'm' ) $tags[] = "x:$what";
+		return $tags;
+	}
+
+	public function saveWhats(array $changes, $created = false, array $carried = array()){
+		//what a save changed, named by whatTag(): m always, s for a new page
+		$whats = array('m' => true);
+		if( $created ) $whats['s'] = true;
+		foreach( $changes as $change ) $whats[ $this->whatTag($change) ] = true;
+		foreach( $carried as $what ) $whats[ (string) $what ] = true;
+		unset( $whats[''] );
+		return array_keys($whats);
+	}
+
+	public function repeaterWhats(RepeaterPage $item){
+		//the repeater field holding $item: a selector on rep.title sees f:<rep>
+		$field = $item->getForField();
+		return $field instanceof Field && $field->id ? array( 'f:' . (int) $field->id ) : array();
+	}
+
+	public function whatTag($name){
+		//one name for a changed property or a selector field, on the save and the render side.
+		//At most 24 characters: behind the longest scope, tree:4294967295/, a tag fits 40
+		$name = (string) $name;
+
+		//the page name or status in another language
+		if( preg_match( '/^(name|status)\d+$/', $name, $m ) ) $name = $m[1];
+
+		if( preg_match( '/^[a-z_][a-z0-9_]*$/i', $name ) ){
+			$field = $this->wire()->fields->get($name);
+			if( $field instanceof Field && $field->id ) return 'f:' . (int) $field->id;
+		}
+
+		$lower = strtolower($name);
+		if( in_array( $lower, array('status', 'parent', 'parent_id', 'template', 'templates_id'), true ) ) return 's';
+		if( $lower === 'modified' || $lower === 'modified_users_id' ) return 'm';
+		if( preg_match( '/^[a-z0-9_]{1,22}$/', $lower ) ) return "n:$lower";
+		return 'n:' . substr( md5($lower), 0, 16 );
 	}
 
 	public function movesUrl(Page $page, array $changes){

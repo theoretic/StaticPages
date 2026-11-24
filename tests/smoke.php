@@ -1727,6 +1727,195 @@ if($other) {
 	echo "skip the template change checks: no second template here takes any parent and allows a template change\n";
 }
 
+////  composite tags on the save side (0.13.0)
+
+$ix = $sp->index();
+$titleField = $wire->fields->get('title');
+$odd = substr(str_repeat('Odd-Name.', 5), 0, 40);
+$whatRows = array(
+	'title' => 'f:' . (int) $titleField->id,
+	'status' => 's',
+	'parent_id' => 's',
+	'modified' => 'm',
+	'name1012' => 'n:name',
+	'status1012' => 's',
+	'sort' => 'n:sort',
+	$odd => 'n:' . substr(md5(strtolower($odd)), 0, 16),
+);
+$gotWhats = array();
+foreach($whatRows as $name => $want) $gotWhats[$name] = $ix->whatTag($name);
+check('whatTag(): a custom field, status, parent_id, modified, name1012, status1012, sort and a 40 character odd name give f:<id>, s, s, m, n:name, s, n:sort, n:<16 hex>', $titleField instanceof Field && strlen($odd) === 40 && $gotWhats === $whatRows, json_encode($gotWhats));
+$edge = array($ix->whatTag(str_repeat('a', 22)), $ix->whatTag(str_repeat('a', 23)), $ix->whatTag('Created_Users_ID'));
+check('...a 22 character name is kept, a 23 character one hashed, letter case folded', $edge === array('n:' . str_repeat('a', 22), 'n:' . substr(md5(str_repeat('a', 23)), 0, 16), 'n:created_users_id'), json_encode($edge));
+$tooLong = array_values(array_filter(array_merge(array_values($gotWhats), $edge, array('f:4294967295')), fn($w) => strlen("tree:4294967295/$w") > 40));
+check('...every one is at most 40 characters behind the longest scope, tree:4294967295/', !count($tooLong), json_encode($tooLong));
+
+$treeOf = function(Page $parent) {
+	$out = array();
+	for($a = $parent, $i = 0; $a && $a->id && $i < 100; $a = $a->parent, $i++) $out[] = "tree:{$a->id}";
+	return $out;
+};
+$product = function(array $scopes, array $whats) {
+	$out = array();
+	foreach($scopes as $s) foreach($whats as $w) $out[] = "$s/$w";
+	return $out;
+};
+$missing = fn(array $want, array $tags) => array_values(array_diff($want, $tags));
+$tooLongTags = fn(array $tags) => array_values(array_filter($tags, fn($t) => strlen($t) > 40));
+
+//a save of two fields: today's tags, and every scope of the page times f:<each>, m
+$texts = array();
+foreach($tpl->fieldgroup as $f) if($f->type instanceof FieldtypeText) $texts[] = $f;
+if(count($texts) >= 2) {
+	list($f1, $f2) = $texts;
+	$CT = $mk($P, 'ct', 'CT');
+	$sp->drain();
+	$r = saveListed($sp, $CT->id, array(), array(), function(Page $page) use ($pages, $f1, $f2) {
+		$page->of(false);
+		$page->set($f1->name, $page->get($f1->name) . '+');
+		$page->set($f2->name, $page->get($f2->name) . '+');
+		$pages->save($page);
+	});
+	$tags = queuedTagsOf($r['rows']);
+	$legacy = array_merge(array("p:{$CT->id}", 'any', "t:{$tpl->id}", "par:{$P->id}"), $treeOf($P));
+	$scopes = array_merge(array("t:{$tpl->id}", "par:{$P->id}"), $treeOf($P), array('*'));
+	$want = array_merge($legacy, $product($scopes, array("f:{$f1->id}", "f:{$f2->id}", 'm')), array("x:f:{$f1->id}", "x:f:{$f2->id}"));
+	check("a save changing two fields ({$f1->name}, {$f2->name}) queues every legacy tag, every scope x what and x:<what>", !count($missing($want, $tags)), 'missing ' . implode(',', $missing($want, $tags)) . ' of ' . implode(',', $tags));
+	check('...no x:m, and every tag queued is at most 40 characters', !in_array('x:m', $tags, true) && !count($tooLongTags($tags)), implode(',', $tags));
+	$sp->drain();
+} else {
+	echo "skip the two field save check: template {$tpl->name} has fewer than two text fields\n";
+}
+
+//the hidden page rule, unchanged
+$CU = $mk($P, 'cu', 'CU');
+$CU->of(false);
+$CU->addStatus(Page::statusUnpublished);
+$pages->save($CU);
+$sp->drain();
+$r = saveListed($sp, $CU->id, array());
+$tags = queuedTagsOf($r['rows']);
+check('an unpublished page saved without a structural change queues p:<id> only', $tags === array("p:{$CU->id}"), implode(',', $tags));
+$sp->drain();
+
+//Pages::added: core hands saved() whatever a new page tracked, here sort, created_users_id
+//and the like, possibly nothing; the new page is a structural save either way
+$made = null;
+$newChild = function(Template $template, $name, ?callable $more = null) use ($pages, &$fixtures, &$made) {
+	return function(Page $parent) use ($pages, &$fixtures, &$made, $template, $name, $more) {
+		$p = new Page();
+		$p->template = $template;
+		$p->parent = $parent;
+		$p->name = $name;
+		$p->title = strtoupper($name);
+		$pages->save($p);
+		$fixtures[] = $p;
+		$made = $p;
+		if($more) $more($p);
+	};
+};
+$r = saveListed($sp, $P->id, array(), array(), $newChild($tpl, 'cn'));
+$tags = queuedTagsOf($r['rows']);
+$want = array_merge(array("p:{$made->id}", 'any', "t:{$tpl->id}", "par:{$P->id}"), $treeOf($P), $product(array_merge(array("t:{$tpl->id}", "par:{$P->id}"), $treeOf($P), array('*')), array('s', 'm')), array('x:s'));
+check('creating a published page queues listing tags, <scope>/s, <scope>/m and x:s', $made->id && !count($missing($want, $tags)), 'missing ' . implode(',', $missing($want, $tags)) . ' of ' . implode(',', $tags));
+$sp->drain();
+$r = saveListed($sp, $made->id, array(), array(), function(Page $page) use ($pages) {
+	$pages->saved($page, array());
+});
+check('...Pages::saved with no change for it queues nothing', !count($r['rows']) && !$r['gen'], json_encode($r));
+$r = saveListed($sp, $made->id, array(), array(), function(Page $page) use ($pages) {
+	$page->resetTrackChanges(true);
+	$pages->added($page);
+});
+$tags = queuedTagsOf($r['rows']);
+check('...Pages::added for it, with no tracked change, queues listing tags, <scope>/s and x:s', !count($missing($want, $tags)), 'missing ' . implode(',', $missing($want, $tags)) . ' of ' . implode(',', $tags));
+$sp->drain();
+$r = saveListed($sp, $P->id, array($tpl->id), array(), $newChild($tpl, 'cn2'));
+check("creating a page of a template in Never invalidate ({$tpl->name}, no repeater field) queues nothing: no row, no generation bump", $made->id && !count($r['rows']) && !$r['gen'] && !$r['drain'], json_encode($r));
+$sp->drain();
+
+if($rep) {
+	$containerOf = fn(Page $p) => $pages->get("include=all, name=for-page-{$p->id}");
+	$describe = function(array $tags) use ($pages) {
+		$out = array();
+		foreach($tags as $t) {
+			$q = preg_match('/^p:(\d+)$/', $t, $m) ? $pages->get("id={$m[1]}, include=all") : null;
+			$out[] = $q ? "$t " . ($q->id ? "{$q->name} ({$q->template->name}, status {$q->status}, parent {$q->parent->name})" : 'gone') : $t;
+		}
+		return implode('; ', $out);
+	};
+	$r = saveListed($sp, $P->id, array($repTpl->id), array(), $newChild($repTpl, 'crn'));
+	//what creating $made queued: x:s and p:<id> of core's repeater containers, for-page-<made>
+	//and for-page-<an item of made>, ready items too, and nothing else
+	$onlyContainers = function(array $tags, Page $made) use ($pages, $containerOf) {
+		if(!in_array('x:s', $tags, true) || !in_array('p:' . $containerOf($made)->id, $tags, true)) return false;
+		foreach($tags as $t) {
+			if($t === 'x:s') continue;
+			if(!preg_match('/^p:(\d+)$/', $t, $m)) return false;
+			$c = $pages->get("id={$m[1]}, include=all");
+			if(!$c->id || $c->template->name !== 'admin' || !preg_match('/^for-page-(\d+)$/', $c->name, $n)) return false;
+			if((int) $n[1] === (int) $made->id) continue;
+			$item = $pages->get("id={$n[1]}, include=all");
+			if(!$item instanceof RepeaterPage || (int) $item->getForPage()->id !== (int) $made->id) return false;
+		}
+		return true;
+	};
+	$tags = queuedTagsOf($r['rows']);
+	check("creating a page of a listed template with a repeater field ({$repTpl->name}) and no item queues no row for that page; core's for-page-<id> containers (template admin, a system one) queue p:<container> each and x:s", $made->id && $onlyContainers($tags, $made), $describe($tags));
+	$r = saveListed($sp, $P->id, array($repTpl->id), array(), $newChild($repTpl, 'cri', function(Page $p) use ($outerField, $textOf) {
+		$p->of(false);
+		$item = $p->get($outerField->name)->getNew();
+		$item->set($textOf($item->template)->name, 'item');
+		$item->save();
+		$p->save($outerField->name);
+	}));
+	$tags = queuedTagsOf($r['rows']);
+	$items = $made->get($outerField->name);
+	check("...with an item: no row for that page or its item, the containers' as before", $made->id && count($items) === 1 && !in_array('p:' . $items->first()->id, $tags, true) && $onlyContainers($tags, $made), $describe($tags));
+	$sp->drain();
+
+	$r = saveListed($sp, $leafId, array(), array(), $saveLeaf);
+	$tags = queuedTagsOf($r['rows']);
+	$want = array("t:{$repTpl->id}/f:{$outerField->id}", "par:{$P->id}/f:{$outerField->id}", "*/f:{$outerField->id}", "x:f:{$outerField->id}");
+	if($innerField) $want = array_merge($want, array("t:{$repTpl->id}/f:{$innerField->id}", "x:f:{$innerField->id}"));
+	check('a repeater item save queues the owner\'s <scope>/f:<repeater field> and x:f:<repeater field>', !count($missing($want, $tags)), 'missing ' . implode(',', $missing($want, $tags)) . ' of ' . implode(',', $tags));
+	$sp->drain();
+} else {
+	echo "skip the repeater checks of the composite tags: no repeater template found above\n";
+}
+
+//a change of template or parent: the scopes of both sides
+if($other) {
+	$CX = $mk($P, 'cx', 'CX');
+	$sp->drain();
+	$r = saveListed($sp, $CX->id, array(), array(), function(Page $page) use ($pages, $other) {
+		$page->of(false);
+		$page->template = $other;
+		$pages->save($page);
+	});
+	$tags = queuedTagsOf($r['rows']);
+	$want = array("t:{$tpl->id}", "t:{$other->id}", "t:{$tpl->id}/s", "t:{$other->id}/s", "t:{$tpl->id}/m", "t:{$other->id}/m", "par:{$P->id}/s", '*/s', 'x:s');
+	check("a template change ({$tpl->name} to {$other->name}) queues t:<old>/s and t:<new>/s", (int) $pages->getFresh($CX->id)->template->id === (int) $other->id && !count($missing($want, $tags)), 'missing ' . implode(',', $missing($want, $tags)) . ' of ' . implode(',', $tags));
+	$sp->drain();
+} else {
+	echo "skip the template change check of the composite tags: no second template\n";
+}
+$CQ = $mk($P, 'cq', 'CQ');
+$CM = $mk($P, 'cm', 'CM');
+$sp->drain();
+$r = saveListed($sp, $CM->id, array(), array(), function(Page $page) use ($pages, $CQ) {
+	$page->of(false);
+	$page->parent = $CQ;
+	$pages->save($page);
+});
+$tags = queuedTagsOf($r['rows']);
+$want = array_merge(array("par:{$P->id}", "par:{$CQ->id}"), $treeOf($CQ), $product(array_merge(array("par:{$P->id}", "par:{$CQ->id}"), $treeOf($CQ)), array('s', 'm')), array('x:s'));
+check('a parent change queues par: and tree: of the old and the new parent, with /s', (int) $pages->getFresh($CM->id)->parent->id === (int) $CQ->id && !count($missing($want, $tags)), 'missing ' . implode(',', $missing($want, $tags)) . ' of ' . implode(',', $tags));
+$sp->drain();
+
+$addedHooks = array_values(array_filter($pages->getHooks('added'), fn($h) => ($h['toObject'] ?? null) instanceof StaticPages));
+check('Pages::added is hooked once by this module, to hookAdded()', count($addedHooks) === 1 && $addedHooks[0]['toMethod'] === 'hookAdded', json_encode(array_map(fn($h) => $h['toMethod'], $addedHooks)));
+
 //the files the blocks below expect, as they were before this block
 publish($sp, $A);
 publish($sp, $B);
