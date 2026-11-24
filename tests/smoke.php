@@ -4213,6 +4213,220 @@ $wire->pages->uncacheAll();
 $nsEnd = array('template' => !$wire->templates->get($nsTpl->name), 'pages' => !$pages->count('id=' . implode('|', array($Nn->id, $Nb->id, $Nc->id, $Nd->id, $Ns->id, $Nt->id)) . ', include=all'), 'disk' => !file_exists($nsRoot) && !file_exists($robots) && !file_exists("$tmpRoot/sitemap.xml"), 'rows' => !count($nsRows()));
 check('no-slash block: its pages and template gone, nothing left below <P>/n, no robots.txt or sitemap.xml, no row', !in_array(false, $nsEnd, true), json_encode($nsEnd));
 
+////  selector analysis behind narrowFinds (0.13.0)
+
+//selectorTags() of a selector string with Narrow finds absent (null), off (0) or on (1): sorted,
+//or the message of what it threw
+$ix = $sp->index();
+$nrTags = function($selector, $count, $narrow) use ($sp, $ix, $wire) {
+	if($narrow === null) $sp->remove('narrowFinds');
+	else $sp->set('narrowFinds', $narrow);
+	try {
+		$out = $ix->selectorTags($wire->wire(new Selectors($selector)), $count);
+		sort($out);
+	} catch(\Throwable $e) {
+		$out = 'throws ' . $e->getMessage();
+	}
+	$sp->remove('narrowFinds');
+	return $out;
+};
+$nrDiff = function(array $rows, $narrow) use ($nrTags) {
+	$bad = array();
+	foreach($rows as $row) {
+		list($selector, $count, $want) = $row;
+		sort($want);
+		$got = $nrTags($selector, $count, $narrow);
+		if($got !== $want) $bad[] = array($selector, $got, $want);
+	}
+	return $bad;
+};
+
+//off: the tags 0.12.0 records, the scope alone
+$nrOff = array(
+	array("parent=$Pdir/", 1, array("par:{$P->id}")),
+	array("parent={$P->id}, template={$tpl->name}, sort=title", 1, array("par:{$P->id}")),
+	array("template={$tpl->name}, sort=-title, limit=10", 1, array("t:{$tpl->id}")),
+	array("has_parent={$P->id}, title%=x", 1, array("tree:{$P->id}")),
+	array("id={$A->id}", 1, array()),
+	array("name=a", 1, array()),
+	array("name=a", 0, array('any')),
+	array('title=x', 1, array('any')),
+	array("!parent={$P->id}", 1, array('any')),
+	array('parent=/sp-smoke-no-such-page/', 0, array('any')),
+	array('title%=foo, body=[x=1]', 1, array('any')),
+);
+$bad = array_merge($nrDiff($nrOff, null), $nrDiff($nrOff, 0));
+check('narrowFinds absent or off: selectorTags() gives the scope alone, as 0.12.0 (par:, t:, tree:, nothing for a specific find, any)', !count($bad), json_encode($bad));
+
+$nrPageField = $nrPageTable = $nrRepeater = null;
+foreach($wire->fields as $f) {
+	if(!preg_match('/^[a-z_][a-z0-9_]*$/i', $f->name)) continue;
+	if(!$nrPageField && $f->type instanceof FieldtypePage && !($f->flags & Field::flagSystem)) $nrPageField = $f;
+	if(!$nrPageTable && $f->type instanceof Fieldtype && wireInstanceOf($f->type, 'FieldtypePageTable')) $nrPageTable = $f;
+	if(!$nrRepeater && $f->type instanceof FieldtypeRepeater) $nrRepeater = $f;
+}
+$nrTexts = array();
+foreach($tpl->fieldgroup as $f) if($f->type instanceof FieldtypeText) $nrTexts[] = $f;
+if(count($nrTexts) >= 2 && $nrPageField) {
+	list($fA, $fB) = $nrTexts;
+	$a = $fA->name;
+	$b = $fB->name;
+	$A_ = "f:{$fA->id}";
+	$B_ = "f:{$fB->id}";
+	$T = "t:{$tpl->id}";
+	$pf = $nrPageField->name;
+	$PF = "f:{$nrPageField->id}";
+	$par = "par:{$P->id}";
+	$nrOn = array(
+		//the examples of the design, featured=1 with * scope until the fieldgroup scope exists
+		array("$a=1", 1, array("*/$A_", '*/s')),
+		array("$a!=1", 1, array("*/$A_", '*/s')),
+		array("$a=''", 1, array("*/$A_", '*/s')),
+		array("template={$tpl->name}, sort=-$b, limit=10", 1, array("$T/$B_", "$T/s")),
+		array("template={$tpl->name}, $pf.name=Bob", 1, array("$T/$PF", "$T/s", 'x:n:name')),
+		array("parent={$P->id}, children.count>0", 1, array("$par/s", 'x:s')),
+		array('sort=-modified, limit=5', 1, array('*/m', '*/s')),
+		array("$a%=foo, $b=[x=1]", 1, array('any')),
+		//an OR-field, a negated selector, sort=random, a specific id, a sub-selector, an
+		//OR-group, an unknown first segment
+		array("$a|$b%=foo", 1, array("*/$A_", "*/$B_", '*/s')),
+		array("!$a=foo", 1, array("*/$A_", '*/s')),
+		array("template={$tpl->name}, sort=random", 1, array("$T/s")),
+		array("id={$A->id}", 1, array()),
+		array("id={$A->id}, $a=[x=1]", 1, array()),
+		array("id>5, template={$tpl->name}", 1, array("$T/s")),
+		array("template={$tpl->name}, $pf=[name=x]", 1, array('any')),
+		array("($a=x), ($b=y)", 1, array('any')),
+		array('sp_smoke_no_such_field=1', 1, array('any')),
+		//Q64: path and url as n:name, natives and their aliases, three segments, sort subfields
+		array('path^=/x/', 1, array('*/n:name', '*/s')),
+		array('sort=url', 1, array('*/n:name', '*/s')),
+		array('createdUser.name=x', 1, array('any')),
+		array('child=1', 1, array('any')),
+		array('createdUser=41, status<1024, created>0, page.sort>1', 1, array('*/n:created_users_id', '*/s', '*/n:created', '*/n:sort')),
+		array('include=all, limit=3, start=1, check_access=0, get_total=0, sort=sort', 1, array('*/n:sort', '*/s')),
+		array("$pf.parent.$a=x", 1, array('any')),
+		array("sort=-$pf.name", 1, array("*/$PF", '*/s', 'x:n:name')),
+		array("$pf.id=5, $pf.count>0", 1, array("*/$PF", '*/s')),
+		array("$pf.modified>0", 1, array('any')),
+		array("$pf.$a=x, $pf.status=1", 1, array("*/$PF", '*/s', "x:$A_", 'x:s')),
+		array('numChildren>0', 1, array('*/s', 'x:s')),
+		array('num_children>0', 1, array('*/s', 'x:s')),
+		array("parent.$a=x", 1, array('*/s', "x:$A_")),
+		array('parent.name=x', 1, array('any')),
+		array("children.$a=x", 1, array('*/s', "x:$A_", 'x:s')),
+		array('template.name=x', 1, array('any')),
+	);
+	if($nrPageTable) $nrOn[] = array("template={$tpl->name}, {$nrPageTable->name}.$a=x", 1, array("$T/f:{$nrPageTable->id}", "$T/s", "x:$A_"));
+	else echo "skip the PageTable row: no FieldtypePageTable field here\n";
+	if($nrRepeater) $nrOn[] = array("{$nrRepeater->name}.$a=x", 1, array("*/f:{$nrRepeater->id}", '*/s'));
+	else echo "skip the repeater row: no repeater field here\n";
+	$bad = $nrDiff($nrOn, 1);
+	check('narrowFinds on: a table of ' . count($nrOn) . ' selectors gives the expected <scope>/<what>, x:<what>, nothing or any', !count($bad), json_encode($bad));
+
+	//the 64 tag budget: 40 parents times 2 whats collapse to *; 63 fields and s under one parent
+	//fit; 64 fields and s stay over under *: any
+	$parents = implode('|', range(1, 40));
+	$names = array();
+	foreach($wire->fields as $f) if(preg_match('/^[a-z_][a-z0-9_]*$/i', $f->name)) $names[] = $f->name;
+	$budget = array(array("parent=$parents, $a=x", 1, array('*/s', "*/$A_")));
+	if(count($names) >= 64) {
+		$f63 = array_slice($names, 0, 63);
+		$budget[] = array("parent={$P->id}, " . implode('|', $f63) . '=x', 1, array_merge(array("$par/s"), array_map(fn($n) => "$par/f:" . (int) $wire->fields->get($n)->id, $f63)));
+		$budget[] = array("parent={$P->id}, " . implode('|', array_slice($names, 0, 64)) . '=x', 1, array('any'));
+	} else {
+		echo 'skip the any budget rows: fewer than 64 fields here (' . count($names) . ")\n";
+	}
+	$bad = $nrDiff($budget, 1);
+	check('narrowFinds on: a find over 64 tags collapses its scope to *, and is any when still over (64 tags pass)', !count($bad), json_encode($bad));
+
+	//end to end: a listing on P whose render ran template=<smoke template>, sort=<A>, limit=1,
+	//as index.html, then as index.xml; the four saves of the step, Narrow finds on and off
+	$nrTpl = $wire->wire(new Template());
+	$nrTpl->name = 'sp-smoke-narrow-' . getmypid();
+	$nrTpl->fieldgroup = $tpl->fieldgroup;
+	$wire->templates->save($nrTpl);
+	$smokeTemplates[] = $nrTpl;
+	$nrQ1 = $nsMk($P, 'nr1', 'NR1', $nrTpl);
+	$nrQ2 = $nsMk($P, 'nr2', 'NR2', $nrTpl);
+	$nrSet = function($id, $field, $value) use ($pages) {
+		$pages->uncacheAll();
+		$p = $pages->get($id);
+		$p->of(false);
+		$p->set($field, $value);
+		$pages->save($p);
+	};
+	$nrSet($nrQ1->id, $a, 'aaa');
+	$nrSet($nrQ2->id, $a, 'zzz');
+	$sp->drain();
+	$nrMade = array();
+	//a value of its own for every save: a save setting the value already there changes nothing
+	$nrN = 0;
+	$nrPublish = function() use ($sp, $wire, $pages, $P, $nrTpl, $a) {
+		$sp->index()->collect(true);
+		$wire->pages->uncacheAll();
+		$Pp = $pages->get($P->id);
+		$wire->wire('page', $Pp);
+		$found = $pages->find("template={$nrTpl->name}, sort=$a, limit=1");
+		$sp->queue()->startGen();
+		$sp->cachePage(new HookEvent(array('object' => $Pp, 'method' => 'render', 'return' => '<html><body>narrow</body></html>')));
+		$sp->index()->collect(false);
+		return $found;
+	};
+	$nrSaves = array(
+		"another page of the template, only $b" => function() use ($nrSet, $nrQ2, $b, &$nrN) { $nrSet($nrQ2->id, $b, 'other' . ++$nrN); },
+		"another page of the template, $a" => function() use ($nrSet, $nrQ2, $a, &$nrN) { $nrSet($nrQ2->id, $a, 'zzz' . ++$nrN); },
+		'a new page of the template' => function() use ($nsMk, $P, $nrTpl, &$nrMade) { $nrMade[] = $nsMk($P, 'nr' . (count($nrMade) + 3), 'NRN', $nrTpl); },
+		"the page the render loaded, only $b" => function() use ($nrSet, $nrQ1, $b, &$nrN) { $nrSet($nrQ1->id, $b, 'loaded' . ++$nrN); },
+	);
+	$NT = "t:{$nrTpl->id}";
+	$runs = array(array('index.html', 1, array(false, true, true, true)), array('index.html', 0, array(true, true, true, true)), array('index.xml', 1, array(false, true, true, true)));
+	foreach($runs as $run) {
+		list($file, $narrow, $removes) = $run;
+		$rel = "$Pdir/$file";
+		$xml = $file === 'index.xml';
+		if($xml) {
+			$sp->set('cacheNonHtml', 1);
+			$tpl->contentType = 'xml';
+		}
+		$sp->set('narrowFinds', $narrow);
+		$i = 0;
+		$got = array();
+		$ok = true;
+		foreach($nrSaves as $label => $save) {
+			$found = $nrPublish();
+			$tags = tagsOf($sp, $rel);
+			$recorded = is_file("$tmpRoot$rel") && $found->count() === 1 && (int) $found->first()->id === (int) $nrQ1->id
+				&& ($narrow ? in_array("$NT/$A_", $tags, true) && in_array("$NT/s", $tags, true) && !in_array($NT, $tags, true) : in_array($NT, $tags, true) && !in_array("$NT/s", $tags, true));
+			$save();
+			$sp->drain();
+			$gone = !is_file("$tmpRoot$rel");
+			$got[$label] = array('recorded' => $recorded, 'removed' => $gone);
+			if(!$recorded || $gone !== $removes[$i]) $ok = false;
+			$sp->index()->dropIndexRows(array(md5($rel)));
+			@unlink("$tmpRoot$rel");
+			$i++;
+		}
+		$sp->remove('narrowFinds');
+		if($xml) {
+			$sp->remove('cacheNonHtml');
+			$tpl->contentType = $contentTypesAtStart[$tpl->id][1];
+		}
+		$says = $narrow ? "keeps the file on a save of another page changing only $b, removes it on a change of $a, a new page of the template, a save of the page it loaded" : 'removes the file on each of the same four saves';
+		check('narrowFinds ' . ($narrow ? 'on' : 'off') . ", $file of a render that ran template=<smoke template>, sort=$a: $says", $ok, json_encode($got));
+	}
+
+	foreach(array_reverse(array_merge(array($nrQ1, $nrQ2), $nrMade)) as $p) $pages->delete($pages->get($p->id), true);
+	$sp->drain();
+	$wire->templates->delete($nrTpl);
+	$sp->index()->clearRows();
+	$wire->pages->uncacheAll();
+	$nrEnd = array('template' => !$wire->templates->get($nrTpl->name), 'pages' => !$pages->count('template=' . (int) $nrTpl->id . ', include=all'), 'disk' => !is_file("$tmpRoot$Pdir/index.html") && !is_file("$tmpRoot$Pdir/index.xml"), 'setting' => $sp->get('narrowFinds') === null, 'type' => $tpl->contentType === $contentTypesAtStart[$tpl->id][1]);
+	check('narrowFinds block: its pages and template gone, no copy of P left, the setting and the content type as before', !in_array(false, $nrEnd, true), json_encode($nrEnd));
+} else {
+	echo "skip the narrowFinds checks: template {$tpl->name} has fewer than two text fields, or no page reference field exists\n";
+}
+
 ////  .htaccess manager (0.10.0)
 
 //when the manager runs: install, the check after a superuser's admin request or a CLI run, a
@@ -4821,7 +5035,7 @@ $expected = array(
 	'_static' => array('newDirPermissions', 'staticFile', 'cacheNonHtml', 'rootFiles', 'staticBaseDir', 'staticHostKey'),
 	'_exclusions' => array('nonStaticDirs', 'nonStaticTemplates', 'trackedPaths', 'noCacheCookies'),
 	'_system' => array('csrfPatterns', 'useShell', 'wipeDryRun', 'logSkips'),
-	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields', 'ignoreTemplates'),
+	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields', 'ignoreTemplates', 'narrowFinds'),
 	'htaccessAction' => true,
 	'forceWipeOnModuleSave' => true,
 	'isEnabled' => true,

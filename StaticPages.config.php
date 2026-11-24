@@ -278,6 +278,14 @@ $config = array(
 						'value'					=> array(),
 					),
 
+					array(
+						'name'					=> 'narrowFinds',
+						'type'					=> 'checkbox',
+						'label'					=> $this->_('Narrow finds by the fields they use'),
+						'notes'					=> $this->_('Off: a static file whose render ran a find is removed by any save of a page the find could return, by its template, parent or tree, whatever the save changed. On: only by a save changing a field or property the find filters or sorts on, or by a page created, deleted, trashed, restored or moved, or given another status or template. A page the render showed still removes the file on any save of it, and a find this module does not understand counts as one without limits. Files recorded before the setting changed keep their tags until they are removed.'),
+						'columnWidth'			=> 100,
+					),
+
 				),
 			),
 

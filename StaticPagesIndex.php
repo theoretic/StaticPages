@@ -31,6 +31,10 @@ Composite tags, emitted by a save next to those, for finds recorded by what they
   x:<what>        something about a page a find reaches through a subfield (never x:m)
 whatTag() names a change or a selector field the same way on both sides; every composite tag
 fits the 40 characters of the tag column, whatever the page or field id.
+
+A find gets composite tags only with Narrow finds on (narrowTags()): its scope, or *, times s
+and what it filters and sorts on, plus x:<what> for what it reaches through a page reference,
+parent. or children.; a find not understood gets 'any'. Off, it gets the scope alone.
 */
 
 class StaticPagesIndex extends Wire {
@@ -57,6 +61,9 @@ class StaticPagesIndex extends Wire {
 
 	//more finds than this in one render: the file depends on 'any' instead
 	const maxFinds = 2000;
+
+	//more tags than this for one find with Narrow finds on: its scope is *, then 'any'
+	const maxFindTags = 64;
 
 	public function __construct(StaticPages $sp) {
 		parent::__construct();
@@ -123,6 +130,13 @@ class StaticPagesIndex extends Wire {
 	}
 
 	public function selectorTags($selectors, $count){
+		//the tags of one find. Narrow finds on: by what it filters and sorts on, narrowTags().
+		//Off: by its scope alone, scopeTags(), as before 0.13.0
+		if( $this->sp->configValue('narrowFinds', 0) ) return $this->narrowTags($selectors, $count);
+		return $this->scopeTags($selectors, $count);
+	}
+
+	public function scopeTags($selectors, $count){
 		//the tags of one find: one constraint is enough, a page has to meet every one of them to
 		//enter the results, and the most selective one is used. Whatever is not understood
 		//counts as no constraint, which only ever invalidates more
@@ -191,6 +205,164 @@ class StaticPagesIndex extends Wire {
 		}
 
 		return $specific ? array() : array('any');
+	}
+
+	public function narrowTags($selectors, $count){
+		//the tags of one find as <scope>/<what> and x:<what>: the scope of scopeTags(), or * when
+		//it has none, times s and what every selector field and sort= value names. Whatever is
+		//not understood makes the find depend on 'any', which only ever invalidates more
+
+		if( !$selectors instanceof Selectors ) return array('any');
+
+		//a find by id, or by a path or name that had a result, with no scope: its pages are
+		//tagged p:, and nothing else can enter it, whatever else it asks
+		$scopes = $this->scopeTags($selectors, $count);
+		if( !count($scopes) ) return array();
+		//no parent, template or tree limit: every page may enter it
+		if( $scopes === array('any') ) $scopes = array('*');
+
+		$whats = array('s' => true);
+		$foreign = array();
+		foreach( $selectors as $selector ){
+			if( !$selector instanceof Selector ) return array('any');
+			//an OR-group (a=1), (b=2) and a sub-selector value field=[a=1]
+			if( $selector->quote === '(' || $selector->quote === '[' ) return array('any');
+			$fields = array_map( 'strval', $selector->fields() );
+			//sort=: the order, by the fields it names; sort with another operator is the column
+			$names = $fields === array('sort') && $selector->operator() === '=' ? $this->sortNames($selector) : $fields;
+			foreach( $names as $name ) if( !$this->fieldWhats($name, $whats, $foreign) ) return array('any');
+		}
+
+		return $this->budgetTags( $scopes, array_keys($whats), array_keys($foreign) );
+	}
+
+	public function sortNames(Selector $selector){
+		//the fields a sort= orders by: a leading - stripped, random orders by nothing
+		$names = array();
+		foreach( $selector->values(true) as $value ){
+			$value = trim( (string) $value );
+			if( $value !== '' && $value[0] === '-' ) $value = substr( $value, 1 );
+			if( $value === '' || $value === 'random' ) continue;
+			$names[] = $value;
+		}
+		return $names;
+	}
+
+	public function fieldWhats($name, array &$whats, array &$foreign){
+		//what one selector field or sort= value filters on, into $whats (for <scope>/<what>) and
+		//$foreign (x:<what>, keys each). false: not understood, the find depends on 'any'
+
+		$segments = explode( '.', (string) $name );
+		if( count($segments) > 2 ) return false;
+		$first = $segments[0];
+		$sub = count($segments) === 2 ? $segments[1] : null;
+		if( $first === '' || $sub === '' ) return false;
+		if( $first === 'page' && $sub === 'sort' ){
+			$first = 'sort';
+			$sub = null;
+		}
+
+		//modifiers, and an id that is not specific (scopeTags() took a specific one): ids never
+		//change, nothing to follow
+		if( in_array( $first, array('limit', 'start', 'include', 'check_access', 'checkAccess', 'get_total', 'getTotal', 'id'), true ) )
+			return $sub === null;
+
+		if( preg_match( '/^[a-z_][a-z0-9_]*$/i', $first ) ){
+			$field = $this->wire()->fields->get($first);
+			if( $field instanceof Field && $field->id ) return $this->customWhats($field, $sub, $whats, $foreign);
+		}
+
+		$aliases = array(
+			'hasParent' => 'has_parent',
+			'numChildren' => 'num_children',
+			'createdUser' => 'created_users_id',
+			'createdUserID' => 'created_users_id',
+			'createdUsersID' => 'created_users_id',
+			'modifiedUser' => 'modified_users_id',
+			'modifiedUserID' => 'modified_users_id',
+			'modifiedUsersID' => 'modified_users_id',
+			'url' => 'path',
+		);
+		if( isset($aliases[$first]) ) $first = $aliases[$first];
+
+		switch( $first ){
+			case 'parent':
+				//parent.<field>: the parent, another page, changed that field
+				if( $sub === null ) break;
+				$id = $this->fieldId($sub);
+				if( !$id ) return false;
+				$foreign["x:f:$id"] = true;
+				return true;
+
+			case 'children':
+				//children.count, children.<field>: a child created, moved, trashed, or changed
+				if( $sub === null ) return false;
+				$foreign['x:s'] = true;
+				if( $sub === 'count' ) return true;
+				$id = $this->fieldId($sub);
+				if( !$id ) return false;
+				$foreign["x:f:$id"] = true;
+				return true;
+
+			case 'num_children':
+				if( $sub !== null ) return false;
+				$foreign['x:s'] = true;
+				return true;
+
+			case 'path':
+				//a page's own path changes by a rename, which a save names n:name, or by a move,
+				//s; an ancestor's rename or move is followed no further than before 0.13.0
+				if( $sub !== null ) return false;
+				$whats['n:name'] = true;
+				return true;
+		}
+
+		//the other columns of the pages table, and the page name or status in another language
+		$natives = array('name', 'status', 'parent', 'parent_id', 'template', 'templates_id', 'sort', 'sortfield', 'created', 'modified', 'published', 'created_users_id', 'modified_users_id', 'has_parent');
+		if( $sub !== null ) return false;
+		if( !in_array( $first, $natives, true ) && !preg_match( '/^(name|status)\d+$/', $first ) ) return false;
+		$whats[ $this->whatTag($first) ] = true;
+		return true;
+	}
+
+	public function customWhats(Field $field, $sub, array &$whats, array &$foreign){
+		//a custom field, and a subfield of it. A subfield counts only for a field referencing
+		//other pages: whatever else a field holds is saved with the page carrying it (a repeater
+		//item hands its owner f:<repeater>)
+		$whats[ 'f:' . (int) $field->id ] = true;
+		if( $sub === null ) return true;
+		$type = $field->type;
+		if( !$type instanceof FieldtypePage && !( $type instanceof Fieldtype && wireInstanceOf( $type, 'FieldtypePageTable' ) ) ) return true;
+		if( $sub === 'id' || $sub === 'count' ) return true;
+		if( in_array( $sub, array('name', 'sort', 'created', 'published'), true ) ){
+			$foreign["x:n:$sub"] = true;
+			return true;
+		}
+		if( in_array( $sub, array('status', 'template', 'parent'), true ) ){
+			$foreign['x:s'] = true;
+			return true;
+		}
+		$id = $this->fieldId($sub);
+		if( !$id ) return false;
+		$foreign["x:f:$id"] = true;
+		return true;
+	}
+
+	public function fieldId($name){
+		//the id of the custom field named $name, 0 when there is none
+		if( !preg_match( '/^[a-z_][a-z0-9_]*$/i', (string) $name ) ) return 0;
+		$field = $this->wire()->fields->get($name);
+		return $field instanceof Field ? (int) $field->id : 0;
+	}
+
+	public function budgetTags(array $scopes, array $whats, array $foreign){
+		//every scope times every what, and the foreign tags: more than maxFindTags of them, the
+		//scope collapses to *; still more, the find depends on 'any'
+		if( count($scopes) * count($whats) + count($foreign) > self::maxFindTags ) $scopes = array('*');
+		if( count($scopes) * count($whats) + count($foreign) > self::maxFindTags ) return array('any');
+		$tags = array();
+		foreach( $scopes as $scope ) foreach( $whats as $what ) $tags[] = "$scope/$what";
+		return array_merge( $tags, $foreign );
 	}
 
 	public function resolveTemplateId($value){
