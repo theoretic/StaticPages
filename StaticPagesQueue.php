@@ -270,4 +270,133 @@ class StaticPagesQueue extends Wire {
 		return $this->readGen() !== $this->genAtStart;
 	}
 
+////  expiry
+
+	/*
+	A file recorded with an expiry time carries the tag e:<10 digit unix time>. expire.next holds
+	the earliest such time: recording lowers it, a sweep rewrites it from the index, under flock()
+	both, the sweep taking the lock before its query: a time recorded meanwhile is either in the
+	query or written after it. Static hits run no PHP, so a file goes with the first PHP request
+	after its time, or with drain()
+	*/
+
+	public function expiryPath(){
+		return $this->wire()->config->paths->cache . 'StaticPages/expire.next';
+	}
+
+	public function expiryDue(){
+		//one small file read, no query: no file, or no time in it, is nothing due. A read failing
+		//on a file a sweep holds locked is nothing due either: the next request asks again
+		$next = @file_get_contents( $this->expiryPath() );
+		return is_string($next) && ctype_digit($next) && (int) $next <= time();
+	}
+
+	public function shutdownExpire(){
+		if( !$this->expiryDue() ) return;
+		try {
+			$this->finishResponse();
+			$this->sp->expire();
+		}
+		catch( \Throwable $e ){
+			$this->sp->logDrain( 'expiry failed: ' . $e->getMessage() );
+			if( $this->sp->index()->isMissingTable($e) ) $this->sp->index()->tablesFailed($e);
+		}
+	}
+
+	public function expire($now){
+		//the files whose time is $now or earlier, by the index and wipeIndexed(), so through every
+		//guard; the '*' files go along, as with every drain. Nothing changed in the database: no
+		//generation bump, nothing queued. expire.next is rewritten whatever the wipe did
+		if( !$this->sp->index()->ensureTables() ) return null;
+
+		$lock = $this->sp->index()->lockName('drain');
+		if( !$this->sp->index()->getLock($lock, StaticPages::lockWait) ){
+			$this->sp->logDrain('expiry: another drain held the lock, left for the next one');
+			return null;
+		}
+
+		$result = null;
+		$tags = array();
+		try {
+			try {
+				$tags = $this->sp->index()->dueExpiryTags($now);
+				if( count($tags) ) $result = $this->sp->wiper()->wipeIndexed($tags);
+			}
+			finally {
+				$this->sweepExpiry($now);
+			}
+		}
+		finally {
+			$this->sp->index()->releaseLock($lock);
+		}
+
+		if( $result !== null ) $this->sp->logDrain( 'expiry, ' . count($tags) . ' time(s) due: ' . $this->sp->wiper()->describeWipe($result) );
+		return $result;
+	}
+
+	public function sweepExpiry($now){
+		//expire.next from the index: the earliest time left, or no file when none is left
+		if( $this->sp->trackedHashDir() === '' ) return;
+		$path = $this->expiryPath();
+		$fh = @fopen( $path, 'c+' );
+		if( !$fh ) return;
+		$next = null;
+		try {
+			@flock( $fh, LOCK_EX );
+			$next = $this->nextExpiry($now);
+			ftruncate( $fh, 0 );
+			rewind($fh);
+			if( $next !== null ) fwrite( $fh, (string) $next );
+			fflush($fh);
+		}
+		finally {
+			@flock( $fh, LOCK_UN );
+			fclose($fh);
+		}
+		if( $next !== null ) return;
+
+		@unlink($path);
+		clearstatcache();
+		//a time recorded after the query and written before the unlink is not lost
+		$next = $this->nextExpiry($now);
+		if( $next !== null ) $this->noteExpiry($next);
+	}
+
+	public function nextExpiry($now){
+		//the earliest time in the index; one not after $now is a file this sweep could not
+		//delete (a base directory without its marker, rows that could not be dropped): tried
+		//again in a minute rather than by every request [decided by user, Q66 C (a)]
+		$min = $this->sp->index()->earliestExpiry();
+		if( $min === null || $min > $now ) return $min;
+		$retry = time() + StaticPages::expiryRetry;
+		$this->sp->logDrain( "expiry: files due at $min are still indexed, tried again at $retry" );
+		return $retry;
+	}
+
+	public function noteExpiry($time){
+		//lowers expire.next to $time, creates it when there is none
+		if( $this->sp->trackedHashDir() === '' ) return;
+		$fh = @fopen( $this->expiryPath(), 'c+' );
+		if( !$fh ) return;
+		try {
+			@flock( $fh, LOCK_EX );
+			$current = (string) stream_get_contents($fh);
+			if( !ctype_digit($current) || (int) $current > (int) $time ){
+				ftruncate( $fh, 0 );
+				rewind($fh);
+				fwrite( $fh, (string) (int) $time );
+				fflush($fh);
+			}
+		}
+		finally {
+			@flock( $fh, LOCK_UN );
+			fclose($fh);
+		}
+	}
+
+	public function forgetExpiry(){
+		@unlink( $this->expiryPath() );
+		clearstatcache();
+	}
+
 }

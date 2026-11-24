@@ -17,6 +17,7 @@ Tags, one string each:
   tree:<id>  ... limited to descendants of page <id>
   any        ... with none of those limits
   *          dependencies unknown: removed by every drain
+  e:<time>   no dependency: the file's expiry time, 10 digits, see StaticPagesQueue::expire()
 
 A save of a page P invalidates p:P, which covers every file showing P: whatever showed it
 loaded it. A find may also gain or lose P without having loaded it: a post added, published,
@@ -1051,6 +1052,29 @@ class StaticPagesIndex extends Wire {
 			if( $this->isMissingTable($e) ) $this->tablesFailed($e);
 			return null;
 		}
+	}
+
+	public function dueExpiryTags($now){
+		//the e: tags of a time not after $now, see StaticPagesQueue::expire(). The tag column is
+		//ascii_bin and the times zero padded: string order is time order
+		$query = $this->wire()->database->prepare('SELECT DISTINCT tag FROM `' . StaticPages::tableTags . '` WHERE tag BETWEEN :from AND :to');
+		$query->bindValue(':from', $this->sp->expiryTag(0));
+		$query->bindValue(':to', $this->sp->expiryTag( min( (int) $now, StaticPages::expiryMax ) ));
+		$query->execute();
+		$tags = $query->fetchAll(\PDO::FETCH_COLUMN);
+		$query->closeCursor();
+		return array_map('strval', $tags);
+	}
+
+	public function earliestExpiry(){
+		//the earliest expiry time any indexed file carries, null for none
+		$query = $this->wire()->database->prepare('SELECT MIN(tag) FROM `' . StaticPages::tableTags . '` WHERE tag BETWEEN :from AND :to');
+		$query->bindValue(':from', $this->sp->expiryTag(0));
+		$query->bindValue(':to', $this->sp->expiryTag(StaticPages::expiryMax));
+		$query->execute();
+		$min = $query->fetchColumn();
+		$query->closeCursor();
+		return is_string($min) && $min !== '' ? (int) substr( $min, 2 ) : null;
 	}
 
 	public function indexedFiles($tags){

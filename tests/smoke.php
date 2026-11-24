@@ -2713,6 +2713,15 @@ $savedR = array($bytesOf($robots), $bytesOf($dotRobots) === $original, count($sp
 publish($sp, $R, array(), $txtBody);
 check('saving the page and drain() remove /robots.txt, /.robots.txt untouched; the next render writes it again', $savedR === array(null, true, 0) && $bytesOf($robots) === $txtBody, json_encode($savedR));
 
+//expiry (0.13.0): the recorded root file goes by its e: tag like any copy, its dot backup stays
+$sp->expireAt(time() + 3600);
+publish($sp, $R, array(), $txtBody);
+$rExp = array(count(array_filter(tagsOf($sp, '/robots.txt'), fn($t) => strpos($t, 'e:') === 0)), $bytesOf($robots) === $txtBody);
+$sp->expire(time() + 7200);
+$rExp = array_merge($rExp, array($bytesOf($robots), $bytesOf($dotRobots) === $original, $sp->index()->hasFile('/robots.txt')));
+publish($sp, $R, array(), $txtBody);
+check('expiry: a recorded /robots.txt with an e: tag is removed by expire() with its row, /.robots.txt untouched; the next render writes it again', $rExp === array(1, true, null, true, false) && $bytesOf($robots) === $txtBody && !count(array_filter(tagsOf($sp, '/robots.txt'), fn($t) => strpos($t, 'e:') === 0)), json_encode($rExp));
+
 //a changed page path for a name that stays listed [decided by user, Q26]
 $B = $mk($P, 'b', 'B');
 $sp->drain();
@@ -4698,6 +4707,196 @@ foreach($adDirs as $dir => $existed) if(!$existed) @rmdir($dir);
 $adEnd = array('rows' => $sp->index()->fileCounts() === array('total' => 0, 'any' => 0, '*' => 0), 'disk' => files($tmpRoot) === $adBefore, 'logSkips' => (int) $sp->get('logSkips') === 1);
 check('any diagnostic block: no index row and no copy left, the tree as before, Log skipped pages on again', !in_array(false, $adEnd, true), json_encode(array($adEnd, files($tmpRoot), $adBefore)));
 
+////  expiry (0.13.0)
+
+//copies of A and of a new page X with and without an e:<time> tag: expireAt(), Maximum age,
+//expire(), the sweep of expire.next, shutdownDrain(), no index tables, the uninstall; the tree,
+//the rows and the settings as before
+$X = $mk($P, 'ex20', 'X');
+$sp->drain();
+$sp->index()->clearRows();
+$exBefore = files($tmpRoot);
+$exNext = "$tmp/cache/StaticPages/expire.next";
+$exA = "$Pdir/a/index.html";
+$exB = "$Pdir/ex20/index.html";
+$exDirs = array("$tmpRoot$Pdir/a" => is_dir("$tmpRoot$Pdir/a"), "$tmpRoot$Pdir/ex20" => is_dir("$tmpRoot$Pdir/ex20"), "$tmpRoot$Pdir" => is_dir("$tmpRoot$Pdir"));
+$exSettings = array('maxAge' => $sp->get('maxAge'), 'cacheNonHtml' => $sp->get('cacheNonHtml'), 'staticBaseDir' => $sp->get('staticBaseDir'));
+$exRestore = function() use ($sp, $exSettings) {
+	foreach($exSettings as $k => $v) if($v === null) $sp->remove($k); else $sp->set($k, $v);
+};
+$exType = $tpl->contentType;
+$exTags = fn($rel) => array_values(array_filter(tagsOf($sp, $rel), fn($t) => strpos($t, 'e:') === 0));
+$exTime = fn($rel) => ($t = $exTags($rel)) && count($t) === 1 ? (int) substr($t[0], 2) : null;
+$exReadNext = function() use ($exNext) { clearstatcache(); return is_file($exNext) ? (string) file_get_contents($exNext) : null; };
+$exQueue = fn() => $database->query('SELECT COUNT(*), COALESCE(MAX(id), 0) FROM `' . StaticPages::tableQueue . '`')->fetch(\PDO::FETCH_NUM);
+$exDrop = function(array $rels) use ($sp, $tmpRoot) {
+	$sp->index()->dropIndexRows(array_map('md5', $rels));
+	foreach($rels as $rel) @unlink($tmpRoot . $rel);
+	clearstatcache();
+};
+$sp->remove('maxAge');
+$sp->queue()->forgetExpiry();
+
+$t = time() + 3600;
+$sp->expireAt($t);
+publish($sp, $A);
+publish($sp, $X);
+$exSeen = array($exTags($exA), is_file($tmpRoot . $exA), $exTags($exB), is_file($tmpRoot . $exB), $exReadNext());
+check('expiry: a publish after expireAt(time() + 3600) records e:<that time, 10 digits>, expire.next holds it; the next publish() of the run records none', $exSeen === array(array('e:' . sprintf('%010d', $t)), true, array(), true, (string) $t), json_encode($exSeen));
+
+$exR = $sp->expire();
+check('expire() at the current time leaves the file due in an hour alone, its tag and expire.next too', $exR === null && is_file($tmpRoot . $exA) && $exTime($exA) === $t && $exReadNext() === (string) $t, json_encode(array($exR, $exReadNext())));
+
+$exGen = $sp->queue()->readGen();
+$exQ = $exQueue();
+$exR = $sp->expire(time() + 7200);
+$exSeen = array(is_file($tmpRoot . $exA), $sp->index()->hasFile($exA), tagsOf($sp, $exA), is_file($tmpRoot . $exB), $sp->index()->hasFile($exB), ($exR['files'] ?? null));
+check('expire(time() + 7200) removes the file and its rows; the file without an e: tag stays', $exSeen === array(false, false, array(), true, true, 1), json_encode($exSeen));
+check('...it bumps no generation and queues nothing (readGen() and the queue table as before)', $sp->queue()->readGen() === $exGen && $exQueue() === $exQ, json_encode(array($exQ, $exQueue())));
+check('...and with no e: time left the sweep deletes expire.next', $exReadNext() === null);
+
+//the sweep: the earliest time left
+$t1 = time() + 3600;
+$t2 = time() + 10800;
+$sp->expireAt($t1);
+publish($sp, $A);
+$sp->expireAt($t2);
+publish($sp, $X);
+$exNextBefore = $exReadNext();
+$sp->expire(time() + 7200);
+check('after a sweep expire.next holds the earliest remaining due time (X in 3 h; A, due in 1 h, gone)', $exNextBefore === (string) $t1 && !is_file($tmpRoot . $exA) && is_file($tmpRoot . $exB) && $exReadNext() === (string) $t2, json_encode(array($exNextBefore, $exReadNext(), $t2)));
+$exDrop(array($exB));
+$sp->expire();
+check('...and is gone once none remains', $exReadNext() === null);
+
+//a time not in the future, several calls
+$exLog = strlen(logText($tmp));
+$sp->expireAt(time() - 1);
+publish($sp, $A);
+check('expireAt(time() - 1): no file, the skip logged', !is_file($tmpRoot . $exA) && !$sp->index()->hasFile($exA) && strpos(substr(logText($tmp), $exLog), "skip $Pdir/a/: expireAt() asked for a time not in the future") !== false, substr(logText($tmp), $exLog));
+$sp->expireAt(time() + 7200);
+$sp->expireAt($t = time() + 3600);
+$sp->expireAt(time() + 5400);
+publish($sp, $A);
+check('three expireAt() calls: the smallest is recorded', $exTime($exA) === $t, json_encode($exTags($exA)));
+publish($sp, $A);
+check('...and it does not leak into the next publish() of the run', $exTags($exA) === array() && is_file($tmpRoot . $exA), json_encode($exTags($exA)));
+
+//Maximum age [decided by user, Q66 A (a), B (a)]
+$exOther = '';
+foreach($wire->templates as $x) if($x->id !== $tpl->id) { $exOther = $x->name; break; }
+$exAges = array(
+	'own line' => array("{$tpl->name} 300\n* 600", 300),
+	'* for another template' => array("$exOther 60\n* 600", 600),
+	'own line in upper case' => array(strtoupper($tpl->name) . " 300\n* 600", 300),
+	'two own lines' => array("{$tpl->name} 900\r\n{$tpl->name} 300\n* 60000", 300),
+	'malformed lines' => array("{$tpl->name}\n{$tpl->name} x\n{$tpl->name} 0\n{$tpl->name} -5\n{$tpl->name} 1.5\n{$tpl->name} 5 6\n{$tpl->name} 9999999999\n* 0\n", null),
+	'a malformed own line, * then' => array("{$tpl->name} 0\n* 600", 600),
+	'own line and an earlier expireAt()' => array("{$tpl->name} 3000", 300),
+);
+$bad = array();
+foreach($exAges as $label => list($value, $age)) {
+	$sp->set('maxAge', $value);
+	if($label === 'own line and an earlier expireAt()') $sp->expireAt(time() + 300);
+	$now = time();
+	publish($sp, $A);
+	$got = $exTime($exA);
+	$ok = $age === null ? ($exTags($exA) === array() && is_file($tmpRoot . $exA)) : ($got !== null && abs($got - ($now + $age)) <= 2);
+	if(!$ok) $bad[$label] = array($exTags($exA), $now);
+}
+$sp->set('maxAge', "{$tpl->name} 300\n* 600");
+$exOtherAge = $exOther !== '' ? $sp->maxAgeFor($wire->templates->get($exOther)) : null;
+$sp->remove('maxAge');
+check('maxAge: an own line gives now + its age (within 2 s), * applies to another template, letter case ignored, of two own lines the smaller, malformed lines (0, too large) ignored, an earlier expireAt() wins', !count($bad) && $exOtherAge === 600 && $sp->maxAgeFor($tpl) === 0, json_encode(array($bad, $exOtherAge)));
+$exDrop(array($exA));
+$sp->expire();
+
+//an index.xml expires like an index.html
+$sp->set('cacheNonHtml', 1);
+$tpl->contentType = 'xml';
+$sp->expireAt(time() + 3600);
+publish($sp, $A, array(), '<urlset/>');
+$exXml = array(is_file("$tmpRoot$Pdir/a/index.xml"), count($exTags("$Pdir/a/index.xml")));
+$sp->expire(time() + 7200);
+$exXml = array_merge($exXml, array(is_file("$tmpRoot$Pdir/a/index.xml"), $sp->index()->hasFile("$Pdir/a/index.xml")));
+$tpl->contentType = $exType;
+$exRestore();
+check('an index.xml with an e: tag is removed by expire() like an HTML file', $exXml === array(true, 1, false, false), json_encode($exXml));
+
+//without index tables: a render asking for expiry, or with a Maximum age, is not cached
+$tablesAtStart = $tablesReady->getValue($sp->index());
+$tablesReady->setValue($sp->index(), false);
+$exLog = strlen(logText($tmp));
+$sp->expireAt(time() + 3600);
+publish($sp, $A);
+$exNoTables = array(is_file($tmpRoot . $exA));
+$sp->set('maxAge', "{$tpl->name} 300");
+publish($sp, $A);
+$exRestore();
+$exNoTables[] = is_file($tmpRoot . $exA);
+$tablesReady->setValue($sp->index(), $tablesAtStart);
+$exLines = substr_count(substr(logText($tmp), $exLog), "skip $Pdir/a/: no index tables: a render with an expiry time is not cached");
+check('tablesReady forced false: a render that asked for expiry, and one whose template has a Maximum age, are not cached, each logged', $exNoTables === array(false, false) && $exLines === 2, json_encode(array($exNoTables, $exLines)));
+
+//shutdownDrain(): runs expire() once expire.next has passed, not before. htShutdown() reads
+//these, set again by the .htaccess manager block below
+$cliFlag = new \ReflectionProperty(StaticPages::class, 'cli');
+$cliFlag->setAccessible(true);
+$adminFlag = new \ReflectionProperty(StaticPages::class, 'adminRequest');
+$adminFlag->setAccessible(true);
+$userAtStart = $wire->user;
+$superuser = $wire->users->get($config->superUserPageID);
+$guest = $wire->users->getGuestUser();
+freshQueue($sp);
+@mkdir("$tmpRoot$Pdir/a", 0777, true);
+file_put_contents($tmpRoot . $exA, 'due');
+$sp->index()->recordStaticFile($exA, $A->id, array("p:{$A->id}", $sp->expiryTag(time() - 5)));
+$sp->queue()->noteExpiry(time() + 3600);
+htShutdown($sp, 'guest');
+$exShut = array(is_file($tmpRoot . $exA));
+$sp->queue()->forgetExpiry();
+$sp->queue()->noteExpiry(time() - 5);
+htShutdown($sp, 'guest');
+$exShut = array_merge($exShut, array(is_file($tmpRoot . $exA), $sp->index()->hasFile($exA), $exReadNext()));
+check('shutdownDrain() of a guest request leaves a due file while expire.next lies ahead, and removes it once expire.next has passed; expire.next then gone', $exShut === array(true, false, false, null), json_encode($exShut));
+
+//a due file the sweep cannot delete: retried in a minute [decided by user, Q66 C (a)]
+@mkdir("$tmpRoot$Pdir/a", 0777, true);
+file_put_contents($tmpRoot . $exA, 'due');
+$sp->index()->recordStaticFile($exA, $A->id, array("p:{$A->id}", $sp->expiryTag(time() - 5)));
+$exNoBase = 'sp-smoke-nobase-' . getmypid();
+$sp->set('staticBaseDir', $exNoBase);
+$exLog = strlen(logText($tmp));
+$now = time();
+$sp->expire();
+$exRetry = array(is_file($tmpRoot . $exA), $sp->index()->hasFile($exA), $exReadNext());
+$exRestore();
+$exRetryOk = $exRetry[0] && $exRetry[1] && ctype_digit((string) $exRetry[2]) && abs((int) $exRetry[2] - ($now + StaticPages::expiryRetry)) <= 2 && strpos(substr(logText($tmp), $exLog), 'are still indexed, tried again at') !== false && !file_exists("$tmpRoot/$exNoBase");
+$sp->expire();
+check('a due file a sweep cannot delete (base dir without marker): file and rows stay, expire.next = now + 60 s, logged; the next sweep with the base dir cleared removes it and expire.next', $exRetryOk && !is_file($tmpRoot . $exA) && !$sp->index()->hasFile($exA) && $exReadNext() === null, json_encode(array($exRetry, $now)));
+
+//the uninstall: ___uninstall() forgets expire.next after the tables went; a reinstall's first
+//record writes it whatever an older file holds
+$exUninstall = preg_match('/function ___uninstall\(\).*?\n\t\}/s', (string) file_get_contents((new \ReflectionClass($sp))->getFileName()), $m) ? $m[0] : '';
+$exStale = array();
+foreach(array((string) (time() + 999999), 'x', '') as $stale) {
+	file_put_contents($exNext, $stale);
+	$sp->expireAt($t = time() + 3600);
+	publish($sp, $A);
+	$exStale[] = $exReadNext() === (string) $t;
+	$exDrop(array($exA));
+}
+$sp->queue()->noteExpiry(time() + 60);
+$sp->queue()->forgetExpiry();
+check('uninstall: ___uninstall() calls forgetExpiry() after dropTables(), which deletes expire.next; a record rewrites a later, garbage or empty expire.next', strpos($exUninstall, 'dropTables()') !== false && strpos($exUninstall, 'forgetExpiry()') > strpos($exUninstall, 'dropTables()') && $exReadNext() === null && $exStale === array(true, true, true), json_encode($exStale));
+
+$exDrop(array($exA, $exB));
+$sp->expire();
+foreach($exDirs as $dir => $existed) if(!$existed) @rmdir($dir);
+clearstatcache();
+$exEnd = array('rows' => !count($sp->index()->indexedFiles(null)), 'disk' => files($tmpRoot) === $exBefore, 'next' => $exReadNext() === null, 'type' => $tpl->contentType === $exType, 'settings' => array('maxAge' => $sp->get('maxAge'), 'cacheNonHtml' => $sp->get('cacheNonHtml'), 'staticBaseDir' => $sp->get('staticBaseDir')) === $exSettings);
+check('expiry block: no index row, no copy and no expire.next left, the tree, the content type and the settings as before', !in_array(false, $exEnd, true), json_encode(array($exEnd, files($tmpRoot), $exBefore)));
+
 ////  .htaccess manager (0.10.0)
 
 //when the manager runs: install, the check after a superuser's admin request or a CLI run, a
@@ -5306,7 +5505,7 @@ $expected = array(
 	'_static' => array('newDirPermissions', 'staticFile', 'cacheNonHtml', 'rootFiles', 'staticBaseDir', 'staticHostKey'),
 	'_exclusions' => array('nonStaticDirs', 'nonStaticTemplates', 'trackedPaths', 'noCacheCookies'),
 	'_system' => array('csrfPatterns', 'useShell', 'wipeDryRun', 'logSkips'),
-	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields', 'ignoreTemplates', 'narrowFinds'),
+	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields', 'ignoreTemplates', 'narrowFinds', 'maxAge'),
 	'htaccessAction' => true,
 	'forceWipeOnModuleSave' => true,
 	'isEnabled' => true,

@@ -53,6 +53,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	//set by noCache(): false, true, or the reason given as a string. Lives as long as the request
 	private $noCache = false;
 
+	//set by expireAt(): null, or the smallest unix time asked for. Taken by the next cachePage() of
+	//the page being viewed, so it never reaches a later render
+	private $expireAt = null;
+
 	//this request uninstalls the module, see markUninstalling(): it caches nothing more, and the
 	//.htaccess check after its response writes nothing (StaticPagesHtaccess::check())
 	private $uninstallRun = false;
@@ -130,6 +134,13 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	//uninstall that died halfway (a fatal error, a timeout) leaves the flag in the config of a
 	//still installed module, which caches again after this long
 	const uninstallingMaxAge = 3600;
+
+	//the latest expiry time an e: tag can hold, 10 digits: a later one is no expiry
+	const expiryMax = 9999999999;
+
+	//seconds before a sweep that left due files it could not delete runs again [decided by
+	//user, Q66 C (a)]
+	const expiryRetry = 60;
 
 	//the tags holding a CSRF token in the @atispro/core markup, one regex per line: the
 	//<meta name=csrf-token> pair and <input rel=csrf>. See StaticPagesPublisher::stripCsrf()
@@ -248,6 +259,8 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->markUninstalling(false);
 			throw $e;
 		}
+		//the expiry times went with the tables: a reinstall starts without expire.next
+		$this->queue()->forgetExpiry();
 	}
 
 	public function ___upgrade($fromVersion, $toVersion) {
@@ -761,6 +774,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//only the page actually being viewed may be cached under the current URL
 		if( $page !== $this->wire()->page ) return;
 
+		//what expireAt() asked for belongs to this render alone, cached or not
+		$expireAt = $this->expireAt;
+		$this->expireAt = null;
+
 		//skipping 404 page caching
 		if( $page->id == $this->wire()->config->http404PageID ) return;
 
@@ -929,6 +946,22 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			}
 		}
 
+		//the expiry time, before anything is created on disk: the smallest of expireAt() and the
+		//template's Maximum age. Only the index can hold it: no file with the manifest
+		$expires = $expireAt;
+		$maxAge = $this->maxAgeFor($page->template);
+		if( $maxAge > 0 && ( $expires === null || time() + $maxAge < $expires ) ) $expires = time() + $maxAge;
+		if( $expires !== null ){
+			if( $expires <= time() ){
+				$this->logSkip( $page, 'expireAt() asked for a time not in the future' );
+				return;
+			}
+			if( !$this->index()->ensureTables() ){
+				$this->logSkip( $page, 'no index tables: a render with an expiry time is not cached with the manifest' );
+				return;
+			}
+		}
+
 		//xml and txt, before anything is created on disk: the root level stays HTML only, the
 		//manifest knows HTML only, and a file nothing recorded (a hand-made one) is never replaced
 		if( $type !== 'html' ){
@@ -1002,7 +1035,9 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 		if( $this->index()->ensureTables() ){
 			//a file the index does not know about is never removed again, short of a full scan
-			if( !$this->index()->recordStaticFile( $relative, $page->id, $this->index()->renderTags($page) ) ){
+			$tags = $this->index()->renderTags($page);
+			if( $expires !== null ) $tags[] = $this->expiryTag($expires);
+			if( !$this->index()->recordStaticFile( $relative, $page->id, $tags ) ){
 				$this->publisher()->unpublish($path, $dirExisted ? '' : $dir);
 				$this->logSkip( $page, 'could not record dependencies' );
 				return;
@@ -1023,6 +1058,8 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 				$this->index()->dropIndexRows( array( md5($relative) ) );
 				$this->logSkip( $page, 'the module is being uninstalled' );
 			}
+			//recorded: expire.next is lowered after the row is committed, see noteExpiry()
+			else if( $expires !== null ) $this->queue()->noteExpiry($expires);
 			return;
 		}
 
@@ -1090,6 +1127,73 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		return $this;
 	}
 
+	/**
+	 * Remove the static file of the current request's render at a given time
+	 *
+	 * For template code: `$modules->get('StaticPages')->expireAt(strtotime('tomorrow'));`. Several
+	 * calls: the smallest time wins, and so does the template's Maximum age when it comes
+	 * earlier. A time not in the future keeps the render out of the cache (logged as a skip).
+	 * Static hits run no PHP: the file goes after the first PHP request past that time, or on
+	 * the next drain() a cron job runs. Not cached at all without index tables.
+	 *
+	 * @param int $timestamp Unix time. One past 9999999999 sets no expiry
+	 * @return $this
+	 *
+	 */
+	public function expireAt($timestamp) {
+		$time = (int) $timestamp;
+		if( $time > self::expiryMax ) return $this;
+		if( $this->expireAt === null || $time < $this->expireAt ) $this->expireAt = $time;
+		return $this;
+	}
+
+	/**
+	 * Delete the static files whose expiry time has come
+	 *
+	 * Runs from drain() always and after a response once the earliest expiry time has passed.
+	 * Under the drain lock; bumps no generation and queues nothing. Returns the counts of the
+	 * wipe, or null when nothing was due or the lock or the index tables were not there.
+	 *
+	 * @param int|null $now Unix time the expiry times are compared with, null: now
+	 * @return array|null
+	 *
+	 */
+	public function expire($now = null) {
+		return $this->queue()->expire( $now === null ? time() : (int) $now );
+	}
+
+	/** #pw-internal */
+	public function expiryTag($time){
+		return 'e:' . sprintf( '%010d', (int) $time );
+	}
+
+	/**
+	 * The Maximum age of a template's static files in seconds, 0 for none
+	 *
+	 * From the setting maxAge, one "<template name> <seconds>" per line, "*" for every template.
+	 * A template's own line beats "*", of two own lines the smaller counts, names match whatever
+	 * their letter case. A line that is not two words, or whose seconds are not a whole number
+	 * above 0 or give a time past 9999999999, is ignored [decided by user, Q66 A (a), B (a)].
+	 *
+	 * #pw-internal
+	 *
+	 */
+	public function maxAgeFor(Template $template){
+		$value = (string) $this->configValue('maxAge', '');
+		if( trim($value) === '' ) return 0;
+		$own = 0;
+		$all = 0;
+		$name = strtolower( (string) $template->name );
+		foreach( $this->linesToArray($value) as $line ){
+			if( !preg_match( '/^(\S+)\s+(\d{1,10})$/', $line, $m ) ) continue;
+			$seconds = (int) $m[2];
+			if( $seconds < 1 || time() + $seconds > self::expiryMax ) continue;
+			if( $m[1] === '*' ) $all = $all ? min( $all, $seconds ) : $seconds;
+			else if( strtolower($m[1]) === $name ) $own = $own ? min( $own, $seconds ) : $seconds;
+		}
+		return $own ? $own : $all;
+	}
+
 	public function stripCsrf($html) {
 		//see StaticPagesPublisher::stripCsrf(). Public API: site hooks writing their own
 		//static files call it
@@ -1151,8 +1255,11 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	public function drain(){
 		//see StaticPagesQueue::drain(). Public API: a deploy script may call it
+		//the files whose expiry time has come go as well, due or not by expire.next: a cron job
+		//calling this is what makes expiry exact
 		if( $this->migration()->pending() ) $this->migrate();
-		return $this->queue()->drain();
+		$this->queue()->drain();
+		$this->expire();
 	}
 
 	public function shutdown(){
@@ -1170,6 +1277,9 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$this->migrate();
 		}
 		$this->queue()->shutdownDrain($this->adminRequest);
+
+		//expiry, after any request once expire.next has passed: one small file read otherwise
+		$this->queue()->shutdownExpire();
 
 		//the root .htaccess, after a superuser's admin request or a CLI run: a visitor's request
 		//never reads it and pays nothing, not even a stat(). Three stat() calls while nothing

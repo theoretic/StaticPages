@@ -286,6 +286,16 @@ $config = array(
 						'columnWidth'			=> 100,
 					),
 
+					array(
+						'name'					=> 'maxAge',
+						'type'					=> 'textarea',
+						'label'					=> $this->_('Maximum age'),
+						'description'			=> $this->_('one "template name seconds" per line, "*" for every template'),
+						'notes'					=> $this->_('A static file of a listed template is deleted once it is this many seconds old: for output that changes with time rather than with a save, a date or an opening hours notice. A template\'s own line beats "*", of two the smaller counts; names are case insensitive. A line that is not a name and a whole number of seconds above 0 is ignored. Template code can ask for an earlier time: $modules->get(\'StaticPages\')->expireAt($time). Static hits run no PHP: a file goes with the first request PHP handles after its time, exactly on time only when a cron job calls drain(). Without index tables a render with an expiry time is not cached. Files recorded before the setting changed keep their time.'),
+						'columnWidth'			=> 100,
+						'value'					=> '',
+					),
+
 				),
 			),
 
