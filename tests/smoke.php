@@ -2103,6 +2103,27 @@ check('by record, tampered rows naming robots.txt, sitemap.xml, a/index.php and 
 foreach($tampered as $x) @unlink("$tmpRoot$x");
 rrmdir("$tmpRoot$Pdir");
 
+//a root file named <x>index.xml or <x>index.txt (/sitemap_index.xml): the root-name rule decides
+//before the shape of an old no-slash copy, so its row deletes it only while listed and the
+//switch is on (N1.1)
+$rootShaped = array('/sitemap_index.xml', '/news_index.txt');
+$rootShapedSeen = array();
+$rootFilesBefore = $sp->get('rootFiles');
+foreach(array('unlisted' => array(1, ''), 'off' => array(0, "sitemap_index.xml /s/\nnews_index.txt /n/"), 'listed' => array(1, "sitemap_index.xml /s/\nnews_index.txt /n/")) as $rsKey => $rsSet) {
+	$sp->set('cacheNonHtml', $rsSet[0]);
+	$sp->set('rootFiles', $rsSet[1]);
+	putFiles($tmpRoot, $rootShaped);
+	recordAll($sp, $rootShaped);
+	$sp->wiper()->wipeIndexed(null);
+	clearstatcache();
+	$rootShapedSeen[$rsKey] = count(array_filter($rootShaped, fn($x) => is_file("$tmpRoot$x")));
+	foreach($rootShaped as $x) @unlink("$tmpRoot$x");
+	$sp->index()->clearRows();
+}
+if($rootFilesBefore === null) $sp->remove('rootFiles'); else $sp->set('rootFiles', $rootFilesBefore);
+$sp->set('cacheNonHtml', 1);
+check('by record, rows naming /sitemap_index.xml and /news_index.txt: both stay while unlisted or with the switch off, both go while listed and on', $rootShapedSeen === array('unlisted' => 2, 'off' => 2, 'listed' => 0), json_encode($rootShapedSeen));
+
 //the manifest: HTML lines only
 $manifest = $sp->manifestPath();
 $manifestBefore = is_file($manifest) ? file_get_contents($manifest) : null;

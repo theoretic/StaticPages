@@ -1916,7 +1916,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$name = $words[0];
 			$path = count($words) > 1 ? $words[1] : "/$name/";
 			if( count($words) > 2
-				|| !preg_match('/^[a-z0-9_-][a-z0-9._-]{0,99}\.(xml|txt)$/', $name)
+				|| !$this->rootFileNameShape($name)
 				|| in_array( $name, $known, true )
 				|| isset($files[$name])
 				|| !preg_match('#^/([A-Za-z0-9_.-]+/)+$#', $path) ){
@@ -1926,6 +1926,13 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$files[$name] = $path;
 		}
 		return array( 'files' => $files, 'refused' => $refused );
+	}
+
+	/** #pw-internal */
+	public function rootFileNameShape($name){
+		//whether a line of "Replace these root files with pages" may name $name: a lower case
+		//xml or txt file name, never a dot file, never a path. Listed or not, see rootFilesArray()
+		return (bool) preg_match('/^[a-z0-9_-][a-z0-9._-]{0,99}\.(xml|txt)$/', (string) $name);
 	}
 
 	private function fileNameSet($data, $all){

@@ -124,7 +124,10 @@ class StaticPagesWiper extends Wire {
 			if( $relative === '' || strpos($relative, '..') !== false || strpos($relative, "\0") !== false ) continue;
 			$path = $root . $relative;
 			$loopDir = '';
-			if( !in_array( basename($path), $names, true ) && ( $loopDir = $this->noSlashCopyDir($path) ) !== '' ){
+			//a name a root file may carry, directly in the static root (or one host dir down):
+			//the root-name rule below decides, before the shape of an old no-slash copy, so a
+			//row for /sitemap_index.xml deletes it only while listed and the switch is on
+			if( !in_array( basename($path), $names, true ) && !$this->isRootFileSpot($relative, basename($path), $hostKey) && ( $loopDir = $this->noSlashCopyDir($path) ) !== '' ){
 				//a copy of a page without a trailing slash as older versions wrote it, <x><name>
 				//beside the empty dir <x>/ its write made: deleted by its record, by the shape of
 				//its path alone, with that dir when it is empty [decided by user, Q53 (a), Q58]
@@ -530,6 +533,15 @@ class StaticPagesWiper extends Wire {
 			if( $this->sp->index()->isMissingTable($e) ) $this->sp->index()->tablesFailed($e);
 		}
 		return $files;
+	}
+
+	/** #pw-internal */
+	public function isRootFileSpot($relative, $name, $hostKey){
+		//$relative names $name where a root file's copy lives, and $name is one a line of the
+		//root file list may hold, listed or not: deleteStaticFiles() leaves it to the root-name rule
+		if( !$this->sp->rootFileNameShape($name) ) return false;
+		if( (string) $relative === '/' . $name ) return true;
+		return $hostKey && $this->isHostRootCopy($relative, $name);
 	}
 
 	/** #pw-internal */

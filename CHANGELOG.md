@@ -78,6 +78,10 @@ With the new settings at their defaults:
   finds by the fields they use*, *Expiry* with a cron example, *Cache only these hosts*, and
   front-end checks under *Limits of path tracking*.
 
+### Fixed
+- **A root file named like an old no-slash copy** (`/sitemap_index.xml`) was deleted by its record
+  also while unlisted or with *Cache XML and plain text responses* off; now only while listed and on.
+
 ### Tests
 - `tests/smoke.php` checks the tags a save queues (the `Pages::added` path, repeater items, a
   template or parent change), the selector analysis behind *Narrow finds* with a table of
