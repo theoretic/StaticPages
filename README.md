@@ -11,8 +11,10 @@ Module reacts to the following events:
 - Page render: a new static file is created, and the pages its render depended on are recorded with it.
 - Page save, delete, sort, trash or restore: the static files that depended on that page are deleted, and only those. See *What a save deletes* below.
 - Single field save: the same. Inline admin edits and `$page->setAndSave()` never reach a page save. Can be switched off in the module settings.
+- Fieldgroup save, new template, template given another fieldgroup: all previously generated static files will be deleted. See *Narrow finds by the fields they use*.
+- Expiry time reached: the static file is deleted, see *Expiry*.
 - Config save of a listed module: all previously generated static files will be deleted. Modules like SettingsFactory keep site-wide settings in their own module config data and save no page, so a page save event never happens even though the settings end up in the markup. List such modules in the *Wipe on config save of these modules* setting, one class name per line.
-- Tracked file change: all previously generated static files will be deleted. Editing a template or an asset file fires no ProcessWire event at all, so nothing would tell the module its static files went stale. The patterns listed in the *Track changes in these paths* setting are checked on admin requests by file name, modification time and size; file contents are never read. `*` matches inside one path segment, `**` matches any number of segments including none.
+- Tracked file change: all previously generated static files will be deleted. Editing a template or an asset file fires no ProcessWire event at all, so nothing would tell the module its static files went stale. The patterns listed in the *Track changes in these paths* setting are checked on admin requests (and, with *Track changes on front-end requests*, after front-end requests PHP handles) by file name, modification time and size; file contents are never read. `*` matches inside one path segment, `**` matches any number of segments including none.
 
 A save does not delete anything itself. It queues what went stale, and the files are deleted
 once the response has been sent: under php-fpm and LiteSpeed the connection is closed first,
@@ -35,7 +37,9 @@ A save of a page then deletes:
 - every static file whose render ran a find the page may have entered or left: one limited to
   its template, its parent or one of its ancestors, or a find with no such limit. A new post,
   a published draft or a post edited into `featured=1` appears in listings that never loaded it.
-  Before and after a move or a template change;
+  Before and after a move or a template change. A new page always counts (`Pages::added`), also
+  when ProcessWire reports no change for it, and an unpublished one too. With *Narrow finds by
+  the fields they use* checked, only a find that filters or sorts on what the save changed;
 - for a rename or a move, the files of every descendant too, their urls changed.
 
 An unpublished page that stays unpublished is shown nowhere, so editing a draft deletes nothing.
@@ -48,6 +52,9 @@ Everything is deleted when:
 - a page with children is trashed or restored: ProcessWire sets the children's status in SQL,
   with no save and no hook;
 - a renamed or moved page has more than 5000 descendants;
+- a fieldgroup is saved (the admin saves one when the fields of a template are added, removed or
+  reordered, when a template is created or renamed, and when a field is added to templates from
+  the field editor), a template is created, or a template is given another fieldgroup;
 - a listed module's config is saved, or a tracked file changed.
 
 ### Templates whose saves invalidate nothing
@@ -74,7 +81,9 @@ of their own (`…/repeaters/for-field-N/for-page-<id>/`), created when the page
 without items, unless the field's *lazy parents* option is on. Deleting a listed page whose
 template carries a repeater field, or changing its template to one without that repeater field,
 deletes this container too, and its deletion is judged by its own template, which is not listed:
-one queue row (`p:<container id>`), one change of the generation stamp, one drain. That drain
+one queue row (`p:<container id>`), one change of the generation stamp, one drain. Creating a
+listed page whose template carries a repeater field creates such containers, which are new pages
+of a template that is not listed: their row holds `p:<container id>` for each and `x:s`. Such a drain
 deletes the files whose render loaded the container page itself (a render of the page does where
 its stored value for the repeater field names no container) and, as every drain does, the files
 tagged `*`: more than 5000 dependencies, adopted files, files a delete failed on.
@@ -118,6 +127,182 @@ and runs no `CREATE TABLE` and no `information_schema` query. A query that finds
 (dropped, or a dump restored without it) clears `indexSchema`, and the next request checks and
 creates again. Uninstalling the module deletes the static copies the tables record and then drops
 the tables, see *Uninstalling* below.
+
+## How a save finds the files
+
+Each static file is recorded with tags. A save queues tags of its own, and the drain deletes every
+file carrying one of them, and every file tagged `*`.
+
+| Tag | Recorded on a file when its render | Queued by a save of a page |
+|---|---|---|
+| `p:<id>` | loaded page `<id>`; the page itself and its ancestors always | its own; of every descendant on a rename or a move |
+| `t:<id>`, `par:<id>`, `tree:<id>` | ran a find limited to template `<id>`, to parent `<id>`, or to pages below `<id>` | of its template, its parent and every ancestor, before and after the save |
+| `any` | ran a find with no such limit, or (with *Narrow finds*) a find the module does not understand | with the listing tags |
+| `*` | had more than 5000 tags, or the file was adopted, or a delete of it failed | never: every drain takes these files |
+| `<scope>/<what>` | ran a find, with *Narrow finds* checked: its scope and each thing it filters or sorts on | every scope of the page times every what of the save |
+| `x:<what>` | ran a find, with *Narrow finds* checked, reaching other pages through a subfield (`author.name`) | every what of the save but `m` |
+| `e:<time>` | is to expire, see *Expiry* | never: `expire()` takes these files |
+
+A save queues the listing tags (`t:`, `par:`, `tree:`, `any`) and the `<scope>/<what>` tags for
+a page that is published and not in the trash, for one the save published, unpublished, trashed,
+restored, moved or sorted, and for a new page; never for a page of a system template (users,
+roles, the admin). The `x:` tags it queues for the same pages, system templates included: a user
+page is what an author field (`author.name`) reaches.
+
+The grammar of the newer tags:
+
+- scope: `t:<template id>`, `par:<parent id>`, `tree:<ancestor id>`, or `*` for no limit.
+- what: `f:<field id>` for a custom field; `s` for a structural change (the page was created,
+  deleted, trashed or restored, or its status, parent or template changed); `m`, queued by every
+  save, for a find on `modified`; `n:<name>` for any other property, lower-cased (`n:name`,
+  `n:sort`, `n:created`), or `n:` and the first 16 hex digits of its md5 when the name is longer
+  than 22 characters or holds anything but `a-z`, `0-9` and `_`. One function names a change and a
+  selector field alike: `name1012` counts as `name` and `status1012` as `status`, `parent_id` and
+  `templates_id` as `s`, `modified_users_id` as `m`, and in a selector `path` and `url` as
+  `n:name`. Every tag fits the 40 characters of the tag column, `tree:4294967295/n:<22>` too.
+- foreign: `x:f:<field id>`, `x:n:<name>`, `x:s`: something about another page the find reaches
+  through a subfield.
+
+A save of a post (template P, parent 7, below the home page 1) changing `body` and `date` queues
+`p:<id>`, the listing tags `any`, `t:P`, `par:7`, `tree:7`, `tree:1`, and
+`{t:P, par:7, tree:7, tree:1, *} × {f:<body>, f:<date>, m}`, `x:f:<body>`, `x:f:<date>`.
+
+### Narrow finds by the fields they use
+
+Unchecked (the default), a find is recorded by its scope alone: a find limited to the template
+`post` is `t:P`, and any save of any post deletes its file, whatever the save changed; a find with
+no limit is `any`, deleted by any save of nearly any page. Checked (`narrowFinds`), a find is
+recorded by its scope and by what it filters and sorts on, and a save deletes its file only when it
+changed one of those, or created, deleted, trashed, restored or moved a page, or changed its status
+or template. A page the render showed was loaded, so its `p:` tag still deletes the file on any
+save of it.
+
+How a find is read:
+
+- A specific find (`id=1234`) records nothing, as unchecked.
+- The scope is the template, parent or ancestor the find is limited to, as unchecked. Else the
+  templates carrying a field the find asks for a value (below). Else `*`.
+- The whats: `s` always; then every field and property of the selector, whatever the operator,
+  negated or not, empty value or not, each of an OR-field `a|b`; and every `sort=` value without
+  its leading `-` (`random` gives nothing). `limit`, `start`, `include`, `check_access`,
+  `get_total`, and `id` when not specific, give nothing. The properties understood are the page
+  columns and their aliases: `name`, `status`, `parent`, `parent_id`, `template`, `templates_id`,
+  `sort`, `sortfield`, `created`, `modified`, `published`, `created_users_id`,
+  `modified_users_id`, `has_parent`, `path`, `url`, `num_children` (`numChildren`, `createdUser`,
+  `modifiedUser`, `page.sort` and the like as the column).
+- A subfield of a Page or PageTable field, besides the field's own `f:<id>`: `id` and `count`
+  give nothing more; a field gives `x:f:<id>`; `name`, `sort`, `created`, `published` give
+  `x:n:<name>`; `status`, `template`, `parent` give `x:s`; anything else, `modified` included,
+  makes the find `any`. A subfield of any other field (a repeater's `rep.title`) counts as the
+  field: a repeater item's save queues `f:<repeater field>` for its owner. `parent.<field>` gives
+  `x:f:<id>`, `children.<field>` gives `x:f:<id>` and `x:s`, `children.count` and `numChildren`
+  give `x:s`. A third segment (`author.parent.title`) makes the find `any`, and so does a
+  subfield of any other property (`createdUser.name`).
+- Anything else makes the find `any`: a value holding a sub-selector `[...]`, an OR-group
+  `(...)`, `owner`, `references`, `referencing`, `template.<x>`, `parent.<x>` that is no field,
+  another property (`child`, `parents`, `count`), an unknown name.
+- More than 64 tags for one find: its scope becomes `*`; still more than 64, the find is `any`.
+
+**Templates carrying a field.** A find `F=value`, `F%=value`, `F*=value` or `F~=value`, not
+negated, every value non-empty, `F` a custom field without a subfield, is recorded for the
+templates carrying `F`: ProcessWire joins the field's table, so a page whose template lacks `F`
+never matches. That holds for the core fieldtypes Text, Textarea, PageTitle, Email, URL, Integer,
+Float, Decimal, Checkbox, Datetime, Page and Options, by their exact class; their language
+variants, Toggle and every other fieldtype give `*`. Empty is what the fieldtype calls empty:
+`featured=0` of a checkbox also matches pages without the field, and gives `*`. More than 20
+templates give `*`; of several such selectors the smallest list counts; an OR-field `a|b` gives
+none. Since a field added to a template moves its pages into such a scope, every fieldgroup save,
+every new template and every template given another fieldgroup deletes every static file, box
+checked or not.
+
+Examples (A: the templates carrying the checkbox `featured`; P: the template `post`, with the
+date field `date`; `author` a Page field):
+
+| Find | File tags |
+|---|---|
+| `featured=1` | `t:A/f:<featured>`, `t:A/s` |
+| `featured!=1`, `featured=''` | `*/f:<featured>`, `*/s` |
+| `template=post, sort=-date, limit=10` | `t:P/f:<date>`, `t:P/s` |
+| `template=post, author.name=Bob` | `t:P/f:<author>`, `t:P/s`, `x:n:name` |
+| `parent=7, children.count>0` | `par:7/s`, `x:s` |
+| `sort=-modified, limit=5` | `*/m`, `*/s` |
+| `title%=foo, body=[x=1]` | `any` |
+| `title\|body%=foo` | `*/f:<title>`, `*/f:<body>`, `*/s` |
+| `!title=foo` | `*/f:<title>`, `*/s` |
+| `template=post, sort=random` | `t:P/s` |
+| `id=1234` | nothing |
+| `(title=x), (body=y)` | `any` |
+| `path^=/news/` | `*/n:name`, `*/s` |
+| `author.modified>0` | `any` |
+| `numChildren>0` | `*/s`, `x:s` |
+| `children.title=x` | `*/s`, `x:f:<title>`, `x:s` |
+| `template.name=x` | `any` |
+
+The box is unchecked by default because it trades a sure delete for a narrower one. Unchecked, any
+save in a find's scope deletes its file; checked, the file also stays after saves the module judges
+unrelated, and that judgement is only as good as its reading of every selector the site's templates
+run, while a stale copy is served to everybody until something else deletes it. The index also grows: a find records up to 64 tags instead of one. Check it where
+saves of a busy template (a counter, a stock level) delete listings that never show the changed
+field. Files recorded before the box changed keep their tags until they are deleted; *Force static
+pages deletion on module save* on the same save starts afresh.
+
+### Finds the module does not understand
+
+The settings form shows, under *Indexed static files*, how many files the index records, how
+many of them carry `any` (a find not understood, or with the box unchecked a find with no limit)
+and how many `*` (no dependencies recorded): a save of nearly any page deletes those, whatever it
+changed. The numbers need the index tables and are counted only when the form is built. With *Log
+skipped pages* on, writing such a file logs each selector that fell back to `any`, once per
+selector: `any <path>: a find this module does not understand, selector "<selector>"`.
+
+## Expiry
+
+Output that changes with time rather than with a save (a date, opening hours, an event that has
+passed) can be given a time after which its static file is deleted:
+
+- *Maximum age* (`maxAge`): one `<template name> <seconds>` per line, `*` for every template,
+  `* 86400` and `event 3600` say. A template's own line beats `*`; of two lines for one template
+  the smaller counts; names match whatever their letter case. A line that is not a name and a
+  whole number of seconds above 0 is ignored.
+- `expireAt()`, from template code, for the render running:
+
+  ```php
+  $modules->get('StaticPages')->expireAt(strtotime('tomorrow'));
+  ```
+
+  Several calls: the earliest time counts, and so does *Maximum age* when it comes earlier. A time
+  not in the future keeps the render out of the cache (`expireAt() asked for a time not in the
+  future`); one past 9999999999 sets no expiry.
+
+The time is recorded with the file as the tag `e:<10 digit unix time>`, and the earliest of them
+in `site/assets/cache/StaticPages/expire.next`. Every kind of copy expires alike: `index.xml`,
+`index.txt` and a root file's copy too (its dot backup stays). Without the index tables a render
+with an expiry time is not cached (`no index tables: a render with an expiry time is not cached
+with the manifest`). Files recorded before *Maximum age* changed keep their time.
+
+Static hits run no PHP, so nothing notices a time passing while every request is answered from a
+copy. After the response of any request PHP handles (a page not cached, a form post, an admin
+request), once the time in `expire.next` has passed, `expire()` deletes the files due: until then
+an expired copy is still served. Such a request costs one small file read otherwise, and no
+query. For exact times, a cron job calls `drain()`, which processes the queue and then always
+runs `expire()`; with it running every minute a file is at most a minute late:
+
+```php
+<?php
+// expire-static.php, outside the web root
+include '/var/www/example.com/index.php';
+$modules->get('StaticPages')->drain();
+```
+
+```
+* * * * * php /var/www/expire-static.php
+```
+
+A CLI run also checks the root `.htaccess`, see *When the module writes it*. `expire()` takes the
+drain lock, deletes through every check a delete goes through, and takes the files tagged `*`
+along, as every drain does; it changes no generation stamp and queues nothing. Files due that it
+can not delete (a base directory without its marker) are tried again a minute later, not on
+every request. Uninstalling deletes `expire.next`.
 
 ## Upgrading
 
@@ -403,6 +588,43 @@ not count, a port only as listed (`example.com:8080` is not `example.com`). Any 
 copy and goes to ProcessWire. A change of `$config->httpHosts` changes the block, which the next
 settings save or superuser admin request writes again.
 
+## Cache only these hosts
+
+*Cache only these hosts* (`cacheHosts`, empty) names the hosts whose renders are cached, one per
+line, `example.com` or `example.com:8080`; empty, every host is, as before. Choose it when one
+ProcessWire answers to host names whose visitors should not get a copy, or whose renders should not
+become one: a staging name, a bare IP address, a second domain. It works with or without a base
+directory and with or without *Static files per host*. Both sides read it:
+
+- Writing: a render, HTML, XML or plain text, is cached only when `$config->httpHost` is listed,
+  letter case aside; any other is skipped with `the host "<host>" ($config->httpHost) is not listed
+  in Cache only these hosts`. It is asked before *Static files per host*: an unlisted host gets no
+  directory either.
+- Serving: every rule of the block that answers from a copy gets one more condition, after the
+  cookie one:
+
+  ```apache
+  RewriteCond %{HTTP_HOST} ^(?:example\.com|www\.example\.com)$ [NC]
+  ```
+
+  Letter case does not count, a port only as listed (`example.com:8080` is not `example.com`). A
+  request from any other host goes to ProcessWire. With *Cache XML and plain text responses*
+  checked and no base directory, a file of *Replace these root files with pages* gets one more
+  rule ahead of its own, sending a request for it from an unlisted host to its page: the stock
+  rules would serve that host the copy in the web root.
+
+Only lines that are a plain host name (letters, digits, `-` and dots, with an optional `:port`) go
+into the block; the others are left out, and the settings form says so under the block. A list
+holding no such line has no copy served at all; without a base directory a root file's request
+then goes to its page from every host. A save that changes the list (trimmed, lower-cased, each
+host once) deletes every copy, *Dry run* checked or not: copies written for a host that is no
+longer listed, or for any host while the list was empty, would otherwise be served to the listed
+ones. The block changes with the list, and the save writes it as it writes any change, see *When
+the module writes it*.
+
+The nginx examples under *Without .htaccess* do not read this setting: there a copy is served to
+every host the `server` block answers.
+
 ## Pages without a trailing slash
 
 A template can drop the trailing slash from its pages' URLs (*Should page URLs end with a slash?*
@@ -479,6 +701,12 @@ module looks like it is doing nothing, and off again afterwards on a busy front 
 - With *Static base directory* set, the stock `.htaccess` would answer the copy with 403:
   `the stock .htaccess denies its copy path <path> to visitors (403 Forbidden)`. See *Copy paths
   the stock rules deny*.
+- *Cache only these hosts* does not list the host: `the host "<host>" ($config->httpHost) is not
+  listed in Cache only these hosts`. See *Cache only these hosts*.
+- `expireAt()` asked for a time not in the future: `expireAt() asked for a time not in the
+  future`. A render with an expiry time (`expireAt()` or *Maximum age*) on a site without the index
+  tables: `no index tables: a render with an expiry time is not cached with the manifest`. See
+  *Expiry*.
 - *Static files per host* is checked and the request's host is not the one to cache for:
   `Static files per host: the request's host "<host>" is not $config->httpHost "<host>"`, `…: the
   host "<host>" is not listed in $config->httpHosts`, `…: the host "<host>" is no plain host
@@ -681,8 +909,8 @@ block goes immediately before the `# PW-PAGENAME` line, inside the `mod_rewrite`
 down it would take the stock conditions of section 17 for itself. Its rules are relative to the
 `.htaccess` directory, so a ProcessWire installed in a subdirectory gets the same answers. *Static
 file name*, *Cache XML and plain text responses*, *Replace these root files with pages*, *Static
-base directory*, *Static files per host* with `$config->httpHosts`, and the session settings are
-the values it is made from, and the settings form shows it under *The StaticPages block*. For
+base directory*, *Static files per host* with `$config->httpHosts`, *Cache only these hosts*, and
+the session settings are the values it is made from, and the settings form shows it under *The StaticPages block*. For
 the block with a base directory see *Static base directory and static files per host*.
 
 ### Directories made by hand
@@ -1075,8 +1303,8 @@ plain text responses* checked, their `index.xml` and `index.txt` files and the m
 
 ## Limits of path tracking
 
-- The check runs on admin requests only. A fully cached URL never reaches PHP, so there is no front end request left to hang it on. A developer who edits files and never opens the admin will not see the cache wiped.
-- Checks are throttled to once every 10 seconds so that admin ajax does not walk the tracked directories on every keystroke. Between two checks an admin request costs one `stat()` of a stamp file; a check stats every tracked file, keep the patterns narrow.
+- The check runs on admin requests. With *Track changes on front-end requests* (`trackOnFrontend`, off by default) it also runs after the response of a front-end request PHP handles, at most once a minute, by a stamp of its own (`site/assets/cache/StaticPages/front.stamp`): a deployed template or asset then wipes the static files without anybody opening the admin. A change found there wipes everything after that same response and writes `Tracked path changed (front-end request): <patterns>` to the `static-pages` log; no notice is shown. A fully cached URL never reaches PHP, so on a site where every page is cached the check waits for the first request that is not: a form post, a query string, a page not cached yet, an admin request. A developer who edits files on such a site, with the box unchecked and the admin never opened, will not see the cache wiped.
+- Checks are throttled to once every 10 seconds so that admin ajax does not walk the tracked directories on every keystroke. Between two checks an admin request costs one `stat()` of a stamp file; a check stats every tracked file, keep the patterns narrow. A front-end check walks the same files, at most once a minute, after the response has been sent.
 - Only the modification time and the size are compared. An edit changing neither goes unnoticed.
 - Symlinked directories inside a tracked path are not descended into. A symlinked base directory is fine.
 - Static copies are never source files: a file named like one (`index.html`, `index.xml` and `index.txt` only while *Cache XML and plain text responses* is checked) is skipped anywhere, and so is everything below the *Static base directory* while it holds its marker `.staticpages`. A base directory without the marker stays tracked like any other directory. After a save that clears or changes the base directory, a tracked path covering the old one counts its marker, left behind, as a changed file once: one wipe of everything.
@@ -1087,8 +1315,11 @@ $modules->get('StaticPages')->checkTrackedPaths(true);  //check now, ignoring th
 $modules->get('StaticPages')->wipeCaches();             //or just wipe every indexed file, right now
 $modules->get('StaticPages')->wipeCaches(true);         //the same with a full disk scan
 $modules->get('StaticPages')->wipeCaches(true, true);   //list what the scan would delete, delete nothing
-$modules->get('StaticPages')->drain();                  //process the queue right now
+$modules->get('StaticPages')->drain();                  //process the queue right now, then delete the files due to expire
 ```
+
+`checkTrackedPaths(true)` stays the exact way for a deploy script: a front-end check waits for its
+minute and for a request PHP handles.
 
 ## Warning
 

@@ -1,5 +1,91 @@
 # Changelog
 
+## 0.13.0 (2026-11-24)
+
+A save can be matched to the finds it touches by the fields they filter and sort on, static
+files can expire after a time, tracked paths can be checked on front-end requests, and caching
+can be limited to listed hosts. Every new setting is off or empty by default.
+
+### What happens on an existing site
+With the new settings at their defaults:
+
+- **Changed: creating a page always deletes the listings it may enter.** The module hooks
+  `Pages::added` and takes a new page for a structural save. Core hands `Pages::saved` whatever
+  the new page's change list held, possibly nothing, and an empty list queued nothing: a listing
+  limited to the page's template or parent kept its old result until something else deleted it.
+  Now every creation queues the page's listing tags (`t:`, `par:`, `tree:` and `any`), for an
+  unpublished page as well, but for a page of a system template. A template listed in *Never
+  invalidate on save of these templates* still queues nothing for its own pages.
+- **Changed: saving a fieldgroup deletes every static file**, as a tracked file change does. The
+  admin saves one when the fields of a template are added, removed or reordered, when a template
+  is created or renamed, and when a field is added to templates from the field editor; so does
+  `$fieldgroup->save()`. A new template (`Templates::added`) and a template given another
+  fieldgroup (`Templates::saved`) wipe everything too. *Narrow finds by the fields they use*
+  needs it (a field added to a template moves its pages into finds recorded for the templates
+  carrying that field); it happens with the box checked or not.
+- **Changed: each save queues more tags.** Besides the tags it queued before, every one of them
+  still queued, a save queues `<scope>/<what>` and `x:<what>` tags (README *Narrow finds by the
+  fields they use*). With the box unchecked no file carries such a tag, so the same files are
+  deleted as before; the queue rows are longer.
+- **Changed: the settings form shows *Indexed static files*:** how many files the index records,
+  how many of them carry `any` and how many `*`. One query, on the settings form only, and only
+  with the index tables. With *Log skipped pages* on, every file written whose render ran a find
+  the module does not understand logs `any <path>: a find this module does not understand,
+  selector "<selector>"`, once per selector; with *Narrow finds* off that is every find not
+  limited to a template, a parent or an ancestor.
+- **Changed: `drain()` also runs `expire()`**, which deletes the static files whose expiry time
+  has come: none without *Maximum age* or `expireAt()`.
+- **Unchanged**: the StaticPages block in the root `.htaccess`, byte for byte the one 0.10.0 to
+  0.12.0 write: nothing is rewritten on the update, and a site that chose *Keep them* has nothing
+  to add by hand. The tags recorded for a file, the names of the copies, the tables
+  (`StaticPages schema 1`) and the config keys do not change; there is nothing to migrate. A
+  request with nothing due to expire reads one small file, or finds none, and runs no query.
+
+### Added
+- **Narrow finds by the fields they use** (`narrowFinds`, off). Checked, a find is recorded by
+  the fields and properties it filters and sorts on, behind its template, parent or ancestor
+  limit, and a save deletes the file only when it changed one of them, or created, deleted,
+  trashed, restored or moved a page, or changed its status or template. A find asking a field for
+  a non-empty value (`featured=1`) is recorded for the templates carrying that field, for twelve
+  core fieldtypes. A find the module does not understand counts as one without limits (`any`); a
+  page the render showed still deletes the file on any save of it. Files recorded before the box
+  changed keep their tags. The README has the tag grammar and a table of examples.
+- **Maximum age** (`maxAge`, empty): one `<template name> <seconds>` per line, `*` for every
+  template. A static file of a listed template is deleted once it is that old. Template code can
+  ask for an earlier time with `$modules->get('StaticPages')->expireAt($time)`; a time not in the
+  future keeps the render out of the cache (`expireAt() asked for a time not in the future`). The
+  time is recorded as the tag `e:<10 digit unix time>`; `expire()` deletes the files whose time
+  has come. Static hits run no PHP: a file goes with the first request PHP handles after its time,
+  or with `drain()`, which a cron job can call to make expiry exact. The earliest time is kept in
+  `site/assets/cache/StaticPages/expire.next`, which uninstalling deletes. Without the index
+  tables a render with an expiry time is not cached (`no index tables: a render with an expiry
+  time is not cached with the manifest`).
+- **Track changes on front-end requests** (`trackOnFrontend`, off). Checked, the paths of *Track
+  changes in these paths* are also checked after the response of a front-end request PHP handles,
+  at most once a minute (stamp `site/assets/cache/StaticPages/front.stamp`). A change wipes
+  everything in that same request and logs `Tracked path changed (front-end request): <patterns>`;
+  no notice is shown.
+- **Cache only these hosts** (`cacheHosts`, empty): one host per line, `example.com` or
+  `example.com:8080`, letter case aside. A render is cached only when `$config->httpHost` is
+  listed, asked before *Static files per host*, else skipped (`the host "<host>" ($config->httpHost)
+  is not listed in Cache only these hosts`). The block serves a copy only to a request whose `Host`
+  header is listed, and, with *Cache XML and plain text responses* checked, sends a request for a
+  file of *Replace these root files with pages* from any other host to its page. Only plain host
+  names go into the block; a list holding none has no copy served at all. Changing the list
+  deletes every copy on that save, *Dry run* checked or not.
+- Public API: `expireAt($timestamp)`, `expire($now = null)`.
+- **README**: *How a save finds the files* with the tag grammar and a table of examples, *Narrow
+  finds by the fields they use*, *Expiry* with a cron example, *Cache only these hosts*, and
+  front-end checks under *Limits of path tracking*.
+
+### Tests
+- `tests/smoke.php` checks the tags a save queues (the `Pages::added` path, repeater items, a
+  template or parent change), the selector analysis behind *Narrow finds* with a table of
+  selectors and end to end saves, the fieldgroup-derived scope with a probe of core's finds, the
+  hooks that wipe everything, the `any` counts and log line, expiry (`expireAt()`, *Maximum age*,
+  `expire()`, `expire.next`, root and typed files), the front-end path check, and *Cache only these
+  hosts* on the write side and in the block.
+
 ## 0.12.0 (2026-11-24)
 
 Static copies can be written below one directory instead of the web root, and per host name.
