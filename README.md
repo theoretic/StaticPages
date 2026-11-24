@@ -385,8 +385,10 @@ page's markup differs by host (absolute links, a canonical URL, a setting chosen
 it, the copy written for one host is served to all of them. Below the host's directory the copy is
 still placed by `$page->path`: on a site that chooses the language by host name, a page whose path
 carries the language segment (`/en/offers/` for `/offers/`) is written to
-`<base>/<host>/en/offers/index.html`, where the block does not look for it. Such pages are then
-never served from their copies, and never from another host's; see *Multilingual sites*.
+`<base>/<host>/en/offers/index.html`, while the block looks for the copy of `/offers/` at
+`<base>/<host>/offers/index.html`. Read from the generated rules, not tried on a server: a request
+for `/offers/` on that host is then not answered from that copy, nor from another host's directory,
+and goes to ProcessWire; see *Multilingual sites*.
 
 The directory is the host in lower case with `:` as `_` (`example.com_8080`). A render is cached only
 for a host listed in `$config->httpHosts`, and only when the request's `Host` header is that very host,
@@ -407,12 +409,9 @@ A template can drop the trailing slash from its pages' URLs (*Should page URLs e
 on its *URLs* tab). Such a page, and every page below it, is not cached, in every mode, nor is a
 render with URL segments whose template says no to *Should URL segments end with a trailing slash?*:
 
-- `its template <name> has no trailing slash: a copy dir at its URL would loop between the web
-  server's slash redirect and ProcessWire's`;
-- `it is below <path>, whose template <name> has no trailing slash: a copy dir at that URL would
-  loop between the web server's slash redirect and ProcessWire's`;
-- `its template <name> has no trailing slash after URL segments: a copy dir at that URL would loop
-  between the web server's slash redirect and ProcessWire's`.
+- `its template <name> has no trailing slash: a copy dir at its URL would loop between the web server's slash redirect and ProcessWire's`;
+- `it is below <path>, whose template <name> has no trailing slash: a copy dir at that URL would loop between the web server's slash redirect and ProcessWire's`;
+- `its template <name> has no trailing slash after URL segments: a copy dir at that URL would loop between the web server's slash redirect and ProcessWire's`.
 
 0.3.1 to 0.11.0 cached them. A copy makes a directory at the page's own URL: `/a/b` was written as
 `a/b/index.html` (on a site with LanguageSupportPageNames as `a/bindex.html` beside an empty

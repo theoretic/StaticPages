@@ -12,8 +12,11 @@ With the new settings at their defaults:
 - **Changed: a page whose template has no trailing slash, and every page below it, is no longer
   cached** (*Should page URLs end with a slash?* set to no). Nor is a render with URL segments
   whose template says no to *Should URL segments end with a trailing slash?*. *Log skipped pages*
-  says `its template <name> has no trailing slash: …`, `it is below <path>, whose template <name>
-  has no trailing slash: …` and `its template <name> has no trailing slash after URL segments: …`.
+  says one of:
+  - `its template <name> has no trailing slash: a copy dir at its URL would loop between the web server's slash redirect and ProcessWire's`
+  - `it is below <path>, whose template <name> has no trailing slash: a copy dir at that URL would loop between the web server's slash redirect and ProcessWire's`
+  - `its template <name> has no trailing slash after URL segments: a copy dir at that URL would loop between the web server's slash redirect and ProcessWire's`
+
   0.3.1 to 0.11.0 cached them, and once the page's copy directory existed Apache answered its URL
   with a redirect loop: mod_dir sent `/a/b` to `/a/b/`, ProcessWire sent `/a/b/` back to `/a/b`,
   for `GET`, `HEAD`, `POST`, a query string and the login cookie alike. Copies written by older
