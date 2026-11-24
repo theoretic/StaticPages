@@ -1236,6 +1236,8 @@ function cleanup() {
 	realPaths(false);
 	$pages = $wire->pages;
 	foreach(array_reverse($fixtures) as $f) if($f->id && $pages->get($f->id)->id) $pages->delete($pages->get($f->id), true);
+	global $smokeTemplates;
+	foreach((array) $smokeTemplates as $t) if($t->id && $wire->templates->get($t->id)) $wire->templates->delete($t);
 	$sp->drain();
 	$wire->modules->configs->saveConfig('StaticPages', $configAtStart);
 	//the restored config may say the migration is pending; this process ran it on the temp root
@@ -3682,6 +3684,345 @@ foreach(array('staticBaseDir', 'staticHostKey', 'cacheNonHtml', 'rootFiles') as 
 $sp->set('staticFile', 'index.html');
 sessionConfig($sessionAtStart[0], $sessionAtStart[1], $sessionAtStart[2]);
 check('generator block: $config->httpHosts and the settings as before', $config->httpHosts === $hostsAtStart[1] && $h->apacheBlock() === $gOf(array()) && !file_exists("$tmpRoot/sp-gen-file") && !file_exists("$tmpRoot/sp-gen-dir"));
+
+////  a page without a trailing slash, and every page below it, is not cached (0.12.0)
+
+//its copy dir sits at the page's own URL: mod_dir answers /x with a 301 to /x/, ProcessWire 301s
+//back, a loop. Not written, nor any page below it [decided by user, Q52]. Two templates: $tpl
+//(slashUrls 1) and sp-smoke-noslash-<pid> (slashUrls 0, $tpl's fieldgroup), made here, deleted at
+//the end of the block and by cleanup(). The sandbox has LanguageSupportPageNames: the path of a
+//no-slash page is <P>/n/b, which 0.11.0 wrote as <P>/n/bindex.html beside an empty <P>/n/b/
+$nsTpl = $wire->wire(new Template());
+$nsTpl->name = 'sp-smoke-noslash-' . getmypid();
+$nsTpl->fieldgroup = $tpl->fieldgroup;
+$nsTpl->slashUrls = 0;
+$wire->templates->save($nsTpl);
+$smokeTemplates = array($nsTpl);
+$nsMk = function($parent, $name, $title, $t) use ($pages, &$fixtures) {
+	$p = new Page();
+	$p->template = $t;
+	$p->parent = $parent;
+	$p->name = $name;
+	$p->title = $title;
+	$pages->save($p);
+	$fixtures[] = $p;
+	return $p;
+};
+$Nn = $nsMk($P, 'n', 'N', $tpl);
+$Nb = $nsMk($Nn, 'b', 'Nb', $nsTpl);
+$Nc = $nsMk($Nb, 'c', 'Nc', $tpl);
+$Nd = $nsMk($Nc, 'd', 'Nd', $tpl);
+$Ns = $nsMk($Nn, 's', 'Ns', $tpl);
+$Nt = $nsMk($Ns, 't', 'Nt', $tpl);
+$sp->drain();
+$sp->index()->clearRows();
+$nsRoot = "$tmpRoot$Pdir/n";
+$nsReset = function() use ($sp, $nsRoot, $robots, $tmpRoot) {
+	$sp->index()->clearRows();
+	rrmdir($nsRoot);
+	@rmdir(dirname($nsRoot));
+	@unlink($robots);
+	@unlink("$tmpRoot/sitemap.xml");
+	clearstatcache();
+};
+$nsReset();
+$nsBlocks = fn() => array($gOf(array()), $gOf(array('staticBaseDir' => $bRel)), $gOf(array('staticBaseDir' => $bRel, 'staticHostKey' => 1)));
+$nsBlocksBefore = $nsBlocks();
+foreach(array('staticBaseDir', 'staticHostKey', 'cacheNonHtml', 'rootFiles') as $k) $sp->remove($k);
+$sp->set('staticFile', 'index.html');
+$nsRows = fn() => array_values($sp->index()->indexedFiles(null));
+$nsFiles0 = files($tmpRoot);
+
+$log0 = logText($tmp);
+publish($sp, $Nb);
+$nsSeen =array('path' => $pages->get($Nb->id)->path, 'files' => files($tmpRoot) === $nsFiles0, 'rows' => $nsRows(), 'log' => strpos($since($log0), "skip $Pdir/n/b: ") !== false && strpos($since($log0), 'has no trailing slash') !== false && strpos($since($log0), $nsTpl->name) !== false);
+check('no-slash page <P>/n/b: nothing written (no <P>/n/bindex.html, no <P>/n/b/), no index row, skip logged with has no trailing slash and the template name', $nsSeen === array('path' => "$Pdir/n/b", 'files' => true, 'rows' => array(), 'log' => true), json_encode($nsSeen) . ' ' . files($nsRoot));
+$nsReset();
+$log0 = logText($tmp);
+$wire->input->setUrlSegment(1, 'feed');
+publish($sp, $Nb);
+$wire->input->setUrlSegment(1, null);
+check('...its URL segment render: nothing written, no row, skip logged', files($tmpRoot) === $nsFiles0 && !count($nsRows()) && strpos($since($log0), "skip $Pdir/n/b: ") !== false && strpos($since($log0), 'has no trailing slash') !== false, files($nsRoot));
+$nsReset();
+$contentTypesAtStart[$nsTpl->id] = array($nsTpl, $nsTpl->contentType);
+$sp->set('cacheNonHtml', 1);
+$nsTpl->contentType = 'xml';
+$log0 = logText($tmp);
+publish($sp, $Nb, array(), '<urlset></urlset>');
+check('...its xml render (switch on): no <P>/n/bindex.xml, no dir, no row, skip logged', files($tmpRoot) === $nsFiles0 && !count($nsRows()) && strpos($since($log0), "skip $Pdir/n/b: ") !== false && strpos($since($log0), 'has no trailing slash') !== false, files($nsRoot));
+$nsTpl->contentType = $contentTypesAtStart[$nsTpl->id][1];
+$sp->remove('cacheNonHtml');
+$nsReset();
+$wire->pages->uncacheAll();
+$wire->wire('page', $pages->get($Nb->id));
+$sp->queue()->startGen();
+$nsReturn = $sp->cachePage(new HookEvent(array('object' => $wire->page, 'method' => 'render', 'return' => '<html><body>x</body></html>')));
+check('...a direct cachePage() call returns null, writes nothing', $nsReturn === null && files($tmpRoot) === $nsFiles0, files($nsRoot));
+$nsReset();
+
+//below it, at any depth
+$log0 = logText($tmp);
+publish($sp, $Nc);
+$nsLogC = $since($log0);
+$log0 = logText($tmp);
+publish($sp, $Nd);
+$nsLogD = $since($log0);
+$nsBelow = fn($log, $path) => strpos($log, "skip $path: ") !== false && strpos($log, 'is below') !== false && strpos($log, "$Pdir/n/b,") !== false;
+check('a slash child <P>/n/b/c/ and grandchild <P>/n/b/c/d/ of the no-slash page: nothing written, no row, skip logged with is below and <P>/n/b', files($tmpRoot) === $nsFiles0 && !count($nsRows()) && $nsBelow($nsLogC, "$Pdir/n/b/c/") && $nsBelow($nsLogD, "$Pdir/n/b/c/d/"), files($nsRoot) . ' ' . $nsLogC . $nsLogD);
+$nsReset();
+
+//a slash page with no no-slash ancestor, its child, its URL segment render: as before
+publish($sp, $Ns);
+publish($sp, $Nt);
+$wire->input->setUrlSegment(1, 'feed');
+publish($sp, $Ns);
+$wire->input->setUrlSegment(1, null);
+$nsWant = array("$Pdir/n/s/feed/index.html", "$Pdir/n/s/index.html", "$Pdir/n/s/t/index.html");
+$nsGot = $nsRows();
+sort($nsGot);
+check('a slash page <P>/n/s/, its child and its URL segment render beside the no-slash page: written and indexed as before', $nsGot === $nsWant && files($nsRoot) === '/s/ /s/feed/ /s/feed/index.html /s/index.html /s/t/ /s/t/index.html', files($nsRoot) . ' ' . json_encode($nsGot));
+$nsReset();
+
+//URL segments without a trailing slash (slashUrlSegments -1): the same loop, skipped [decided by
+//user, Q54 (a)]; 1 as before. $tpl changed in memory only
+$nsSeg = $tpl->slashUrlSegments;
+$tpl->slashUrlSegments = -1;
+$log0 = logText($tmp);
+$wire->input->setUrlSegment(1, 'feed');
+publish($sp, $Ns);
+$nsSegLog = $since($log0);
+$nsSegFiles = files($tmpRoot);
+$tpl->slashUrlSegments = 1;
+publish($sp, $Ns);
+$wire->input->setUrlSegment(1, null);
+$tpl->slashUrlSegments = $nsSeg;
+check('slashUrlSegments -1: a URL segment render of <P>/n/s/ writes nothing, skip logged; with 1 it writes <P>/n/s/feed/index.html', $nsSegFiles === $nsFiles0 && strpos($nsSegLog, "skip $Pdir/n/s/: ") !== false && strpos($nsSegLog, 'has no trailing slash after URL segments') !== false && $nsRows() === array("$Pdir/n/s/feed/index.html") && $tpl->slashUrlSegments === $nsSeg, $nsSegFiles . ' ' . $nsSegLog);
+$nsReset();
+
+//the home page never counts as no-slash, as itself or as an ancestor [decided by user, Q57 (a)];
+//its template changed in memory only
+$nsHomeSlash = $homeTpl->slashUrls;
+$homeTpl->slashUrls = 0;
+publish($sp, $home);
+publish($sp, $Ns);
+$homeTpl->slashUrls = $nsHomeSlash;
+$nsGot = $nsRows();
+sort($nsGot);
+check('home template with slashUrls 0: /index.html and <P>/n/s/index.html still written', $nsGot === array('/index.html', "$Pdir/n/s/index.html") && is_file("$tmpRoot/index.html") && $homeTpl->slashUrls === $nsHomeSlash, json_encode($nsGot));
+@unlink("$tmpRoot/index.html");
+$nsReset();
+
+//root file copies are written as before, for a no-slash page (its path with its slash, as core
+//gives it without LanguageSupportPageNames) and for a page below one [decided by user, Q55 (a)]
+$sp->set('cacheNonHtml', 1);
+$nsTpl->contentType = 'xml';
+$nsPathHook = $wire->addHookAfter('Page::path', function($e) use ($Nb) {
+	if($e->object->id == $Nb->id) $e->return = rtrim($e->return, '/') . '/';
+});
+$sp->set('rootFiles', "sitemap.xml $Pdir/n/b/");
+publish($sp, $Nb, array(), '<urlset></urlset>');
+$wire->removeHook($nsPathHook);
+$nsTpl->contentType = $contentTypesAtStart[$nsTpl->id][1];
+$nsSeen = array('sitemap' => (string) @file_get_contents("$tmpRoot/sitemap.xml"), 'dir' => is_dir("$nsRoot/b"), 'rows' => $nsRows());
+$sp->index()->clearRows();
+@unlink("$tmpRoot/sitemap.xml");
+$tpl->contentType = 'txt';
+$sp->set('rootFiles', "robots.txt $Pdir/n/b/c/");
+publish($sp, $Nc, array(), "User-agent: *\n");
+$tpl->contentType = $tplType;
+$nsSeen['robots'] = (string) @file_get_contents($robots);
+$nsSeen['dirC'] = is_dir("$nsRoot/b/c");
+$nsSeen['rowsC'] = $nsRows();
+$sp->remove('rootFiles');
+$sp->remove('cacheNonHtml');
+check('root files: the no-slash page listed as sitemap.xml (path with its slash) and its slash child listed as robots.txt are written as /sitemap.xml and /robots.txt, no dir made below <P>/n/', $nsSeen === array('sitemap' => '<urlset></urlset>', 'dir' => false, 'rows' => array('/sitemap.xml'), 'robots' => "User-agent: *\n", 'dirC' => false, 'rowsC' => array('/robots.txt')), json_encode($nsSeen));
+$nsReset();
+
+//base directory and host key: the same skips, a slash page written below <base>[/<host>]
+$nsModes = array();
+foreach(array('base' => '', 'host' => '/example.test') as $mode => $hostPath) {
+	$sp->set('staticBaseDir', $bRel);
+	if($mode === 'host') {
+		$hSet('example.test', $hList);
+		$sp->set('staticHostKey', 1);
+	}
+	$log0 = logText($tmp);
+	publish($sp, $Nb);
+	publish($sp, $Nc);
+	publish($sp, $Ns);
+	$log = $since($log0);
+	$nsModes[$mode] = array(
+		'rows' => $nsRows() === array("$hostPath$Pdir/n/s/index.html"),
+		'file' => is_file("$bAbs$hostPath$Pdir/n/s/index.html"),
+		'no b' => !file_exists("$bAbs$hostPath$Pdir/n/b") && !file_exists("$bAbs$hostPath$Pdir/n/bindex.html"),
+		'log' => strpos($log, "skip $Pdir/n/b: ") !== false && strpos($log, 'has no trailing slash') !== false && $nsBelow($log, "$Pdir/n/b/c/"),
+		);
+	$sp->remove('staticHostKey');
+	$sp->remove('staticBaseDir');
+	restoreHosts();
+	$bReset();
+	$nsReset();
+}
+if(!$siteExisted) { @rmdir("$tmpRoot/site/assets"); @rmdir("$tmpRoot/site"); }
+$nsOk = array('rows' => true, 'file' => true, 'no b' => true, 'log' => true);
+check('base directory and host key: the no-slash page and its child skipped with the same reasons, <base>[/<host>]<P>/n/s/index.html written', $nsModes === array('base' => $nsOk, 'host' => $nsOk), json_encode($nsModes));
+
+//an old copy <x><name> (0.11.0's <P>/n/bindex.html) goes by its record, by the shape of its path
+//alone, with its dir <x>/ when that is empty; HTML and typed names, switch off; a dry run deletes
+//nothing [decided by user, Q53 (a), Q58]
+$nsOld = array("$Pdir/n/bindex.html", "$Pdir/n/bindex.xml", "$Pdir/n/s/tindex.txt");
+$nsPut = function() use ($tmpRoot, $nsOld, $nsRoot, $Pdir) {
+	putFiles($tmpRoot, $nsOld);
+	@mkdir("$nsRoot/b", 0777, true);
+	@mkdir("$nsRoot/s/t", 0777, true);
+	putFiles($tmpRoot, array("$Pdir/n/zindex.html"));
+};
+$nsPut();
+recordAll($sp, $nsOld);
+$nsDry = $sp->wiper()->wipeIndexed(null, true);
+$nsDryPaths = $nsDry['paths'] ?? array();
+sort($nsDryPaths);
+check('old no-slash copies by record, dry run: <P>/n/bindex.html, bindex.xml, s/tindex.txt and the dirs b/, s/, s/t/ listed, nothing deleted, rows kept', $nsDryPaths === array("$Pdir/n/b/", "$Pdir/n/bindex.html", "$Pdir/n/bindex.xml", "$Pdir/n/s/", "$Pdir/n/s/t/", "$Pdir/n/s/tindex.txt") && files($nsRoot) === '/b/ /bindex.html /bindex.xml /s/ /s/t/ /s/tindex.txt /zindex.html' && count($nsRows()) === 3, json_encode($nsDry));
+$sp->wiper()->wipeIndexed(null);
+check('...a wipe by the index deletes them and the empty b/, s/t/ (s/ too, emptied), keeps the unrecorded <P>/n/zindex.html', files($nsRoot) === '/zindex.html' && !count($nsRows()), files($nsRoot));
+$nsReset();
+
+//<x>/ not empty, <x>/ listed in Non-static directories, the file's dir listed: the dir stays, or
+//nothing is deleted
+$nsPut();
+putFiles($tmpRoot, array("$Pdir/n/s/t/keep.txt"));
+$sp->set('nonStaticDirs', "site\nvendor\n{$P->name}/n/b");
+recordAll($sp, $nsOld);
+$sp->wiper()->wipeIndexed(null);
+$nsSeen = array('protectedDir' => files($nsRoot));
+$nsReset();
+$nsPut();
+$sp->set('nonStaticDirs', "site\nvendor\n{$P->name}/n");
+recordAll($sp, $nsOld);
+$sp->wiper()->wipeIndexed(null);
+$nsSeen['protectedFile'] = files($nsRoot);
+$sp->set('nonStaticDirs', "site\nvendor");
+check('...<x>/ holding a file or listed in Non-static directories stays while the copy goes; a copy in a listed dir stays', $nsSeen === array('protectedDir' => '/b/ /s/ /s/t/ /s/t/keep.txt /zindex.html', 'protectedFile' => '/b/ /bindex.html /bindex.xml /s/ /s/t/ /s/tindex.txt /zindex.html'), json_encode($nsSeen));
+$nsReset();
+
+//<x>/ a link out of the root: the copy goes, the link and what it leads to stay
+$nsOut = "$tmp/ns-outside";
+@mkdir($nsOut, 0777, true);
+putFiles($tmpRoot, array("$Pdir/n/bindex.html"));
+$nsLinked = @symlink($nsOut, "$nsRoot/b");
+if(!$nsLinked && PHP_OS_FAMILY === 'Windows') {
+	@exec('cmd /c mklink /J ' . escapeshellarg(str_replace('/', '\\', "$nsRoot/b")) . ' ' . escapeshellarg(str_replace('/', '\\', $nsOut)) . ' 2>NUL', $o, $code);
+	clearstatcache();
+	$nsLinked = is_dir("$nsRoot/b") && realpath("$nsRoot/b") !== false && stripos(str_replace('\\', '/', realpath("$nsRoot/b")), str_replace('\\', '/', realpath($nsOut))) === 0;
+}
+if($nsLinked) {
+	recordAll($sp, array("$Pdir/n/bindex.html"));
+	$sp->wiper()->wipeIndexed(null);
+	clearstatcache();
+	check('...<x>/ a link leading out of the root: the copy goes, the link and its target stay', !is_file("$nsRoot/bindex.html") && file_exists("$nsRoot/b") && is_dir($nsOut), files($nsRoot));
+	if(!@rmdir("$nsRoot/b")) @unlink("$nsRoot/b");
+} else {
+	echo "skip an old no-slash copy beside a link: this platform made neither a symlink nor a junction\n";
+}
+@rmdir($nsOut);
+$nsReset();
+
+//by a save of a page the row depends on, and by the manifest (no index tables)
+$nsPut();
+foreach($nsOld as $x) $sp->index()->recordStaticFile($x, $Nn->id, array("p:{$Nn->id}"));
+$nsSave = $pages->get($Nn->id);
+$nsSave->title = 'N2';
+$pages->save($nsSave);
+$sp->drain();
+$nsSeen = array('save' => files($nsRoot));
+$nsReset();
+$nsPut();
+$manifest = $sp->manifestPath();
+$manifestBefore = is_file($manifest) ? file_get_contents($manifest) : null;
+file_put_contents($manifest, implode("\n", $nsOld) . "\n");
+$sp->wiper()->wipeCachesManifest();
+$nsSeen['manifest'] = files($nsRoot);
+if($manifestBefore !== null) file_put_contents($manifest, $manifestBefore);
+else @unlink($manifest);
+check('...a save of the page they depend on deletes them with b/ and s/t/; so does wipeCachesManifest() for manifest lines naming them', $nsSeen === array('save' => '/zindex.html', 'manifest' => '/zindex.html'), json_encode($nsSeen));
+$nsReset();
+
+//the rows of the deletes above: a recorded hand file named like a static copy, or other paths
+//named <x><something>, are not touched beyond the shape
+putFiles($tmpRoot, array("$Pdir/n/b.html", "$Pdir/n/bindex.php", "$Pdir/n/index.html.bak"));
+recordAll($sp, array("$Pdir/n/b.html", "$Pdir/n/bindex.php", "$Pdir/n/index.html.bak"));
+$sp->wiper()->wipeIndexed(null);
+check('...recorded b.html, bindex.php, index.html.bak (not <x><name>) are not deleted', files($nsRoot) === '/b.html /bindex.php /index.html.bak', files($nsRoot));
+$nsReset();
+
+//Non-static directories never saved: the default list counts an old copy <x><name> as a static
+//copy where its exact path is recorded (an index row or a manifest line), so the root page dir
+//<P>/ leaves the list and the delete above reaches it; an unrecorded look-alike keeps a dir
+//protected [decided by user, Q59]
+$sp->remove('nonStaticDirs');
+$nsPdir = ltrim($Pdir, '/');
+$nsRec = array("$Pdir/n/bindex.html", "$Pdir/n/bindex.xml");
+putFiles($tmpRoot, $nsRec);
+@mkdir("$nsRoot/b", 0777, true);
+$nsSeen = array('unrecorded' => in_array($nsPdir, $sp->defaultNonStaticDirs(), true));
+recordAll($sp, $nsRec);
+$nsSeen['recorded'] = in_array($nsPdir, $sp->defaultNonStaticDirs(), true);
+putFiles($tmpRoot, array("$Pdir/n/yindex.html"));
+$nsSeen['plusLookAlike'] = in_array($nsPdir, $sp->defaultNonStaticDirs(), true);
+@unlink("$nsRoot/yindex.html");
+$sp->index()->clearRows();
+$manifest = $sp->manifestPath();
+$manifestBefore = is_file($manifest) ? file_get_contents($manifest) : null;
+file_put_contents($manifest, implode("\n", $nsRec) . "\n");
+$nsSeen['manifest'] = in_array($nsPdir, $sp->defaultNonStaticDirs(), true);
+if($manifestBefore !== null) file_put_contents($manifest, $manifestBefore);
+else @unlink($manifest);
+$sp->set('staticBaseDir', $bRel);
+recordAll($sp, $nsRec);
+$nsSeen['baseDir'] = in_array($nsPdir, $sp->defaultNonStaticDirs(), true);
+$sp->remove('staticBaseDir');
+check('default list: <P>/ holding an unrecorded <P>/n/bindex.html stays listed; recorded (row or manifest line, typed too) it leaves; an unrecorded yindex.html beside it, or a base dir set, keeps it listed', $nsSeen === array('unrecorded' => true, 'recorded' => false, 'plusLookAlike' => true, 'manifest' => false, 'baseDir' => true), json_encode($nsSeen));
+$nsWiped = $sp->wiper()->wipeIndexed(array('*'));
+clearstatcache();
+check('...list never saved: wipeIndexed() deletes the recorded <P>/n/bindex.html and bindex.xml with the empty b/ and n/, rows gone', $nsWiped['files'] === 2 && !file_exists($nsRoot) && !count($nsRows()), json_encode($nsWiped) . ' ' . files("$tmpRoot$Pdir"));
+$nsReset();
+putFiles($tmpRoot, $nsRec);
+@mkdir("$nsRoot/b", 0777, true);
+recordAll($sp, $nsRec);
+$sp->wipeCaches(true);
+clearstatcache();
+check('...list never saved: a forced wipe deletes them with the empty b/ and n/, rows gone', !file_exists($nsRoot) && !count($nsRows()), files("$tmpRoot$Pdir"));
+$nsReset();
+
+//a hand-made root dir holding only an unrecorded look-alike: listed, the file survives every wipe
+$nsHand = 'sp-hand-ns-' . getmypid();
+putFiles($tmpRoot, array("/$nsHand/fooindex.html"));
+$nsSeen = array('listed' => in_array($nsHand, $sp->defaultNonStaticDirs(), true));
+recordAll($sp, array("$Pdir/n/bindex.html"));
+$sp->wiper()->wipeIndexed(null);
+$sp->wipeCaches();
+$sp->wipeCaches(true);
+clearstatcache();
+$nsSeen['file'] = is_file("$tmpRoot/$nsHand/fooindex.html");
+$nsSeen['listedAfter'] = in_array($nsHand, $sp->defaultNonStaticDirs(), true);
+rrmdir("$tmpRoot/$nsHand");
+$sp->set('nonStaticDirs', "site\nvendor");
+check('default list: a hand-made root dir holding only an unrecorded fooindex.html stays listed, the file survives a wipe by the index, a wipe and a forced wipe', $nsSeen === array('listed' => true, 'file' => true, 'listedAfter' => true), json_encode($nsSeen));
+$nsReset();
+
+check('apacheBlock() for default, base and host settings equal before and after the renders above; the default is 0.10.0\'s', $nsBlocks() === $nsBlocksBefore && $nsBlocksBefore[0] === $block010);
+foreach(array('staticBaseDir', 'staticHostKey', 'cacheNonHtml', 'rootFiles') as $k) $sp->remove($k);
+$sp->set('staticFile', 'index.html');
+$h->using(null);
+
+foreach(array($Nt, $Ns, $Nd, $Nc, $Nb, $Nn) as $p) $pages->delete($pages->get($p->id), true);
+$sp->drain();
+$wire->templates->delete($nsTpl);
+$sp->index()->clearRows();
+$nsReset();
+$wire->pages->uncacheAll();
+$nsEnd = array('template' => !$wire->templates->get($nsTpl->name), 'pages' => !$pages->count('id=' . implode('|', array($Nn->id, $Nb->id, $Nc->id, $Nd->id, $Ns->id, $Nt->id)) . ', include=all'), 'disk' => !file_exists($nsRoot) && !file_exists($robots) && !file_exists("$tmpRoot/sitemap.xml"), 'rows' => !count($nsRows()));
+check('no-slash block: its pages and template gone, nothing left below <P>/n, no robots.txt or sitemap.xml, no row', !in_array(false, $nsEnd, true), json_encode($nsEnd));
 
 ////  .htaccess manager (0.10.0)
 

@@ -123,7 +123,14 @@ class StaticPagesWiper extends Wire {
 			//the index could have been tampered with, validating every entry before deletion
 			if( $relative === '' || strpos($relative, '..') !== false || strpos($relative, "\0") !== false ) continue;
 			$path = $root . $relative;
-			if( !in_array( basename($path), $names, true ) ){
+			$loopDir = '';
+			if( !in_array( basename($path), $names, true ) && ( $loopDir = $this->noSlashCopyDir($path) ) !== '' ){
+				//a copy of a page without a trailing slash as older versions wrote it, <x><name>
+				//beside the empty dir <x>/ its write made: deleted by its record, by the shape of
+				//its path alone, with that dir when it is empty [decided by user, Q53 (a), Q58]
+				if( $this->isProtectedPath($loopDir, $nonStaticDirs) ) $loopDir = '';
+			}
+			else if( !in_array( basename($path), $names, true ) ){
 				if( !in_array( basename($path), $rootNames, true ) ) continue;
 				if( $hostKey && $this->isHostRootCopy($relative, basename($path)) ){
 					$path = $siteRoot . $relative;
@@ -155,6 +162,7 @@ class StaticPagesWiper extends Wire {
 			$result['files']++;
 			$result['bytes'] += $size;
 			$dirs[$dirPath] = true;
+			if( $loopDir !== '' && is_dir($loopDir) && !is_link($loopDir) && $this->insideRoot($loopDir) ) $dirs[$loopDir] = true;
 		}
 
 		if( $dryRun ){
@@ -170,6 +178,23 @@ class StaticPagesWiper extends Wire {
 		$result['dirs'] = $this->pruneDirs( array_keys($dirs), $this->sp->normalizePath($root) );
 
 		return $result;
+	}
+
+	public function noSlashCopyDir($path){
+		//$path is <dir>/<x><name>, x not empty, name one of knownFileNames() (HTML and the other
+		//types, switch on or off): a page without a trailing slash, its path /a/x, made the dir
+		//<dir>/<x>/ and wrote <dir>/<x><name> beside it. Answers <dir>/<x>, else ''. The shape
+		//alone, page_id is not read [decided by user, Q58]
+		$basename = basename($path);
+		foreach( $this->sp->knownFileNames() as $name ){
+			$name = (string) $name;
+			if( $name === '' || strlen($basename) <= strlen($name) ) continue;
+			if( substr($basename, -strlen($name)) !== $name ) continue;
+			$x = substr($basename, 0, -strlen($name));
+			//x is never .. (deleteStaticFiles() refuses a record holding it); . names the dir itself
+			return $x === '.' ? dirname($path) : dirname($path) . DIRECTORY_SEPARATOR . $x;
+		}
+		return '';
 	}
 
 	public function describeWipe($result){
@@ -532,13 +557,17 @@ class StaticPagesWiper extends Wire {
 		//are known to be there without a query: computing the default never creates tables
 		//[decided by user, Q49 B (a), C (a)]
 		$byIndex = $this->sp->staticBaseDir() === '' && $this->sp->index()->tablesKnownReady();
+		//on the same terms an old copy of a page without a trailing slash, <x><name>, counts as a
+		//static copy where the module recorded its exact path (holdsOnlyStaticCopies())
+		//[decided by user, Q59]
+		$records = $byIndex ? $this->manifestLineSet() : null;
 		$dirs = array();
 		try {
 			foreach( new \DirectoryIterator($root) as $fileInfo ){
 				if( $fileInfo->isDot() || !$fileInfo->isDir() ) continue;
 				$name = $fileInfo->getFilename();
-				if( $this->isStaticCopyDir($name, $pageDirs) ) continue;
-				if( $byIndex && $this->isRecordedCopyDir($name) ) continue;
+				if( $this->isStaticCopyDir($name, $pageDirs, $records) ) continue;
+				if( $byIndex && $this->isRecordedCopyDir($name, $records) ) continue;
 				$dirs[] = $name;
 			}
 		}
@@ -573,16 +602,17 @@ class StaticPagesWiper extends Wire {
 		return $names;
 	}
 
-	public function isStaticCopyDir($name, array $pageDirs){
+	public function isStaticCopyDir($name, array $pageDirs, ?array $records = null){
 		//a root dir named like a page is that page's static copy dir, unless it holds
 		//anything besides static copies: a page named like a code dir (an /api/ page next
 		//to the api/ endpoints) must leave that dir protected. Static copies: the names of
-		//scanFileNames() and their temporary names, the HTML ones alone while the switch is off
+		//scanFileNames() and their temporary names, the HTML ones alone while the switch is off.
+		//$records: see holdsOnlyStaticCopies()
 		if( !isset($pageDirs[$name]) ) return false;
-		return $this->holdsOnlyStaticCopies($name);
+		return $this->holdsOnlyStaticCopies($name, $records);
 	}
 
-	public function isRecordedCopyDir($name){
+	public function isRecordedCopyDir($name, ?array $records = null){
 		//a root dir no page is named like that holds nothing but static copies (the content test
 		//of isStaticCopyDir()) and under which the index records a file: the dir the module made
 		//for the home page with a URL segment. A dir nothing was recorded under stays protected
@@ -592,11 +622,15 @@ class StaticPagesWiper extends Wire {
 		//files [decided by user, Q49 F (a)]
 		$name = (string) $name;
 		if( $name === '' ) return false;
-		if( !$this->holdsOnlyStaticCopies($name) ) return false;
+		if( !$this->holdsOnlyStaticCopies($name, $records) ) return false;
 		return $this->sp->index()->hasFileBelow( '/' . $name . '/' );
 	}
 
-	public function holdsOnlyStaticCopies($name){
+	public function holdsOnlyStaticCopies($name, ?array $records = null){
+		//$records null: a file counts as a static copy by its name alone. An array (the manifest's
+		//lines as keys, manifestLineSet()), for the default list only: a file named <x><name>
+		//(noSlashCopyDir()) counts as well where its exact path, root relative, is an index row or
+		//one of those lines; an unrecorded look-alike keeps the dir protected [decided by user, Q59]
 		$names = $this->sp->scanFileNames();
 		if( !count($names) ) return false;
 		$dir = $this->sp->rootPath() . DIRECTORY_SEPARATOR . $name;
@@ -613,6 +647,10 @@ class StaticPagesWiper extends Wire {
 				if( $entry->isDir() ) continue;
 				$basename = $entry->getFilename();
 				if( $this->matchesStaticName( $basename, $names, $tmpGlobs ) ) continue;
+				if( $records !== null && $this->noSlashCopyDir($basename) !== '' ){
+					$relative = '/' . $name . '/' . str_replace( DIRECTORY_SEPARATOR, '/', substr( $entry->getPathname(), strlen($dir) + 1 ) );
+					if( isset($records[$relative]) || $this->sp->index()->hasFile($relative) ) continue;
+				}
 				return false;
 			}
 		}
@@ -620,6 +658,12 @@ class StaticPagesWiper extends Wire {
 			return false;
 		}
 		return true;
+	}
+
+	public function manifestLineSet(){
+		//the manifest's lines as keys, an empty array without a manifest
+		$lines = @file( $this->sp->manifestPath(), FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
+		return is_array($lines) ? array_fill_keys( $lines, true ) : array();
 	}
 
 	public function tmpFileGlobs(array $names){

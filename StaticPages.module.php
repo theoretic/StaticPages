@@ -861,6 +861,13 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 			$dir = $base . $hostDir . '/';
 			$path = $dir . $rootFile;
 		}
+		else {
+			$reason = $this->noSlashSkip( $page, $urlSegmentStr );
+			if( $reason !== '' ){
+				$this->logSkip( $page, $reason );
+				return;
+			}
+		}
 
 		//xml and txt, before anything is created on disk: the root level stays HTML only, the
 		//manifest knows HTML only, and a file nothing recorded (a hand-made one) is never replaced
@@ -1307,6 +1314,25 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( count($input->get) > 0 || count($input->post) > 0 ) return false;
 		if( $this->publisher()->cookieSkip() !== '' ) return false;
 		return true;
+	}
+
+	private function noSlashSkip(Page $page, $urlSegmentStr){
+		//why a render of $page is not written, '' when nothing stops it. A page whose template has
+		//no trailing slash (slashUrls 0, as core reads it; the home page never) and every page below
+		//one: the copy dir of either is a directory at the page's own URL, which mod_dir answers
+		//with a 301 to the slash form and ProcessWire with a 301 back, a loop [decided by user, Q52,
+		//Q57 (a)]. A render with URL segments whose template wants them without a trailing slash
+		//(slashUrlSegments -1) the same [decided by user, Q54 (a)]. Root file copies are not asked
+		//(Q55 a)
+		if( $page->id > 1 && (int) $page->template->slashUrls === 0 )
+			return "its template {$page->template->name} has no trailing slash: a copy dir at its URL would loop between the web server's slash redirect and ProcessWire's";
+		foreach( $page->parents() as $parent ){
+			if( $parent->id > 1 && (int) $parent->template->slashUrls === 0 )
+				return "it is below {$parent->path}, whose template {$parent->template->name} has no trailing slash: a copy dir at that URL would loop between the web server's slash redirect and ProcessWire's";
+		}
+		if( (string) $urlSegmentStr !== '' && (int) $page->template->slashUrlSegments === -1 )
+			return "its template {$page->template->name} has no trailing slash after URL segments: a copy dir at that URL would loop between the web server's slash redirect and ProcessWire's";
+		return '';
 	}
 
 	/** #pw-internal */
