@@ -258,7 +258,49 @@ class StaticPagesIndex extends Wire {
 			foreach( $names as $name ) if( !$this->fieldWhats($name, $whats, $foreign) ) return array('any');
 		}
 
+		//the order core adds to a find naming one parent and no sort
+		$names = $this->parentSortNames($selectors);
+		if( $names === null ) return array('any');
+		foreach( $names as $name ) if( !$this->fieldWhats($name, $whats, $foreign) ) return array('any');
+
 		return $this->budgetTags( $scopes, array_keys($whats), array_keys($foreign) );
+	}
+
+	public function parentSortNames(Selectors $selectors){
+		//the fields core orders a find by when it has one parent or parent_id selector and no
+		//sort: that parent's sortfield, its template's first (PageFinder.php:584-585, 645-657),
+		//whatever the operator. Of several values (parent=1|2) core takes one existing page:
+		//the sortfields of every existing one. A value naming no page gives nothing, as core;
+		//one neither an id nor a path is not understood: null
+		$parents = array();
+		foreach( $selectors as $selector ){
+			if( !$selector instanceof Selector ) return null;
+			$fields = $selector->fields();
+			if( count($fields) !== 1 ) continue;
+			$field = (string) reset($fields);
+			if( $field === 'sort' ) return array();
+			if( $field === 'parent' || $field === 'parent_id' ) $parents[] = $selector;
+		}
+		if( count($parents) !== 1 ) return array();
+
+		$names = array();
+		foreach( $parents[0]->values() as $value ){
+			if( !is_scalar($value) ) return null;
+			$value = trim( (string) $value );
+			if( $value === '' ) continue;
+			if( !ctype_digit($value) && $value[0] !== '/' ) return null;
+			$id = $this->resolvePageId($value);
+			if( !$id ) continue;
+			$parent = $this->wire()->pages->get($id);
+			if( !$parent instanceof Page || !$parent->id ) continue;
+			$sort = $parent->template ? (string) $parent->template->sortfield : '';
+			if( $sort === '' ) $sort = (string) $parent->sortfield;
+			$sort = trim($sort);
+			if( $sort !== '' && $sort[0] === '-' ) $sort = substr( $sort, 1 );
+			if( $sort === '' || $sort === 'random' ) continue;
+			$names[$sort] = true;
+		}
+		return array_keys($names);
 	}
 
 	public function derivedScopes(Selectors $selectors){

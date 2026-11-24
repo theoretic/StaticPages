@@ -190,6 +190,11 @@ How a find is read:
   `sort`, `sortfield`, `created`, `modified`, `published`, `created_users_id`,
   `modified_users_id`, `has_parent`, `path`, `url`, `num_children` (`numChildren`, `createdUser`,
   `modifiedUser`, `page.sort` and the like as the column).
+- A find with one `parent` or `parent_id` selector, whatever its operator, and no `sort`:
+  ProcessWire orders it by that parent's sortfield (its template's, else its own), so the find
+  also gives the what of that sortfield, `n:sort` for the default manual order. Of several values
+  (`parent=7|9`) every existing one's; a value naming no page gives nothing; a value neither an id
+  nor a path makes the find `any`. `children()` names its sort itself.
 - A subfield of a Page or PageTable field, besides the field's own `f:<id>`: `id` and `count`
   give nothing more; a field gives `x:f:<id>`; `name`, `sort`, `created`, `published` give
   `x:n:<name>`; `status`, `template`, `parent` give `x:s`; anything else, `modified` included,
@@ -224,7 +229,7 @@ date field `date`; `author` a Page field):
 | `featured!=1`, `featured=''` | `*/f:<featured>`, `*/s` |
 | `template=post, sort=-date, limit=10` | `t:P/f:<date>`, `t:P/s` |
 | `template=post, author.name=Bob` | `t:P/f:<author>`, `t:P/s`, `x:n:name` |
-| `parent=7, children.count>0` | `par:7/s`, `x:s` |
+| `parent=7, children.count>0` | `par:7/s`, `par:7/n:sort` (7 in manual order), `x:s` |
 | `sort=-modified, limit=5` | `*/m`, `*/s` |
 | `title%=foo, body=[x=1]` | `any` |
 | `title\|body%=foo` | `*/f:<title>`, `*/f:<body>`, `*/s` |

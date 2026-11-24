@@ -4252,6 +4252,23 @@ $nrDiff = function(array $rows, $narrow) use ($nrTags) {
 	return $bad;
 };
 
+//the whats of the order core adds to a find naming one parent and no sort (PageFinder.php:645-657):
+//of each existing page of $ids, its template's sortfield, else its own, without a leading -
+$nrSortWhats = function(array $ids) use ($pages, $ix) {
+	$whats = array();
+	foreach($ids as $id) {
+		$p = $pages->get((int) $id);
+		if(!$p->id) continue;
+		$s = (string) $p->template->sortfield;
+		if($s === '') $s = (string) $p->sortfield;
+		$s = ltrim($s, '-');
+		if($s !== '' && $s !== 'random') $whats[$ix->whatTag($s)] = true;
+	}
+	return array_keys($whats);
+};
+$PS = $nrSortWhats(array($P->id));
+$PSt = fn($scope) => array_map(fn($w) => "$scope/$w", $PS);
+
 //off: the tags 0.12.0 records, the scope alone
 $nrOff = array(
 	array("parent=$Pdir/", 1, array("par:{$P->id}")),
@@ -4301,7 +4318,7 @@ if(count($nrTexts) >= 2 && $nrPageField) {
 		array("$a=''", 1, array("*/$A_", '*/s')),
 		array("template={$tpl->name}, sort=-$b, limit=10", 1, array("$T/$B_", "$T/s")),
 		array("template={$tpl->name}, $pf.name=Bob", 1, array("$T/$PF", "$T/s", 'x:n:name')),
-		array("parent={$P->id}, children.count>0", 1, array("$par/s", 'x:s')),
+		array("parent={$P->id}, children.count>0", 1, array_merge(array("$par/s", 'x:s'), $PSt($par))),
 		array('sort=-modified, limit=5', 1, array('*/m', '*/s')),
 		array("$a%=foo, $b=[x=1]", 1, array('any')),
 		//an OR-field, a negated selector, sort=random, a specific id, a sub-selector, an
@@ -4341,15 +4358,39 @@ if(count($nrTexts) >= 2 && $nrPageField) {
 	$bad = $nrDiff($nrOn, 1);
 	check('narrowFinds on: a table of ' . count($nrOn) . ' selectors gives the expected <scope>/<what>, x:<what>, nothing or any', !count($bad), json_encode($bad));
 
-	//the 64 tag budget: 40 parents times 2 whats collapse to *; 63 fields and s under one parent
-	//fit; 64 fields and s stay over under *: any
+	//audit 1, B1.1: one parent or parent_id selector and no sort: core orders by that parent's
+	//sortfield, whatever the operator; of several values, every existing page's (Q68)
+	$PA = array_values(array_unique(array_merge($PS, $nrSortWhats(array($A->id)))));
+	$parA = "par:{$A->id}";
+	$nrPs = array(
+		array("parent={$P->id}, limit=1", 1, array_merge(array("$par/s"), $PSt($par))),
+		array("parent_id={$P->id}", 1, array_merge(array("$par/s"), $PSt($par))),
+		array("parent=$Pdir/, limit=1", 1, array_merge(array("$par/s"), $PSt($par))),
+		array("parent={$P->id}, sort=$a", 1, array("$par/s", "$par/$A_")),
+		array("parent={$P->id}, sort=random", 1, array("$par/s")),
+		array("parent!={$P->id}, template={$tpl->name}", 1, array_merge(array("$T/s"), $PSt($T))),
+		array("parent={$P->id}|{$A->id}", 1, array_merge(array("$par/s", "$parA/s"), array_map(fn($w) => "$par/$w", $PA), array_map(fn($w) => "$parA/$w", $PA))),
+		array("parent={$P->id}, parent={$A->id}", 1, array("$par/s", "$parA/s")),
+		array('parent=4294967295', 0, array('par:4294967295/s')),
+		array('parent=/sp-smoke-no-such-page/', 0, array('*/s')),
+		array('parent=sp-smoke-a-name', 0, array('any')),
+	);
+	$bad = $nrDiff($nrPs, 1);
+	$bad = array_merge($bad, $nrDiff(array(array("parent={$P->id}, limit=1", 1, array($par))), 0));
+	check('narrowFinds on: a find naming one parent and no sort records the whats of the parent\'s sortfield (' . implode(',', $PS) . '), any operator, every existing page of parent=a|b; none with sort=, two parent selectors, no such page; any for a value neither id nor path; off: the scope alone', count($PS) > 0 && !count($bad), json_encode($bad));
+
+	//the 64 tag budget: 40 parents times 2 whats and their sortfields' collapse to *; 62 fields,
+	//s and the parent's sortfield under one parent fit; 64 fields and s stay over under *: any
 	$parents = implode('|', range(1, 40));
 	$names = array();
 	foreach($wire->fields as $f) if(preg_match('/^[a-z_][a-z0-9_]*$/i', $f->name)) $names[] = $f->name;
-	$budget = array(array("parent=$parents, $a=x", 1, array('*/s', "*/$A_")));
+	$budget = array(array("parent=$parents, $a=x", 1, array_values(array_unique(array_merge(array('*/s', "*/$A_"), array_map(fn($w) => "*/$w", $nrSortWhats(range(1, 40))))))));
+	$names = array_values(array_filter($names, fn($n) => !in_array('f:' . (int) $wire->fields->get($n)->id, $PS, true)));
 	if(count($names) >= 64) {
-		$f63 = array_slice($names, 0, 63);
-		$budget[] = array("parent={$P->id}, " . implode('|', $f63) . '=x', 1, array_merge(array("$par/s"), array_map(fn($n) => "$par/f:" . (int) $wire->fields->get($n)->id, $f63)));
+		$f62 = array_slice($names, 0, 62);
+		$want = array_merge(array("$par/s"), array_map(fn($n) => "$par/f:" . (int) $wire->fields->get($n)->id, $f62), $PSt($par));
+		if(count($want) !== 64) echo 'note: the 64 tag row has ' . count($want) . " tags here\n";
+		$budget[] = array("parent={$P->id}, " . implode('|', $f62) . '=x', 1, $want);
 		$budget[] = array("parent={$P->id}, " . implode('|', array_slice($names, 0, 64)) . '=x', 1, array('any'));
 	} else {
 		echo 'skip the any budget rows: fewer than 64 fields here (' . count($names) . ")\n";
@@ -4379,12 +4420,12 @@ if(count($nrTexts) >= 2 && $nrPageField) {
 	$nrMade = array();
 	//a value of its own for every save: a save setting the value already there changes nothing
 	$nrN = 0;
-	$nrPublish = function() use ($sp, $wire, $pages, $P, $nrTpl, $a) {
+	$nrPublish = function($selector = null) use ($sp, $wire, $pages, $P, $nrTpl, $a) {
 		$sp->index()->collect(true);
 		$wire->pages->uncacheAll();
 		$Pp = $pages->get($P->id);
 		$wire->wire('page', $Pp);
-		$found = $pages->find("template={$nrTpl->name}, sort=$a, limit=1");
+		$found = $pages->find($selector ?? "template={$nrTpl->name}, sort=$a, limit=1");
 		$sp->queue()->startGen();
 		$sp->cachePage(new HookEvent(array('object' => $Pp, 'method' => 'render', 'return' => '<html><body>narrow</body></html>')));
 		$sp->index()->collect(false);
@@ -4431,6 +4472,42 @@ if(count($nrTexts) >= 2 && $nrPageField) {
 		}
 		$says = $narrow ? "keeps the file on a save of another page changing only $b, removes it on a change of $a, a new page of the template, a save of the page it loaded" : 'removes the file on each of the same four saves';
 		check('narrowFinds ' . ($narrow ? 'on' : 'off') . ", $file of a render that ran template=<smoke template>, sort=$a: $says", $ok, json_encode($got));
+	}
+
+	//audit 1, B1.1, end to end: P ordered by A (its own sortfield), a render of P that ran
+	//parent=<P>, limit=1; a save of a child it did not load: only B keeps the file, A removes it
+	//(Narrow finds on); off, both remove it
+	if((string) $P->template->sortfield === '') {
+		$psWas = (string) $pages->get($P->id)->sortfield;
+		$nrSet($P->id, 'sortfield', $a);
+		$sp->drain();
+		$rel = "$Pdir/index.html";
+		$got = array();
+		$ok = true;
+		foreach(array(1 => array(false, true), 0 => array(true, true)) as $narrow => $removes) {
+			$sp->set('narrowFinds', $narrow);
+			foreach(array($b, $a) as $i => $field) {
+				$found = $nrPublish("parent={$P->id}, limit=1");
+				$tags = tagsOf($sp, $rel);
+				$other = $found->count() && (int) $found->first()->id === (int) $nrQ2->id ? $nrQ1 : $nrQ2;
+				$recorded = is_file("$tmpRoot$rel") && $found->count() === 1 && ($narrow ? in_array("par:{$P->id}/$A_", $tags, true) : in_array("par:{$P->id}", $tags, true));
+				$nrSet($other->id, $field, 'ps' . ++$nrN);
+				$sp->drain();
+				$gone = !is_file("$tmpRoot$rel");
+				$got["$narrow $field"] = array('recorded' => $recorded, 'removed' => $gone);
+				if(!$recorded || $gone !== $removes[$i]) $ok = false;
+				$sp->index()->dropIndexRows(array(md5($rel)));
+				@unlink("$tmpRoot$rel");
+			}
+		}
+		$sp->remove('narrowFinds');
+		$nrSet($P->id, 'sortfield', $psWas);
+		$sp->drain();
+		$ok = $ok && (string) $pages->get($P->id)->sortfield === $psWas;
+		check("narrowFinds on: a render of P that ran parent=<P>, limit=1, P ordered by $a: a save of another child changing only $b keeps the file, changing $a removes it; off, both remove it; P's sortfield restored", $ok, json_encode($got));
+	} else {
+		echo "skip the parent sortfield run: P's template has a sortfield
+";
 	}
 
 	foreach(array_reverse(array_merge(array($nrQ1, $nrQ2), $nrMade)) as $p) $pages->delete($pages->get($p->id), true);
@@ -4532,7 +4609,7 @@ $fdRowsOn = array(
 	array("$fdName>0", 1, array("*/$FF", '*/s')),
 	array("$fdName|title=1", 1, array("*/$FF", "*/$TI", '*/s')),
 	array("template={$tpl->name}, $fdName=1", 1, array("t:{$tpl->id}/$FF", "t:{$tpl->id}/s")),
-	array("parent={$P->id}, $fdName=1", 1, array("par:{$P->id}/$FF", "par:{$P->id}/s")),
+	array("parent={$P->id}, $fdName=1", 1, array_merge(array("par:{$P->id}/$FF", "par:{$P->id}/s"), $PSt("par:{$P->id}"))),
 	array("id={$A->id}, $fdName=1", 1, array()),
 );
 $bad = $nrDiff($fdRowsOn, 1);
