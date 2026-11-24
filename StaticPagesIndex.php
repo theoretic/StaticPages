@@ -967,14 +967,19 @@ class StaticPagesIndex extends Wire {
 		$lines = @file( $manifest, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
 		if( $lines === false ) return;
 
-		//a manifest line names an HTML copy or nothing of ours: no other name is adopted from
-		//it. No valid name: the manifest stays for a later import
+		//a manifest line names an HTML copy, an old copy of a page without a trailing slash
+		//(<x><name> beside the dir <x>/, noSlashCopyDir()) or nothing of ours: no other name is
+		//adopted from it. The second kind is recorded too, the index deletes it by its record as
+		//wipeCachesManifest() would [decided by user, Q58]. No valid name: the manifest stays for
+		//a later import
 		$staticFile = $this->sp->staticFileName();
 		if( $staticFile === '' ) return;
+		$wiper = $this->sp->wiper();
 
 		$imported = true;
 		foreach( array_unique($lines) as $relative ){
-			if( basename( (string) $relative ) !== $staticFile ) continue;
+			$relative = (string) $relative;
+			if( basename($relative) !== $staticFile && $wiper->noSlashCopyDir($relative) === '' ) continue;
 			if( !$this->recordStaticFile( $relative, 0, array('*') ) ) $imported = false;
 		}
 

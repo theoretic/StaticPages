@@ -4147,6 +4147,29 @@ else @unlink($manifest);
 check('...a save of the page they depend on deletes them with b/ and s/t/; so does wipeCachesManifest() for manifest lines naming them', $nsSeen === array('save' => '/zindex.html', 'manifest' => '/zindex.html'), json_encode($nsSeen));
 $nsReset();
 
+//manifest lines naming them, imported when the tables are made (ensureTables() calls
+//importManifest()): recorded with the tag *, so a wipe and a forced wipe delete them by record
+//[decided by user, Q58]
+$manifest = $sp->manifestPath();
+$manifestBefore = is_file($manifest) ? file_get_contents($manifest) : null;
+$nsSeen = array();
+foreach(array('wipe' => false, 'forced' => true) as $nsKey => $nsForce) {
+	$nsPut();
+	file_put_contents($manifest, implode("\n", $nsOld) . "\n$Pdir/n/b.html\n");
+	$sp->index()->importManifest();
+	$nsTags = array_map(fn($x) => tagsOf($sp, $x), $nsOld);
+	$nsSeen[$nsKey] = array('imported' => $nsTags === array(array('*'), array('*'), array('*')) && count($nsRows()) === 3 && !is_file($manifest));
+	$sp->wipeCaches($nsForce);
+	clearstatcache();
+	$nsSeen[$nsKey]['after'] = files($nsRoot);
+	$nsSeen[$nsKey]['rows'] = count($nsRows());
+	$nsReset();
+}
+if($manifestBefore !== null) file_put_contents($manifest, $manifestBefore);
+else @unlink($manifest);
+$nsGone = array('imported' => true, 'after' => '/zindex.html', 'rows' => 0);
+check('...manifest lines naming them: importManifest() records the three (tag *, not the b.html line) and drops the manifest; wipeCaches() and wipeCaches(true) delete them with b/ and s/t/', $nsSeen === array('wipe' => $nsGone, 'forced' => $nsGone), json_encode($nsSeen));
+
 //the rows of the deletes above: a recorded hand file named like a static copy, or other paths
 //named <x><something>, are not touched beyond the shape
 putFiles($tmpRoot, array("$Pdir/n/b.html", "$Pdir/n/bindex.php", "$Pdir/n/index.html.bak"));
