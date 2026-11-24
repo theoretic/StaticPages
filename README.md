@@ -4,7 +4,7 @@ Lazy static pages generator for Processwire CMS.
 
 ## How does it work
 
-Normally Processwire renders any page any time it's requested. StaticPages module allows Processwire to render certain pages only once. When it happens, StaticPages creates a static file located corresponding to the URL which has been requested: `index.html`, or, with *Cache XML and plain text responses* on, `index.xml` or `index.txt` for a page answering XML or plain text (see *XML and plain text*). The following requeststs to this URL will not be handled by Processwire. The previously created file will be returned by the server.
+Normally Processwire renders any page any time it's requested. StaticPages module allows Processwire to render certain pages only once. When it happens, StaticPages creates a static file located corresponding to the URL which has been requested, in the web root or below *Static base directory* (see *Static base directory and static files per host*): `index.html`, or, with *Cache XML and plain text responses* on, `index.xml` or `index.txt` for a page answering XML or plain text (see *XML and plain text*). The following requeststs to this URL will not be handled by Processwire. The previously created file will be returned by the server.
 
 Module reacts to the following events:
 
@@ -259,6 +259,183 @@ RewriteCond %{REQUEST_FILENAME} !-f
 RewriteRule ^robots\.txt$ index.php?it=/robots/ [L,QSA]
 ```
 
+## Static base directory and static files per host
+
+Without a base directory a page's copy lies where its URL points, in the web root: `/about/` is
+`about/index.html`, next to `site/`, `wire/` and the site's own directories. *Static base
+directory* (`staticBaseDir`, empty by default) puts every copy below one directory instead,
+`site/assets/static` say: `/about/` is then `site/assets/static/about/index.html`, the home page
+`site/assets/static/index.html`, a file of *Replace these root files with pages*
+`site/assets/static/robots.txt`. Choose it when the web root should hold nothing the module
+writes (a web root under git or rebuilt by a deploy, page names that collide with directories of
+the web root), and for *Static files per host*, which needs it.
+
+The value is a path relative to the web root: plain names (letters, digits, `.`, `_`, `-`, no
+leading dot) separated by `/`, no `.` or `..`, no absolute path. It has to lie below the web root,
+also through links, and may not be the web root itself. A directory the stock `.htaccess` denies
+to visitors is refused too, as every copy in it would answer visitors 403 where ProcessWire serves
+the page: `site/assets/cache`, `logs`, `backups`, `sessions`, `config`, `database`, `install`
+and `tmp` and anything below them, a directory below `site/assets` whose name starts with `-`,
+`site/install`, `site/classes`, `site/templates`, `site/templates-admin`, `wire/templates-admin`
+and `site-default`, and the names the stock rules block, such as `htaccess.*`, `*.php` or `*.bak`
+below `site/` or `wire/` and `*.inc` below `wire/core/`. `site-<name>` counts as `site`, and
+letter case does not count. `site/assets/static` works. A refused value is named in a warning on
+the save and in the `static-pages` log, and the copies stay in the web root.
+
+**The marker.** The module writes into the directory and deletes from it only while it holds the
+marker file `.staticpages`. The settings save creates a missing directory with the marker, or marks
+an empty one, *Dry run* checked or not; a render creates a still missing one the same way. A
+directory that already holds files and no marker is never marked: nothing is written into it, no
+wipe deletes anything from it, and the save warns. Name a new or an empty directory, and leave the
+marker where it is.
+
+**Changing it.** The settings save that sets, changes or clears the directory deletes every copy
+under the old place, *Dry run* checked or not; the new place fills as pages are requested. With
+*Force static pages deletion on module save* checked on that same save, the scan walks the old
+layout, the one the request loaded, not the new one. The old directory and its `.staticpages`
+stay where they are; uninstalling leaves the base directory and its marker as well. Remove them by
+hand. Under a tracked path (*Track changes in these paths*) covering them, a marker left behind
+counts as a changed file on the first check after that save: one more wipe of everything, then
+nothing.
+
+Below the base directory:
+
+- *Non-static directories* does not apply. The name check, the marker and the check that a path
+  lies inside the base directory do.
+- a full scan walks the base directory's subdirectories. Its top level counts as the root level: the
+  home page's `index.html` there, no `index.xml` or `index.txt`.
+- tracked paths skip everything below it while it holds the marker: copies, root file copies and the
+  marker are no source files. A directory named by mistake, without the marker, stays tracked like
+  any other.
+
+**Root files.** With a base directory the copy of a file of *Replace these root files with pages*
+is written into it, and the web root's own `robots.txt` is never taken over, renamed or deleted,
+nor served while the line is listed and the box is checked: the block answers `/robots.txt` from
+the copy, and any other request for it from the page. The save that switches to a base directory
+gives the web root's dot backups back (`.robots.txt` to `robots.txt`). With *Dry run* checked on
+that save the rename is held back and logged, and the backup then stays `.robots.txt` until the
+site is back without a base directory: in base directory mode nothing renames a dot backup,
+uninstalling included.
+
+**Copies left in the web root** are not served once the block serves the base directory: any
+existing directory of the web root goes to ProcessWire, unless it holds an `index.php` or an
+`index.htm` of its own, which keeps the stock answers. That holds for a directory made by hand
+with an `index.html`, `index.xml` or `index.txt` too; give it the rule of *Directories made by
+hand*.
+
+**The block.** With `site/assets/static` the StaticPages block reads:
+
+```apache
+# BEGIN StaticPages
+# Generated by the StaticPages module and replaced on every update: change its settings, not these lines.
+# The home page, from its copy in site/assets/static/.
+RewriteCond %{REQUEST_METHOD} ^(GET|HEAD)$
+RewriteCond %{QUERY_STRING} ^$
+RewriteCond %{HTTP_COOKIE} !(^|;\s*)(wire_challenge|wires_challenge)=
+RewriteCond %{REQUEST_FILENAME}/site/assets/static/index\.html -f
+RewriteRule ^$ site/assets/static/index\.html [L]
+# A page, from its index.html copy in site/assets/static/, unless its directory in the web root holds an index file of its own.
+RewriteCond %{REQUEST_METHOD} ^(GET|HEAD)$
+RewriteCond %{QUERY_STRING} ^$
+RewriteCond %{HTTP_COOKIE} !(^|;\s*)(wire_challenge|wires_challenge)=
+RewriteCond %{REQUEST_FILENAME}/index.php !-f
+RewriteCond %{REQUEST_FILENAME}/index.htm !-f
+RewriteCond $1::%{REQUEST_FILENAME}%{PATH_INFO} ^(.*)::(.*)\1$
+RewriteCond %2site/assets/static/$1index\.html -f
+RewriteRule ^(.+/)$ site/assets/static/$1index\.html [L]
+# Any other request for an existing directory, with its trailing slash, a URL the stock 16A condition accepts and without an index file of its own, goes to ProcessWire.
+RewriteCond %{REQUEST_URI} "^/~?[-_.a-zA-Z0-9/]*$"
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteCond %{REQUEST_FILENAME}/index.php !-f
+RewriteCond %{REQUEST_FILENAME}/index.htm !-f
+RewriteRule ^(.+/)$ index.php?it=$1 [L,QSA]
+# END StaticPages
+```
+
+The site root on disk is taken from the request (`$1::%{REQUEST_FILENAME}%{PATH_INFO}`), so no path
+of the server goes into the block. With *Cache XML and plain text responses* checked, each typed
+name gets a rule of its own after the HTML one, and a root file line gets two: the copy for a
+guest's `GET` or `HEAD` without a query string, the page for everything else. A copy is also a file
+under its own URL (`/site/assets/static/about/index.html`), served to any request like any file;
+the directory `/site/assets/static/about/` goes to ProcessWire and the marker answers 403. The block
+checks only how the setting is written: a value refused for another reason (a link leading out, a
+file in its place) still gets the rules of the base directory while the copies go to the web root,
+where they are not served.
+
+**Copy paths the stock rules deny.** After the block's rewrite Apache tests the path of the copy,
+`/<base directory>[/<host>]<page path>index.html`, against the stock deny rules of section 15A.
+Where one of them matches, every visitor would get 403 from the copy where ProcessWire serves the
+page, so with a base directory such a render is not cached and ProcessWire answers it: `the stock
+.htaccess denies its copy path <path> to visitors (403 Forbidden)`. Below `site/assets/static` that
+is a page or URL segment named like `-x`, `feed.php`, `x.phtml`, `a.php.b` or `x.bak`; a host
+directory named like `docs.php.example.com` (every page of that host); a *Static file name* such as
+`index.bak` (every page). Letter case does not count: a segment `Site-Default` is skipped too,
+although the stock rule, written for lower case, would serve it. Without a base directory nothing is
+tested, as before: a page below `/site-<name>/templates/` or `/site-<name>/templates-admin/` gets
+403 from its `index.html` copy once it exists, where ProcessWire served the first request (its
+`index.xml` copy is served); list its template in *Non-static page templates*.
+
+### Static files per host
+
+*Static files per host* (`staticHostKey`, off) gives each host its own copies, one directory down:
+`site/assets/static/example.com/about/index.html`, `site/assets/static/www.example.com/about/index.html`,
+and a root file `site/assets/static/example.com/robots.txt`. It needs a *Static base directory* and
+changes nothing without one. Choose it when one ProcessWire answers to several host names and a
+page's markup differs by host (absolute links, a canonical URL, a setting chosen by host): without
+it, the copy written for one host is served to all of them. Below the host's directory the copy is
+still placed by `$page->path`: on a site that chooses the language by host name, a page whose path
+carries the language segment (`/en/offers/` for `/offers/`) is written to
+`<base>/<host>/en/offers/index.html`, where the block does not look for it. Such pages are then
+never served from their copies, and never from another host's; see *Multilingual sites*.
+
+The directory is the host in lower case with `:` as `_` (`example.com_8080`). A render is cached only
+for a host listed in `$config->httpHosts`, and only when the request's `Host` header is that very host,
+`$config->httpHost` (ProcessWire takes the first listed host for a header it does not know);
+otherwise it is skipped with `Static files per host: <why>`. A host that is no plain name (`[::1]`)
+gets no copy. Checking or unchecking the box deletes every copy on that save, as a change of the
+base directory does; checked without a base directory it changes nothing and deletes nothing.
+
+The block then holds the home page and page rules once per host of `$config->httpHosts`, each with
+a first condition on the host, `RewriteCond %{HTTP_HOST} ^www\.example\.com$ [NC]`: letter case does
+not count, a port only as listed (`example.com:8080` is not `example.com`). Any other host gets no
+copy and goes to ProcessWire. A change of `$config->httpHosts` changes the block, which the next
+settings save or superuser admin request writes again.
+
+## Pages without a trailing slash
+
+A template can drop the trailing slash from its pages' URLs (*Should page URLs end with a slash?*
+on its *URLs* tab). Such a page, and every page below it, is not cached, in every mode, nor is a
+render with URL segments whose template says no to *Should URL segments end with a trailing slash?*:
+
+- `its template <name> has no trailing slash: a copy dir at its URL would loop between the web
+  server's slash redirect and ProcessWire's`;
+- `it is below <path>, whose template <name> has no trailing slash: a copy dir at that URL would
+  loop between the web server's slash redirect and ProcessWire's`;
+- `its template <name> has no trailing slash after URL segments: a copy dir at that URL would loop
+  between the web server's slash redirect and ProcessWire's`.
+
+0.3.1 to 0.11.0 cached them. A copy makes a directory at the page's own URL: `/a/b` was written as
+`a/b/index.html` (on a site with LanguageSupportPageNames as `a/bindex.html` beside an empty
+directory `a/b/`), a page below it as `a/b/c/index.html`. Once that directory existed, Apache's
+mod_dir answered `/a/b` with a 301 to `/a/b/`, before any rewrite rule, and ProcessWire answered
+`/a/b/` with a 301 back: a redirect loop for every visitor, `GET`, `HEAD`, `POST`, with a query
+string or the login cookie alike.
+
+Copies written by older versions stay until a save of a page they depend on or a wipe deletes
+them, and the loop stays with them: wipe once after the update on a site with such templates. A
+recorded `a/bindex.html` (also `…index.xml`, `…index.txt`) is deleted by its record like any copy,
+with its directory `a/b/` when that is empty. One that neither the index nor the manifest records
+stays: look for a file whose name ends in `index.html` without being `index.html`, next to an empty
+directory named like the rest of it, and delete both by hand.
+
+A template switched to no trailing slash keeps its pages' copies and directories, and they loop
+again, until a wipe: wipe after switching. Switched back, there is nothing to delete. A page listed
+in *Replace these root files with pages* is written as its root file whatever its template says,
+below a page without a trailing slash too: that makes no directory. The home page never counts as
+a page without a trailing slash, as in ProcessWire itself: on a site with LanguageSupportPageNames
+whose home template has the slash off, the home page of a non-default language has the path
+`/<lang>`, and it and that language's pages are cached as before, the skip does not cover them.
+
 ## Why is nothing being generated
 
 A rendered page is **not** cached when any of these is true. The *Log skipped pages*
@@ -294,6 +471,22 @@ module looks like it is doing nothing, and off again afterwards on a busy front 
   `the page is listed in Replace these root files with pages as <file names>, a <type> render is not written`.
 - The page's directory can not be created, for want of permissions or with a file of that name
   in the way: `could not create <dir>`.
+- The page's template has no trailing slash, the page is below such a page, or the render has URL
+  segments its template wants without a trailing slash: `its template <name> has no trailing
+  slash: …`, `it is below <path>, whose template <name> has no trailing slash: …`, `its template
+  <name> has no trailing slash after URL segments: …`. See *Pages without a trailing slash*.
+- *Static base directory* is set and holds files but no marker:
+  `the Static base directory <dir> holds no marker file .staticpages, nothing is written into it`.
+- With *Static base directory* set, the stock `.htaccess` would answer the copy with 403:
+  `the stock .htaccess denies its copy path <path> to visitors (403 Forbidden)`. See *Copy paths
+  the stock rules deny*.
+- *Static files per host* is checked and the request's host is not the one to cache for:
+  `Static files per host: the request's host "<host>" is not $config->httpHost "<host>"`, `…: the
+  host "<host>" is not listed in $config->httpHosts`, `…: the host "<host>" is no plain host
+  name`, `…: the host is empty`.
+- The stock `.htaccess` refuses the URL itself, whatever the module does: a page named like
+  `x.bak` or `x.sql` (`/x.bak/`, `/x.sql/`, its sections 5A and 5B), and `/license.txt` (15A),
+  answer 403. ProcessWire never sees the request, so there is nothing to cache and nothing to log.
 - The request carries GET or POST variables, or it is a paginated page beyond the first.
 - The request carries a cookie listed in *Never cache with these cookies* (one name per line,
   `*` and `?` as wildcards): output depending on a currency, region or consent cookie would be
@@ -488,9 +681,10 @@ Missing or outdated, the block only costs speed: without it every request reache
 block goes immediately before the `# PW-PAGENAME` line, inside the `mod_rewrite` section. Further
 down it would take the stock conditions of section 17 for itself. Its rules are relative to the
 `.htaccess` directory, so a ProcessWire installed in a subdirectory gets the same answers. *Static
-file name*, *Cache XML and plain text responses*, *Replace these root files with pages* and the
-session settings are the values it is made from, and the settings form shows
-it under *The StaticPages block*.
+file name*, *Cache XML and plain text responses*, *Replace these root files with pages*, *Static
+base directory*, *Static files per host* with `$config->httpHosts`, and the session settings are
+the values it is made from, and the settings form shows it under *The StaticPages block*. For
+the block with a base directory see *Static base directory and static files per host*.
 
 ### Directories made by hand
 
@@ -623,8 +817,10 @@ written, restored), a message and the backup's name.
 Uninstalling the module first keeps every request from writing a static copy while it runs. It
 then takes the block and the `# StaticPages-replaced: ` prefixes out of the `.htaccess`, after a
 backup, and deletes the static copies the index (or the manifest) records. It renames the
-originals of *Replace these root files with pages* back (`.robots.txt` to `robots.txt`). Last, it
-drops the tables. Copies nothing recorded stay where they are. The backups stay too.
+originals of *Replace these root files with pages* back (`.robots.txt` to `robots.txt`), but not
+with a *Static base directory* set: then nothing is renamed. Last, it drops the tables. Copies
+nothing recorded stay where they are. The backups stay too, and so do the base directory and its
+marker `.staticpages`.
 
 ### Without .htaccess: nginx and other servers
 
@@ -674,6 +870,64 @@ line of *Replace these root files with pages*, with that line's file name and pa
 *Static file name* changed, replace `index.html`, `index.xml` and `index.txt` in it; with
 `index.htm`, leave out the `t` line, as the block does. A directory made by hand needs a line of its own, as on Apache (see *Directories made
 by hand* above): `if ($uri ~ "^/landing/") { set $sp "${sp}n"; }` after the `x` line.
+
+With a *Static base directory*, `site/assets/static` here, the example is this instead:
+
+```nginx
+  # StaticPages with "Static base directory" site/assets/static: what the module's block does
+  # for Apache then. In place of the example above, after the deny rules, before "location /".
+  set $sp "";
+  if ($request_method ~ "^(GET|HEAD)$") { set $sp "1"; }
+  if ($args != "") { set $sp ""; }
+  if ($http_cookie ~ "(^|;\s*)(wire_challenge|wires_challenge)=") { set $sp ""; }
+  set $spb "/site/assets/static";
+  if ($uri ~ "/$") { set $sp "${sp}/"; }
+  if ($uri = "/") { set $sp "${sp}h"; }
+  if (-f $document_root${uri}index.php) { set $sp "${sp}p"; }
+  if (-f $document_root${uri}index.htm) { set $sp "${sp}t"; }
+  if (-f $document_root$spb${uri}index.html) { set $sp "${sp}f"; }
+  # The home page, from its copy in the base directory.
+  if ($sp ~ "^1/hpt?f$") { rewrite ^ $spb/index.html last; }
+  # A page, from its copy in the base directory, unless its directory in the web root holds an index.php or index.htm of its own.
+  if ($sp = "1/f") { rewrite ^ $spb${uri}index.html last; }
+  # With "Cache XML and plain text responses" on: a page from its index.xml, then its index.txt copy.
+  if (-f $document_root$spb${uri}index.xml) { set $sp "${sp}m"; }
+  if ($sp = "1/m") { rewrite ^ $spb${uri}index.xml last; }
+  if (-f $document_root$spb${uri}index.txt) { set $sp "${sp}e"; }
+  if ($sp = "1/e") { rewrite ^ $spb${uri}index.txt last; }
+  # Any other existing directory of the web root, with its trailing slash, without an index.php or index.htm of its own, goes to ProcessWire.
+  if (-d $request_filename) { set $sp "${sp}d"; }
+  if ($uri !~ "^/~?[-_.a-zA-Z0-9/]*$") { set $sp "${sp}x"; }
+  if ($sp ~ "^1?/f?m?e?d$") { rewrite ^/(.*)$ /index.php?it=$1 last; }
+  # With "Cache XML and plain text responses" on, one location per line of "Replace these root
+  # files with pages": robots.txt from its copy in the base directory, anything else for it from
+  # the page /robots/. The web root's own robots.txt is not served.
+  location = /robots.txt {
+    if (-f $document_root$spb/robots.txt) { set $sp "${sp}c"; }
+    if ($sp = "1c") { rewrite ^ $spb/robots.txt last; }
+    rewrite ^ /index.php?it=/robots/ last;
+  }
+```
+
+Here `f`, `m` and `e` stand for the copies in the base directory, `p` and `t` for an `index.php` and
+an `index.htm` in the web root's directory of that URL, and `c` for the root file's copy. The web
+root's own `robots.txt` is not served while the `location` is there, and a copy left in the web
+root is not served either: its directory goes to ProcessWire. With *Static files per host*, replace
+the `set $spb` line by these, one `if` per host of `$config->httpHosts`, a port written as listed
+(`"^example\.com:8080$"`, its directory `/example.com_8080`):
+
+```nginx
+  # "Static files per host": one line per host of $config->httpHosts, lower case, ":" as "_".
+  set $sph "";
+  if ($http_host ~* "^example\.com$") { set $sph "/example.com"; }
+  if ($http_host ~* "^www\.example\.com$") { set $sph "/www.example.com"; }
+  if ($sph = "") { set $sp ""; }
+  set $spb "/site/assets/static$sph";
+```
+
+Any other host then gets no copy and goes to ProcessWire. Unlike Apache, nginx answers a `POST` to a
+copy's own URL (`/site/assets/static/about/index.html`) with 405, and it does not test the rewritten
+path against its deny rules again.
 
 Do **not** comment out the `!-d` line of the stock rule 19, as earlier versions of this README
 advised: every directory request would then go to `index.php`, and no static file would ever be
@@ -764,6 +1018,17 @@ checked. Saving the setting stores the list as shown,
 and the save warns when it names a dir that only holds static copies: those copies would never be
 wiped. Nothing is cached below a listed dir.
 
+The default also leaves out a root dir no page is named like that holds nothing but static copies
+and under which the index records a file: the dir the module makes for the home page rendered with
+a URL segment, `<segment>/index.html`. Up to 0.11.0 the default took it in, and that copy was never
+deleted by a save or a wipe again: it went stale. A dir nothing was recorded under stays protected
+whatever it holds (a hand-made `landing/` with an `index.html`), and so does one holding anything
+else; a record differing in letter case only does not count. A recorded copy of a page without a
+trailing slash, `<x>index.html` (see *Pages without a trailing slash*), counts as a static copy
+there too; an unrecorded file of that name keeps the dir protected. This lookup needs the index
+tables and runs only without a *Static base directory*; below a base directory the list does not
+apply at all.
+
 The list is not what keeps a full disk scan out of a dir, see below.
 
 ## Full disk scans
@@ -775,12 +1040,19 @@ holding nothing but static copies (and the temporary files a killed write left).
 left alone, listed or not, and the scan logs the unlisted dirs it left alone. Before 0.8.0 it
 walked every root dir the list did not name, and the list is a snapshot from the last config save:
 a dir added since (`vendor/`, a hand made landing page) lost every `index.html` and every empty dir
-in it. A static copy below a dir that is not a page copy (url segments of the home page, say) is
-only removed through the index. Inside those dirs the scan deletes the files named `index.html`
+in it. Inside those dirs the scan deletes the files named `index.html`
 (*Static file name*), and `index.xml` and `index.txt` only while *Cache XML and plain text
-responses* is checked; at the root level the `index.html` alone. A file of *Replace these root
-files with pages* goes by its index record: the scan deletes the module's `robots.txt` copy, never
-a hand-made one, and renames nothing.
+responses* is checked; at the root level the `index.html` alone. With a *Static base directory* the
+scan walks the base directory's subdirs instead, its top level being the root level.
+
+Before it scans, a forced scan deletes every file the index and the manifest record, read before
+their rows and lines go, each through the same checks as any delete. Up to 0.11.0 it cleared the
+records and only scanned, so a recorded copy outside the dirs it walks (the home page rendered with
+a URL segment, `<segment>/index.html`) lost its record and stayed on disk, stale, where no later
+save or wipe would find it. A recorded path in a protected dir, or with a name that is no static
+copy's, still stays. A file of *Replace these root files with pages* goes by its index record the
+same way: the scan deletes the module's `robots.txt` copy, never a hand-made one, and renames
+nothing.
 
 Nothing is ever deleted that `realpath()` does not put below the site root, or that is not named
 like a static copy. With *Use shell commands* the scan is one `find` on Linux, macOS and BSD, or
@@ -796,7 +1068,8 @@ Check *Dry run* together with the force box, or call `wipeCaches(true, true)`: t
 the same checks as the real scan (always the PHP walk), nothing deleted, no row dropped, and every
 file and dir it would delete written to the `static-pages` log, with the root dirs it leaves alone.
 `wipeCaches(false, true)` does the same for a wipe by the index or the manifest. The call returns
-the list under `paths` and `leftAlone`. Run one on a copy of a site before trusting a forced wipe
+the list under `paths` and `leftAlone`; a forced one lists each recorded copy and each file the
+scan finds once. Run one on a copy of a site before trusting a forced wipe
 there: it should list page `index.html` files and their dirs, nothing else (with *Cache XML and
 plain text responses* checked, their `index.xml` and `index.txt` files and the module's copies of
 *Replace these root files with pages* as well).
@@ -807,6 +1080,7 @@ plain text responses* checked, their `index.xml` and `index.txt` files and the m
 - Checks are throttled to once every 10 seconds so that admin ajax does not walk the tracked directories on every keystroke. Between two checks an admin request costs one `stat()` of a stamp file; a check stats every tracked file, keep the patterns narrow.
 - Only the modification time and the size are compared. An edit changing neither goes unnoticed.
 - Symlinked directories inside a tracked path are not descended into. A symlinked base directory is fine.
+- Static copies are never source files: a file named like one (`index.html`, `index.xml` and `index.txt` only while *Cache XML and plain text responses* is checked) is skipped anywhere, and so is everything below the *Static base directory* while it holds its marker `.staticpages`. A base directory without the marker stays tracked like any other directory. After a save that clears or changes the base directory, a tracked path covering the old one counts its marker, left behind, as a changed file once: one wipe of everything.
 - A hash file that is missing or unreadable is treated as a first run: it is seeded, nothing is wiped. So a deploy that clears `site/assets/cache/` and changes templates in the same step will not wipe. Deploy scripts should ask for it directly:
 
 ```php

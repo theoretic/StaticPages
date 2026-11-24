@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.12.0 (2026-11-24)
+
+Static copies can be written below one directory instead of the web root, and per host name.
+Three fixes: a forced scan, the default *Non-static directories*, and pages without a trailing
+slash. Both new settings are off by default.
+
+### What happens on an existing site
+With the new settings at their defaults:
+
+- **Changed: a page whose template has no trailing slash, and every page below it, is no longer
+  cached** (*Should page URLs end with a slash?* set to no). Nor is a render with URL segments
+  whose template says no to *Should URL segments end with a trailing slash?*. *Log skipped pages*
+  says `its template <name> has no trailing slash: …`, `it is below <path>, whose template <name>
+  has no trailing slash: …` and `its template <name> has no trailing slash after URL segments: …`.
+  0.3.1 to 0.11.0 cached them, and once the page's copy directory existed Apache answered its URL
+  with a redirect loop: mod_dir sent `/a/b` to `/a/b/`, ProcessWire sent `/a/b/` back to `/a/b`,
+  for `GET`, `HEAD`, `POST`, a query string and the login cookie alike. Copies written by older
+  versions stay until a save of a page they depend on or a wipe deletes them, and the loop stays
+  with them: wipe once after the update on a site with such templates.
+- **Changed: a forced scan and the default *Non-static directories* delete copies they left
+  before**, see *Fixed*.
+- **Unchanged**: the StaticPages block in the root `.htaccess`, byte for byte the one 0.10.0 and
+  0.11.0 write. Nothing is rewritten on the update, and a site that chose *Keep them* has nothing
+  to add by hand. The names of the copies, the tables and the config keys do not change either;
+  there is nothing to migrate.
+
+### Added
+- **Static base directory** (`staticBaseDir`, empty). A path relative to the web root,
+  `site/assets/static` say: every copy, the home page's and the root files' included, is written
+  below it instead of the web root, and the block serves it from there. The module writes into it
+  and deletes from it only while it holds the marker file `.staticpages`, which the settings save
+  puts into a new or an empty directory (*Dry run* checked or not); a directory holding files and
+  no marker is warned about and left alone. Refused, with a warning, and the copies stay in the web
+  root: an absolute path, `.` or `..`, a name that is not plain, a path leading out of the web root
+  or to the web root itself, and every directory the stock `.htaccess` denies to visitors, where
+  each copy would answer 403: `site/assets/cache`, `logs`, `backups`, `sessions`, `config`,
+  `database`, `install`, `tmp`, a `site/assets` directory starting with `-`, `site/install`,
+  `site/classes`, `site/templates`, `site/templates-admin`, `wire/templates-admin`, `site-default`,
+  and names such as `*.php` or `*.bak` below `site/` or `wire/` (`site-<name>` as `site`, in any
+  letter case). With a base directory, a render whose copy path a stock 15A deny line matches (a
+  page segment `-x`, `feed.php`, `x.bak`; a host such as `docs.php.example.com`; a *Static file
+  name* such as `index.bak`) is not cached and ProcessWire answers it: `the stock .htaccess denies
+  its copy path <path> to visitors (403 Forbidden)`. Without one nothing is tested, as in 0.11.0.
+  Changing the setting deletes every copy under the old place on that save, *Dry run* checked or
+  not; a forced wipe checked on that same save scans the old layout. *Non-static directories*
+  does not apply below it, and a scan treats its top level as the root level. The web root's own
+  root files are never taken over there; the save that switches to a base directory gives a dot
+  backup back (`.robots.txt` to `robots.txt`), and one left by a *Dry run* on that save stays until
+  the site is back without a base directory: in base directory mode nothing renames a dot backup,
+  uninstalling included. Uninstalling leaves the base directory and `.staticpages`, as does a
+  change of the setting. Tracked paths skip the base directory while it holds the marker: under a
+  tracked path covering it, every copy written would otherwise have counted as a changed source
+  file and wiped everything. A marker left behind by a change counts once (one wipe).
+- **Static files per host** (`staticHostKey`, off; needs a base directory): each host's copies in
+  a directory of their own, `<base>/<host>/`, the host lower-cased with `:` as `_`. A render is
+  cached only for a host listed in `$config->httpHosts` and only when the request's `Host` header
+  is `$config->httpHost`, else skipped (`Static files per host: <why>`). Turning it on or off
+  deletes every copy on that save. The block gets the rules once per host of `$config->httpHosts`,
+  the `Host` header matched without regard to letter case and a port only as listed; any other
+  host goes to ProcessWire.
+- **README**: *Static base directory and static files per host* with the generated block,
+  *Pages without a trailing slash*, the new skips under *Why is nothing being generated*, the URLs
+  the stock `.htaccess` refuses itself (`/x.bak/`, `/x.sql/`, `/license.txt`: ProcessWire never
+  sees them), and an nginx example for both settings, run on nginx 1.29 first.
+
+### Fixed
+- **A forced scan left recorded copies outside the dirs it walks on disk.** It cleared the index
+  and the manifest and then scanned, and a scan walks only the page dirs of the root: a copy
+  elsewhere, the home page rendered with a URL segment (`<segment>/index.html`), lost its record
+  and stayed, stale, where no save or wipe found it again. The scan now deletes every recorded file
+  first, through the same checks as any delete; its dry run lists each path once.
+- **The default *Non-static directories* protected the module's own copies.** With the list never
+  saved, a root dir no page is named like that holds only static copies (the home page with a URL
+  segment) was in the default, so no save or wipe deleted its copy again. It is left out now when
+  the index records a file below it (no base directory, index tables known to be there). A dir
+  nothing was recorded under, such as a hand-made `landing/`, stays protected.
+- **A page without a trailing slash looped**, see above. Its old copy written as `a/bindex.html`
+  beside an empty `a/b/` (on sites with LanguageSupportPageNames) is now deleted by its record, by
+  a page save or a wipe, with that directory when it is empty, and the default *Non-static
+  directories* counts such a recorded file as a static copy. An unrecorded one stays; the README
+  says how to find it. A page listed in *Replace these root files with pages* is still written as
+  its root file; the home page is never taken for a page without a trailing slash.
+
+### Tests
+- `tests/smoke.php` checks the base directory (validation and refusals, the marker, writes,
+  deletes, scans, root files, tracked paths, the stock deny lines), the host key, the block for
+  both settings, the forced scan's record pass, the default list's record lookup, and the skip of
+  pages without a trailing slash with the deletes of their old copies.
+
 ## 0.11.0 (2026-11-23)
 
 Pages answering XML or plain text can be cached, and a page can answer for a file in the web
