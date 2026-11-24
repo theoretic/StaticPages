@@ -5531,6 +5531,7 @@ htClearPending($sp);
 //wipe of step 09 (step 11)
 htPut($htFile, $withBlock);
 $gStamp0 = $h->stampPath();
+$gBlock0 = $h->apacheBlock();
 $gSiteExisted = is_dir("$tmpRoot/site");
 $gLog0 = logText($tmp);
 htSave($sp, array('staticBaseDir' => 'site/assets/static'));
@@ -5542,7 +5543,7 @@ $gWipeAt = strpos($gLogged, 'Static base directory changed from none to site/ass
 $gWriteAt = strpos($gLogged, "htaccess: $htFile: ");
 check('settings save setting Static base directory site/assets/static, current: still current, the block now serves from site/assets/static/, written after the wipe under the old root; stampPath() differs', $st['state'] === 'current' && strpos($new, 'RewriteRule ^(.+/)$ site/assets/static/$1index\\.html [L]') !== false && strpos($new, $h->apacheBlock()) !== false && count(htBackups($tmpRoot)) === 1 && $gStamp1 !== $gStamp0 && $gWipeAt !== false && $gWriteAt !== false && $gWipeAt < $gWriteAt, $st['state'] . ' ' . $gLogged);
 htSave($sp, array(), array('staticBaseDir'));
-check('...a save clearing it again: the web root\'s block', file_get_contents($htFile) === $withBlock && $h->status()['state'] === 'current' && $h->stampPath() === $gStamp0);
+check('...a save clearing it again: the web root\'s block', file_get_contents($htFile) === $withBlock && $h->status()['state'] === 'current' && $h->apacheBlock() === $gBlock0);
 $h->using(null);
 rrmdir("$tmpRoot/site/assets/static");
 if(!$gSiteExisted) { @rmdir("$tmpRoot/site/assets"); @rmdir("$tmpRoot/site"); }
