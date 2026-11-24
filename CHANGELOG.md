@@ -85,6 +85,9 @@ With the new settings at their defaults:
   files stayed stale after the marker was back. It now keeps the rows, logs once per drain
   (`the drain (queue kept) deleted nothing: ...`), and the first drain after the marker is back
   takes them.
+- **A tracked path covering the site root (`*.txt`) counted the module's own root files**: the
+  recorded copy `/robots.txt` and its backup `/.robots.txt`, a wipe after every render of that
+  page. Both are left out now; a hand-made file the index does not record still counts.
 
 ### Tests
 - `tests/smoke.php` checks the tags a save queues (the `Pages::added` path, repeater items, a

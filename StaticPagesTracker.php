@@ -323,6 +323,32 @@ class StaticPagesTracker extends Wire {
 		return false;
 	}
 
+	public function ownRootFiles(){
+		//pathKey() => true for the root files this module wrote or keeps, no source files: each
+		//recorded root file copy (/robots.txt, /<host>/robots.txt, as the index records them) and
+		//the dot backup of each listed name in the site root (/.robots.txt), recorded copy or not.
+		//A pattern covering the site root (*.txt) counted them: a wipe after every render of the
+		//page. A hand-made file of a listed name the index does not record still counts. Empty
+		//without a listed name, or when the index can not be read
+		$names = array_keys( $this->sp->rootFilesArray() );
+		if( !count($names) ) return array();
+		$files = array();
+		$root = rtrim( $this->sp->normalizePath( $this->sp->rootPath() ), DIRECTORY_SEPARATOR );
+		foreach( $names as $name ) $files[ $this->pathKey( $root . DIRECTORY_SEPARATOR . '.' . $name ) ] = true;
+		$static = rtrim( $this->sp->normalizePath( $this->sp->staticRoot() ), DIRECTORY_SEPARATOR );
+		try {
+			foreach( $this->sp->wiper()->recordedRootFiles() as $relative ) $files[ $this->pathKey( $static . $this->sp->normalizePath($relative) ) ] = true;
+		}
+		catch( \Throwable $e ){}
+		return $files;
+	}
+
+	public function pathKey($path){
+		//a path as ownRootFiles() keys it: native separators, letter case aside on Windows
+		$path = $this->sp->normalizePath( (string) $path );
+		return DIRECTORY_SEPARATOR === '\\' ? strtolower($path) : $path;
+	}
+
 	public function hashPattern($pattern){
 		//md5 over "relative path|mtime|size" of every matching file, sorted so the order the
 		//filesystem hands entries back in can not change the result. Paths are joined with
@@ -342,10 +368,12 @@ class StaticPagesTracker extends Wire {
 
 		//asked once per pattern, not once per file
 		$staticPrefix = $this->staticDirPrefix();
+		$ownFiles = $this->ownRootFiles();
 
 		foreach( $this->trackedPathWalk($baseDir, $pattern, $base) as $path ){
 
 			if( $this->isExcludedFromTracking($path, $staticPrefix) ) continue;
+			if( count($ownFiles) && isset( $ownFiles[ $this->pathKey($path) ] ) ) continue;
 
 			$relative = ltrim( str_replace( '\\', '/', substr($path, strlen($root)) ), '/' );
 			if( !preg_match($regex, $relative) ) continue;

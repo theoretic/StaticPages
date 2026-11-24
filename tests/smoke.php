@@ -2734,6 +2734,26 @@ $savedR = array($bytesOf($robots), $bytesOf($dotRobots) === $original, count($sp
 publish($sp, $R, array(), $txtBody);
 check('saving the page and drain() remove /robots.txt, /.robots.txt untouched; the next render writes it again', $savedR === array(null, true, 0) && $bytesOf($robots) === $txtBody, json_encode($savedR));
 
+//a tracked pattern covering the web root (*.txt) counts neither the recorded copy /robots.txt nor
+//the backup /.robots.txt: a save deleting the copy and a render writing another leave its hash
+//alone; a hand-made .txt beside them still counts (N1.4)
+$rTrack = function() use ($sp) { clearstatcache(); return $sp->tracker()->hashPattern('*.txt'); };
+$rH = array('copy' => $rTrack());
+$saveR('R3');
+$rH['saved'] = $rTrack();
+publish($sp, $R, array(), "$txtBody# other\n");
+$rH['other'] = $rTrack();
+$rDotTime = filemtime($dotRobots);
+touch($dotRobots, $rDotTime - 100);
+$rH['backup'] = $rTrack();
+touch($dotRobots, $rDotTime);
+file_put_contents("$tmpRoot/sp-hand.txt", 'x');
+$rH['hand'] = $rTrack();
+@unlink("$tmpRoot/sp-hand.txt");
+$saveR('R2');
+publish($sp, $R, array(), $txtBody);
+check('...a tracked *.txt: the hash stays across the save deleting /robots.txt and a render writing another, and a touched /.robots.txt; a hand-made sp-hand.txt changes it', $rH['saved'] === $rH['copy'] && $rH['other'] === $rH['copy'] && $rH['backup'] === $rH['copy'] && $rH['hand'] !== $rH['copy'] && $bytesOf($robots) === $txtBody && $bytesOf($dotRobots) === $original, json_encode($rH));
+
 //expiry (0.13.0): the recorded root file goes by its e: tag like any copy, its dot backup stays
 $sp->expireAt(time() + 3600);
 publish($sp, $R, array(), $txtBody);
