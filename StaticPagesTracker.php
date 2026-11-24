@@ -10,7 +10,9 @@ namespace ProcessWire;
 /*
 Editing a template or an asset file fires no ProcessWire event. The files matching the tracked
 patterns are hashed by name, modification time and size on admin requests, at most every
-StaticPages::trackingInterval seconds, and a changed hash wipes every static file.
+StaticPages::trackingInterval seconds, and a changed hash wipes every static file. With "Track
+changes on front-end requests" also after a visitor's response, at most every
+StaticPages::trackingIntervalFront seconds, by a stamp of its own.
 */
 
 class StaticPagesTracker extends Wire {
@@ -37,6 +39,31 @@ class StaticPagesTracker extends Wire {
 		if( $hashDir === '' ) return;
 
 		if( !$force && !$this->trackingIntervalPassed($hashDir) ) return;
+
+		return $this->compareHashes($patterns, $hashDir, false);
+	}
+
+	public function checkFrontend(){
+		//"Track changes on front-end requests": the same check after a visitor's response, at most
+		//every StaticPages::trackingIntervalFront seconds by a stamp of its own (the admin's is
+		//not touched), the walk after the response is finished. No notice: there is no admin page
+		//to show it on, a log line says it [decided by user, Q67 B (a)]
+
+		$patterns = $this->trackedPathsArray();
+		if( !count($patterns) ) return;
+
+		$hashDir = $this->sp->trackedHashDir();
+		if( $hashDir === '' ) return;
+
+		if( !$this->trackingIntervalPassed($hashDir, 'front.stamp', StaticPages::trackingIntervalFront) ) return;
+
+		$this->sp->queue()->finishResponse();
+
+		return $this->compareHashes($patterns, $hashDir, true);
+	}
+
+	protected function compareHashes(array $patterns, $hashDir, $front){
+		//the walk of checkTrackedPaths() and checkFrontend(): a changed hash queues modeAll
 
 		//lines the operator removed or edited would leave their hash file behind forever
 		$this->pruneHashFiles($patterns, $hashDir);
@@ -65,7 +92,8 @@ class StaticPagesTracker extends Wire {
 
 		if( !count($changed) ) return;
 
-		$this->sp->message( sprintf( $this->_('Tracked path changed: %s'), implode(', ', $changed) ) );
+		if( $front ) $this->sp->logDrain( 'Tracked path changed (front-end request): ' . implode(', ', $changed) );
+		else $this->sp->message( sprintf( $this->_('Tracked path changed: %s'), implode(', ', $changed) ) );
 
 		//every new hash is on disk before the wipe starts: should the wipe itself touch a
 		//tracked file, the next check compares against the new state and stops there instead
@@ -73,18 +101,20 @@ class StaticPagesTracker extends Wire {
 		return $this->sp->queue()->enqueue(StaticPages::modeAll);
 	}
 
-	public function trackingIntervalPassed($hashDir){
+	public function trackingIntervalPassed($hashDir, $stampName = 'check.stamp', $interval = StaticPages::trackingInterval){
 		//one stat instead of a walk over every tracked file: the admin fires a lot of ajax
 		//(page tree, autocomplete, inline edits) and every one of those requests would
 		//otherwise stat every tracked file again.
 		//Stamping before the walk and not after is deliberate, two requests arriving
 		//together must not both pay for it, which makes this the concurrency guard as well
 
-		if( StaticPages::trackingInterval < 1 ) return true;
+		//$stampName and $interval: the front-end check's own, see checkFrontend()
 
-		$stamp = $hashDir . 'check.stamp';
+		if( $interval < 1 ) return true;
 
-		if( is_file($stamp) && time() - (int) @filemtime($stamp) < StaticPages::trackingInterval ) return false;
+		$stamp = $hashDir . $stampName;
+
+		if( is_file($stamp) && time() - (int) @filemtime($stamp) < $interval ) return false;
 
 		@touch($stamp);
 

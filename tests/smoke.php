@@ -4897,6 +4897,266 @@ clearstatcache();
 $exEnd = array('rows' => !count($sp->index()->indexedFiles(null)), 'disk' => files($tmpRoot) === $exBefore, 'next' => $exReadNext() === null, 'type' => $tpl->contentType === $exType, 'settings' => array('maxAge' => $sp->get('maxAge'), 'cacheNonHtml' => $sp->get('cacheNonHtml'), 'staticBaseDir' => $sp->get('staticBaseDir')) === $exSettings);
 check('expiry block: no index row, no copy and no expire.next left, the tree, the content type and the settings as before', !in_array(false, $exEnd, true), json_encode(array($exEnd, files($tmpRoot), $exBefore)));
 
+////  tracked paths on front-end requests (0.13.0)
+
+//"Track changes on front-end requests": checkFrontend() after a visitor's response, a stamp of its
+//own every 60 s, a log line and no notice; shutdownDrain() runs it first, so the same request
+//drains the row it queues [decided by user, Q67 A (a), B (a)]
+$fBefore = files($tmpRoot);
+$fDirs = array("$tmpRoot$Pdir/a" => is_dir("$tmpRoot$Pdir/a"), "$tmpRoot$Pdir" => is_dir("$tmpRoot$Pdir"));
+$fTracked = $sp->get('trackedPaths');
+$fRel = 'sp-smoke-trk-' . getmypid();
+$fPat = "$fRel/*.css";
+$fFile = "$tmpRoot/$fRel/a.css";
+$fStamp = "$tmp/cache/StaticPages/front.stamp";
+$fAdminStamp = "$tmp/cache/StaticPages/check.stamp";
+$fHashFile = "$tmp/cache/StaticPages/" . md5($fPat) . '.hash';
+$fA = "$tmpRoot$Pdir/a/index.html";
+$fTouch = function($text) use ($fFile) {
+	@mkdir(dirname($fFile), 0777, true);
+	file_put_contents($fFile, $text);
+	clearstatcache();
+};
+$fUnstamp = function() use ($fStamp) {
+	@unlink($fStamp);
+	clearstatcache();
+};
+$sp->set('trackedPaths', $fPat);
+$fTouch('a');
+$sp->checkTrackedPaths(true);
+$sp->drain();
+$fUnstamp();
+
+$sp->set('trackOnFrontend', 1);
+$fTouch('ab');
+$fMax = queueMaxId($sp);
+$fNotices = count($wire->notices);
+$log0 = logText($tmp);
+$sp->tracker()->checkFrontend();
+clearstatcache();
+$fSeen = array('queued' => $tModeAll(queueRowsAfter($sp, $fMax)), 'no notice' => count($wire->notices) === $fNotices, 'logged' => strpos($since($log0), "Tracked path changed (front-end request): $fPat") !== false, 'stamp' => is_file($fStamp));
+$sp->drain();
+check('checkFrontend(): a changed tracked file queues modeAll, logs "Tracked path changed (front-end request)", raises no notice ($notices count unchanged), stamps front.stamp', $fSeen === array('queued' => true, 'no notice' => true, 'logged' => true, 'stamp' => true), json_encode($fSeen));
+
+//a second check inside 60 seconds walks nothing; one after 60 seconds does
+touch($fStamp, time() - 30);
+clearstatcache();
+$fM = filemtime($fStamp);
+$fHash = (string) file_get_contents($fHashFile);
+$fTouch('abc');
+$fMax = queueMaxId($sp);
+$sp->tracker()->checkFrontend();
+clearstatcache();
+$fSecond = array('stamp' => filemtime($fStamp) === $fM, 'hash' => (string) file_get_contents($fHashFile) === $fHash, 'queued' => queueRowsAfter($sp, $fMax));
+touch($fStamp, time() - StaticPages::trackingIntervalFront - 1);
+clearstatcache();
+$sp->tracker()->checkFrontend();
+clearstatcache();
+$fSecond['after 60 s'] = $tModeAll(queueRowsAfter($sp, $fMax)) && filemtime($fStamp) >= time() - 2 && (string) file_get_contents($fHashFile) !== $fHash;
+$sp->drain();
+check('...a second front-end check 30 s later does not walk the files: front.stamp and the hash file unchanged, nothing queued; one 61 s later walks and queues modeAll', $fSecond === array('stamp' => true, 'hash' => true, 'queued' => array(), 'after 60 s' => true), json_encode($fSecond));
+
+//shutdownDrain() of a guest request: the check first, the same request drains the row; the admin's
+//check.stamp untouched
+$fUnstamp();
+file_put_contents($fAdminStamp, '');
+touch($fAdminStamp, time() - 5);
+clearstatcache();
+$fAdminM = filemtime($fAdminStamp);
+publish($sp, $A);
+$fWritten = is_file($fA);
+$fTouch('abcd');
+$fNotices = count($wire->notices);
+$log0 = logText($tmp);
+htShutdown($sp, 'guest');
+clearstatcache();
+$fLogged = $since($log0);
+$fShut = array('written' => $fWritten, 'copy gone' => !is_file($fA) && !$sp->index()->hasFile("$Pdir/a/index.html"), 'order' => strpos($fLogged, 'Tracked path changed (front-end request)') !== false && strpos($fLogged, 'all files: ') > strpos($fLogged, 'Tracked path changed (front-end request)'), 'queue empty' => (int) $exQueue()[0] === 0, 'no notice' => count($wire->notices) === $fNotices, 'admin stamp' => filemtime($fAdminStamp) === $fAdminM);
+check('trackOnFrontend on, a tracked file touched, shutdownDrain() of a guest request: modeAll queued and drained by the same shutdown (the copy and its row gone, "all files" logged after the front-end line), no notice, the admin check.stamp untouched', !in_array(false, $fShut, true), json_encode($fShut) . ' ' . $fLogged);
+
+//the setting off (0) or absent: nothing queued, nothing walked
+$fOff = array();
+foreach(array('off' => 0, 'absent' => null) as $label => $value) {
+	if($value === null) $sp->remove('trackOnFrontend');
+	else $sp->set('trackOnFrontend', $value);
+	$fUnstamp();
+	publish($sp, $A);
+	$fTouch("off $label");
+	$fMax = queueMaxId($sp);
+	$log0 = logText($tmp);
+	htShutdown($sp, 'guest');
+	clearstatcache();
+	$fOff[$label] = array(is_file($fA), queueRowsAfter($sp, $fMax), is_file($fStamp), strpos($since($log0), 'Tracked path changed') === false);
+}
+check('...trackOnFrontend off or absent: the same guest shutdown queues nothing, the copy stays, no front.stamp, no log line', $fOff === array('off' => array(true, array(), false, true), 'absent' => array(true, array(), false, true)), json_encode($fOff));
+
+//an admin request keeps its own check in ready(): the shutdown runs no front-end check
+$sp->set('trackOnFrontend', 1);
+$fTouch('editor');
+$fMax = queueMaxId($sp);
+htShutdown($sp, 'editor');
+clearstatcache();
+check('...trackOnFrontend on, the shutdown of an admin request: no front-end check (no front.stamp), nothing queued', !is_file($fStamp) && queueRowsAfter($sp, $fMax) === array());
+$sp->remove('trackOnFrontend');
+$sp->wipeCaches();
+@unlink($fFile);
+@rmdir("$tmpRoot/$fRel");
+@unlink($fAdminStamp);
+if($fTracked === null) $sp->remove('trackedPaths');
+else $sp->set('trackedPaths', $fTracked);
+$sp->checkTrackedPaths(true);
+$sp->drain();
+@unlink($fHashFile);
+$fUnstamp();
+foreach($fDirs as $dir => $existed) if(!$existed) @rmdir($dir);
+clearstatcache();
+check('front-end tracking block: the tree as before, no index row, no queue row, trackOnFrontend and trackedPaths as before', files($tmpRoot) === $fBefore && !count($sp->index()->indexedFiles(null)) && (int) $exQueue()[0] === 0 && $sp->get('trackOnFrontend') === null && $sp->get('trackedPaths') === $fTracked, json_encode(array(files($tmpRoot), $fBefore)));
+
+////  Cache only these hosts (0.13.0)
+
+//cachePage() and isCacheableRequest() compare $config->httpHost, lower-cased, to every line, also
+//lower-cased; empty means every host [decided by user, Q67 E (a)]. Host names are fixtures
+$cBefore = files($tmpRoot);
+$cDirs = array("$tmpRoot$Pdir/a" => is_dir("$tmpRoot$Pdir/a"), "$tmpRoot$Pdir" => is_dir("$tmpRoot$Pdir"));
+$cSettings = array('cacheHosts' => $sp->get('cacheHosts'), 'cacheNonHtml' => $sp->get('cacheNonHtml'), 'staticBaseDir' => $sp->get('staticBaseDir'), 'staticHostKey' => $sp->get('staticHostKey'));
+$cRestore = function() use ($sp, $cSettings) {
+	foreach($cSettings as $k => $v) if($v === null) $sp->remove($k); else $sp->set($k, $v);
+};
+$cA = "$tmpRoot$Pdir/a/index.html";
+$cX = "$tmpRoot$Pdir/a/index.xml";
+$cHost = function($host, $request = null) use ($config) {
+	$config->httpHost = $host;
+	$_SERVER['HTTP_HOST'] = $request === null ? $host : $request;
+};
+$cHost('example.test');
+$cSeen = array();
+foreach(array('another host' => 'other.test', 'other case' => "other.test\nEXAMPLE.Test", 'empty' => '', 'blank lines' => "\n  \n") as $label => $list) {
+	$sp->set('cacheHosts', $list);
+	$log0 = logText($tmp);
+	publish($sp, $A);
+	clearstatcache();
+	$cSeen[$label] = array(is_file($cA), strpos($since($log0), "skip $Pdir/a/: the host \"example.test\" (\$config->httpHost) is not listed in Cache only these hosts") !== false);
+	$sp->wipeCaches();
+}
+check('Cache only these hosts: another host listed, no file, skip logged; $config->httpHost listed in another case, an empty list or blank lines: the file is written', $cSeen === array('another host' => array(false, true), 'other case' => array(true, false), 'empty' => array(true, false), 'blank lines' => array(true, false)), json_encode($cSeen));
+
+$sp->set('cacheNonHtml', 1);
+$tpl->contentType = 'xml';
+$cSeen = array();
+foreach(array('another host' => 'other.test', 'listed' => 'Example.TEST') as $label => $list) {
+	$sp->set('cacheHosts', $list);
+	$log0 = logText($tmp);
+	publish($sp, $A);
+	clearstatcache();
+	$cSeen[$label] = array(is_file($cX), strpos($since($log0), 'is not listed in Cache only these hosts') !== false);
+	$sp->wipeCaches();
+}
+$tpl->contentType = $exType;
+check('...an XML render the same: another host listed, no index.xml, skip logged; the host listed in another case, index.xml written', $cSeen === array('another host' => array(false, true), 'listed' => array(true, false)), json_encode($cSeen));
+
+$cReq = new \ReflectionMethod(StaticPages::class, 'isCacheableRequest');
+$cReq->setAccessible(true);
+$sp->remove('cacheHosts');
+$cAsk = array('none' => $cReq->invoke($sp));
+$sp->set('cacheHosts', 'other.test');
+$cAsk['other'] = $cReq->invoke($sp);
+$sp->set('cacheHosts', "other.test\nEXAMPLE.test");
+$cAsk['listed'] = $cReq->invoke($sp);
+check('...isCacheableRequest() asks the same list: false for a host it does not name, true without a list and for a listed host', $cAsk === array('none' => true, 'other' => false, 'listed' => true), json_encode($cAsk));
+
+//with "Static files per host" on, an unlisted host is skipped by Cache only these hosts first: its
+//log line, no directory (the request's Host would make the host key skip as well)
+$cBaseExisted = is_dir($bAbs);
+$config->httpHosts = array('example.test');
+$cHost('example.test', 'elsewhere.test');
+$sp->set('staticBaseDir', $bRel);
+$sp->set('staticHostKey', 1);
+$sp->set('cacheHosts', 'other.test');
+$log0 = logText($tmp);
+publish($sp, $A);
+clearstatcache();
+$cLogged = $since($log0);
+$cKey = array('key on' => $sp->hostKeyOn(), 'base dir' => is_dir($bAbs) === $cBaseExisted, 'host dirs' => !is_dir("$bAbs/example.test") && !is_dir("$bAbs/elsewhere.test"), 'its line' => strpos($cLogged, 'is not listed in Cache only these hosts') !== false, 'no host key line' => strpos($cLogged, 'Static files per host') === false, 'no row' => !count($sp->index()->indexedFiles(null)));
+check('...with the host key on, an unlisted host: skipped by Cache only these hosts first, its log line and no other, no base or host directory made, no row', !in_array(false, $cKey, true), json_encode($cKey) . ' ' . $cLogged);
+$cRestore();
+restoreHosts();
+
+//a settings save changing the list as used (a lower-cased set) wipes every copy, Dry run or not; the
+//same set in another order and case wipes nothing [decided by user, Q67 D (a)]
+$cHost('example.test');
+$cConfig0 = $modules->getConfig('StaticPages');
+$cSave = array();
+publish($sp, $A);
+$log0 = logText($tmp);
+htSave($sp, array('cacheHosts' => "Example.test\nother.test"));
+clearstatcache();
+$cSave['changed'] = !is_file($cA) && strpos($since($log0), 'Cache only these hosts changed from every host to example.test other.test: every static copy is wiped') !== false;
+publish($sp, $A);
+$log0 = logText($tmp);
+htSave($sp, array('cacheHosts' => "OTHER.test\n\nexample.test\n"));
+clearstatcache();
+$cSave['same set'] = is_file($cA) && strpos($since($log0), 'Cache only these hosts changed') === false;
+$log0 = logText($tmp);
+htSave($sp, array('cacheHosts' => 'example.test', 'wipeDryRun' => 1));
+clearstatcache();
+$cSave['dry run'] = !is_file($cA) && strpos($since($log0), 'Cache only these hosts changed from example.test other.test to example.test: every static copy is wiped') !== false;
+//a dry run save holds back every .htaccess write for the rest of the request: taken back
+$dryRunHeld->setValue($sp->htaccess(), false);
+$modules->saveConfig('StaticPages', $cConfig0);
+check('a save changing Cache only these hosts wipes every copy, logged; the same set in another order and case wipes nothing; with Dry run checked it wipes too', $cSave === array('changed' => true, 'same set' => true, 'dry run' => true), json_encode($cSave));
+restoreHosts();
+
+//the generator: the serving rules gain a Host condition from the list's plain host names, [NC], the
+//other lines left out with a note; root mode sends a root file's request from another host to its
+//page; a list without a plain host name has no copy rule [decided by user, Q21 (a), Q67 C (a), E (a)]
+$h = $sp->htaccess();
+$h->using(null);
+$cGen = function(array $set) use ($sp, $h) {
+	foreach(array('cacheHosts', 'staticBaseDir', 'staticHostKey', 'cacheNonHtml', 'rootFiles') as $k) $sp->remove($k);
+	foreach($set as $k => $v) $sp->set($k, $v);
+	$rules = $h->rules();
+	return array($h->apacheBlock(), $rules['rules'], array_values(array_filter($rules['notes'], fn($n) => strpos($n, 'Cache only these hosts') !== false)));
+};
+$cTargets = fn(array $rules) => array_map(fn($r) => $r['target'], $rules);
+$cHostConds = function(array $rule) {
+	$out = array();
+	foreach($rule['conds'] as $c) if($c[0] === '%{HTTP_HOST}') $out[] = $c;
+	return $out;
+};
+$cPlain = array($cGen(array())[0], $cGen(array('cacheHosts' => ''))[0], $cGen(array('cacheHosts' => " \n\n"))[0]);
+check('generator: Cache only these hosts absent, empty or blank lines gives the step 06 block (sha1 428556d9...)', $cPlain === array($block010, $block010, $block010) && sha1($block010) === '428556d9e60563ecfdd25573877f4f703d1d6291');
+
+list($cB, $cR, $cN) = $cGen(array('cacheHosts' => "Example.test\nwww.example.test:8080\nbad host\n[::1]\na\$1\n%{HTTP_HOST}\nexample.test\nx..y\n-x.test"));
+$cCond = array('%{HTTP_HOST}', '^(?:example\\.test|www\\.example\\.test\\:8080)$', '[NC]');
+$cRoot = array('targets' => $cTargets($cR) === array('index\\.html', '$1index\\.html', 'index.php?it=$1'), 'home' => in_array($cCond, $cR[0]['conds'], true), 'page' => in_array($cCond, $cR[1]['conds'], true), 'dir rule' => $cHostConds($cR[2]) === array(), 'text' => substr_count($cB, "\nRewriteCond %{HTTP_HOST} ^(?:example\\.test|www\\.example\\.test\\:8080)$ [NC]\n") === 2, 'note' => count($cN) === 1 && strpos($cN[0], '6 line(s)') === 0, 'left out' => strpos($cB, 'bad') === false && strpos($cB, '::1') === false && strpos($cB, 'a$1') === false && strpos($cB, 'a\\$1') === false && strpos($cB, 'http_host') === false && strpos($cB, 'x\\.\\.y') === false && strpos($cB, '\\-x') === false && substr_count($cB, '%{HTTP_HOST}') === 2);
+check('generator, root mode, a list of two plain hosts among refused ones (a blank, [::1], $1, %{...}, .., a leading -): the home and page rules carry %{HTTP_HOST} ^(?:example\\.test|www\\.example\\.test\\:8080)$ [NC], the rule to ProcessWire none; one note counts the 6 refused lines, none reaches the block', !in_array(false, $cRoot, true), json_encode($cRoot) . ' ' . $cB);
+
+list($cB, $cR, $cN) = $cGen(array('cacheHosts' => 'example.test', 'cacheNonHtml' => 1, 'rootFiles' => 'robots.txt /robots/'));
+$cOne = array('%{HTTP_HOST}', '^(?:example\\.test)$', '[NC]');
+$cFiles = array('targets' => $cTargets($cR) === array('index\\.html', '$1index\\.html', '$1index\\.xml', '$1index\\.txt', 'index.php?it=$1', 'index.php?it=/robots/', 'index.php?it=/robots/'), 'served' => in_array($cOne, $cR[2]['conds'], true) && in_array($cOne, $cR[3]['conds'], true), 'other host' => $cR[5]['conds'] === array(array('%{HTTP_HOST}', '!^(?:example\\.test)$', '[NC]')) && $cR[5]['pattern'] === '^robots\\.txt$' && $cR[5]['flags'] === '[L,QSA]', 'route' => $cR[6]['conds'] === array(array('%{REQUEST_FILENAME}', '!-f')), 'text' => strpos($cB, "RewriteCond %{HTTP_HOST} !^(?:example\\.test)$ [NC]\nRewriteRule ^robots\\.txt$ index.php?it=/robots/ [L,QSA]\n# The root file robots.txt, from the page /robots/ while it is no existing file.\n") !== false, 'no note' => $cN === array());
+check('generator, root mode, switch on, root file robots.txt: index.xml and index.txt carry the Host condition; before the root file\'s route a rule sends a Host not listed (!^(?:example\\.test)$ [NC]) to the page /robots/, [L,QSA]', !in_array(false, $cFiles, true), json_encode($cFiles) . ' ' . $cB);
+
+list($cB, $cR, $cN) = $cGen(array('cacheHosts' => "bad host\n[::1]", 'cacheNonHtml' => 1, 'rootFiles' => 'robots.txt /robots/'));
+$cNone = array('targets' => $cTargets($cR) === array('index.php?it=$1', 'index.php?it=/robots/', 'index.php?it=/robots/'), 'root file' => $cR[1]['conds'] === array(), 'notes' => count($cN) === 2, 'plain' => $cTargets($cGen(array('cacheHosts' => 'bad host'))[1]) === array('index.php?it=$1'));
+check('generator, a list without a plain host name: no copy rule at all, the rule to ProcessWire, the root file\'s request from any host to its page; two notes', !in_array(false, $cNone, true), json_encode($cNone));
+
+list($cB, $cR, $cN) = $cGen(array('cacheHosts' => 'example.test', 'staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'rootFiles' => 'robots.txt /robots/'));
+$cServe = array_filter($cR, fn($r) => strpos($r['target'], "$bRel/") === 0 || strpos($r['target'], 'site/assets/static/') === 0);
+$cBase = array('served' => count($cServe) === 5 && count(array_filter($cServe, fn($r) => in_array($cOne, $r['conds'], true))) === 5, 'others' => count(array_filter($cR, fn($r) => strpos($r['target'], 'index.php') === 0 && $cHostConds($r) !== array())) === 0, 'none' => $cTargets($cGen(array('cacheHosts' => 'bad host', 'staticBaseDir' => $bRel, 'cacheNonHtml' => 1, 'rootFiles' => 'robots.txt /robots/'))[1]) === array('index.php?it=$1', 'index.php?it=/robots/'));
+$cHostsSaved = $config->httpHosts;
+$config->httpHosts = array('example.test', 'www.example.test');
+list($cB, $cR, $cN) = $cGen(array('cacheHosts' => 'example.test', 'staticBaseDir' => $bRel, 'staticHostKey' => 1));
+$cBase['host key'] = $cR[0]['conds'][0] === array('%{HTTP_HOST}', '^example\\.test$', '[NC]') && in_array($cOne, $cR[0]['conds'], true) && in_array($cOne, $cR[2]['conds'], true) && $cHostConds($cR[2])[0] === array('%{HTTP_HOST}', '^www\\.example\\.test$', '[NC]');
+$config->httpHosts = $cHostsSaved;
+check('generator, base directory: the five copy rules (home, three page names, the root file copy) carry the Host condition, no rule to index.php does; a list without a plain host: no copy rule; with the host key both Host conditions', !in_array(false, $cBase, true), json_encode($cBase));
+foreach(array('cacheHosts', 'staticBaseDir', 'staticHostKey', 'cacheNonHtml', 'rootFiles') as $k) $sp->remove($k);
+$cRestore();
+$h->using(null);
+$sp->wipeCaches();
+foreach($cDirs as $dir => $existed) if(!$existed) @rmdir($dir);
+clearstatcache();
+check('Cache only these hosts block: the tree, the settings, the hosts and the stored config as before, no index row', files($tmpRoot) === $cBefore && !count($sp->index()->indexedFiles(null)) && $sp->get('cacheHosts') === $cSettings['cacheHosts'] && $sp->get('staticBaseDir') === $cSettings['staticBaseDir'] && $config->httpHost === $hostsAtStart[0] && $config->httpHosts === $hostsAtStart[1] && $modules->getConfig('StaticPages') == $cConfig0 && $h->apacheBlock() === $block010, json_encode(array(files($tmpRoot), $cBefore)));
+
 ////  .htaccess manager (0.10.0)
 
 //when the manager runs: install, the check after a superuser's admin request or a CLI run, a
@@ -5186,6 +5446,24 @@ check('...a save clearing it again: the web root\'s block', file_get_contents($h
 $h->using(null);
 rrmdir("$tmpRoot/site/assets/static");
 if(!$gSiteExisted) { @rmdir("$tmpRoot/site/assets"); @rmdir("$tmpRoot/site"); }
+htClean($tmpRoot);
+htForget($tmp);
+htClearPending($sp);
+
+//a saved Cache only these hosts makes a current block outdated; the save rewrites it with the Host
+//condition, the refused line left out (step 21)
+htPut($htFile, $withBlock);
+$sp->set('cacheHosts', 'example.test');
+$h->using(null);
+$cOutdated = $h->status()['state'];
+$sp->remove('cacheHosts');
+htSave($sp, array('cacheHosts' => "Example.test\nbad host"));
+$new = (string) file_get_contents($htFile);
+$st = $h->status();
+check('settings save setting Cache only these hosts, current: the block read with the new list is outdated; the save rewrites it with RewriteCond %{HTTP_HOST} ^(?:example\\.test)$ [NC], the refused line left out, one backup, then current', $cOutdated === 'outdated' && $st['state'] === 'current' && strpos($new, "\nRewriteCond %{HTTP_HOST} ^(?:example\\.test)$ [NC]\n") !== false && strpos($new, 'bad host') === false && strpos($new, 'bad\ host') === false && strpos($new, $h->apacheBlock()) !== false && count(htBackups($tmpRoot)) === 1, json_encode(array($cOutdated, $st['state'], htBackups($tmpRoot), strpos($new, $h->apacheBlock()))));
+htSave($sp, array(), array('cacheHosts'));
+check('...a save clearing it again: the block of 0.10.0 again', file_get_contents($htFile) === $withBlock && $h->status()['state'] === 'current');
+$h->using(null);
 htClean($tmpRoot);
 htForget($tmp);
 htClearPending($sp);
@@ -5484,6 +5762,12 @@ check('"Static base directory" is an empty text field whose notes name the marke
 $field = $form ? $form->getChildByName('staticHostKey') : null;
 $notes = $field ? (string) $field->notes : '';
 check('"Static files per host" is an unchecked checkbox shown with a base directory, whose notes name httpHosts and how the block matches the Host header (step 11)', $field instanceof InputfieldCheckbox && !$field->attr('checked') && (string) $field->showIf === "staticBaseDir!=''" && strpos($notes, 'httpHosts') !== false && strpos($notes, 'serve these files yet') === false && strpos($notes, 'without regard to letter case') !== false, $notes);
+$field = $form ? $form->getChildByName('cacheHosts') : null;
+$notes = $field ? (string) $field->notes : '';
+check('"Cache only these hosts" is an empty textarea whose notes name $config->httpHost, the Host header, the root file and the wipe on a change (step 21)', $field instanceof InputfieldTextarea && (string) $field->attr('value') === '' && strpos($notes, 'config-&gt;httpHost') !== false && strpos($notes, 'Host header') !== false && strpos($notes, 'root file') !== false && strpos($notes, 'deletes every static copy') !== false, $notes);
+$field = $form ? $form->getChildByName('trackOnFrontend') : null;
+$notes = $field ? (string) $field->notes : '';
+check('"Track changes on front-end requests" is an unchecked checkbox whose notes name the minute, the log and checkTrackedPaths(true) (step 21)', $field instanceof InputfieldCheckbox && !$field->attr('checked') && strpos($notes, 'once a minute') !== false && strpos($notes, 'static-pages log') !== false && strpos($notes, 'checkTrackedPaths(true)') !== false, $notes);
 
 //the settings form groups its fields in fieldsets (0.8.2), the force wipe and the main switch
 //ungrouped at the bottom. ProcessModule stores getAll(): wrappers are left out of it, so a
@@ -5502,8 +5786,8 @@ if($form) foreach($form->children() as $child) {
 $layout = array_slice($layout, -8, null, true);
 $expected = array(
 	'_general' => array('priority'),
-	'_static' => array('newDirPermissions', 'staticFile', 'cacheNonHtml', 'rootFiles', 'staticBaseDir', 'staticHostKey'),
-	'_exclusions' => array('nonStaticDirs', 'nonStaticTemplates', 'trackedPaths', 'noCacheCookies'),
+	'_static' => array('newDirPermissions', 'staticFile', 'cacheNonHtml', 'rootFiles', 'staticBaseDir', 'staticHostKey', 'cacheHosts'),
+	'_exclusions' => array('nonStaticDirs', 'nonStaticTemplates', 'trackedPaths', 'noCacheCookies', 'trackOnFrontend'),
 	'_system' => array('csrfPatterns', 'useShell', 'wipeDryRun', 'logSkips'),
 	'_wipe' => array('wipeOnConfigSaveModules', 'wipeOnSaveField', 'wipeAllTemplates', 'wipeAllFields', 'ignoreTemplates', 'narrowFinds', 'maxAge'),
 	'htaccessAction' => true,

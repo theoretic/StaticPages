@@ -37,6 +37,8 @@ stock rule 19):
     slash gets mod_dir's 301 to the slashed form, as without the block)
   - with a Static base directory the copies are looked for there (and below <base>/<host>/ with
     Static files per host), the web root's directories only guard, see baseRules()
+  - with "Cache only these hosts" a copy answers only a Host the list names, and a listed root
+    file's request from any other Host goes to its page
 A missing or outdated block may only cost speed, never correctness: without a rule a request
 reaches PHP.
 */
@@ -221,52 +223,66 @@ class StaticPagesHtaccess extends Wire {
 		$cookies = $this->loginCookies($notes);
 		if( count($cookies) ) $serve[] = array( '%{HTTP_COOKIE}', '!(^|;\s*)(' . implode( '|', array_map( array($this, 'escape'), $cookies ) ) . ')=' );
 
+		//"Cache only these hosts": a copy answers a listed Host only, any other goes to ProcessWire
+		//[decided by user, Q21 (a)]; a list without a plain host name: no copy answers at all
+		//[Q67 E (a)]. Nothing while the list is empty
+		$hosts = $this->cacheHosts($notes);
+		$hostsPattern = $hosts ? '^(?:' . implode( '|', array_map( array($this, 'escape'), $hosts ) ) . ')$' : '';
+		if( $hostsPattern !== '' ) $serve[] = array( '%{HTTP_HOST}', $hostsPattern, '[NC]' );
+		$serveNone = $hosts !== null && !count($hosts);
+
 		//"Static base directory" set: the copies are served from there, see baseRules()
 		$base = $this->baseDir($notes);
-		if( $base !== '' ) return array( 'rules' => $this->baseRules( $name, $serve, $base, $this->hostDirs($notes) ), 'notes' => $notes );
+		if( $base !== '' ){
+			$hostDirs = $this->hostDirs($notes);
+			return array( 'rules' => $this->baseRules( $name, $serve, $base, $serveNone ? array() : $hostDirs ), 'notes' => $notes );
+		}
 
 		$rules = array();
 
-		//the home page: its dir holds ProcessWire's own index.php, which the stock
-		//DirectoryIndex answers whenever this rule does not
-		$rules[] = array(
-			'comment' => 'The home page, from its copy.',
-			'conds' => array_merge( $serve, array(
-				array( '%{REQUEST_FILENAME}/' . $file, '-f' ),
-				) ),
-			'pattern' => '^$',
-			'target' => $file,
-			'flags' => '[L]',
-			);
+		if( !$serveNone ){
 
-		//any other page: a dir holding an index.php of its own (an API endpoint, a tool) is
-		//answered as the stock file answers it
-		$rules[] = array(
-			'comment' => 'A page, from its copy, unless its directory holds an index file of its own.',
-			'conds' => array_merge( $serve, array(
-				array( '%{REQUEST_FILENAME}/index.php', '!-f' ),
-				array( '%{REQUEST_FILENAME}/' . $file, '-f' ),
-				) ),
-			'pattern' => '^(.+/)$',
-			'target' => '$1' . $file,
-			'flags' => '[L]',
-			);
-
-		//the other names a copy carries while "Cache XML and plain text responses" is on
-		//(index.xml, index.txt): the same rule, after the HTML one. No home rule: a copy of
-		//another type is never written for the home page [decided by user, Q9]
-		foreach( $this->scanNames() as $typed ){
-			if( $typed === $name ) continue;
+			//the home page: its dir holds ProcessWire's own index.php, which the stock
+			//DirectoryIndex answers whenever this rule does not
 			$rules[] = array(
-				'comment' => 'A page, from its ' . $typed . ' copy, unless its directory holds an index file of its own.',
+				'comment' => 'The home page, from its copy.',
 				'conds' => array_merge( $serve, array(
-					array( '%{REQUEST_FILENAME}/index.php', '!-f' ),
-					array( '%{REQUEST_FILENAME}/' . $this->escape($typed), '-f' ),
+					array( '%{REQUEST_FILENAME}/' . $file, '-f' ),
 					) ),
-				'pattern' => '^(.+/)$',
-				'target' => '$1' . $this->escape($typed),
+				'pattern' => '^$',
+				'target' => $file,
 				'flags' => '[L]',
 				);
+
+			//any other page: a dir holding an index.php of its own (an API endpoint, a tool) is
+			//answered as the stock file answers it
+			$rules[] = array(
+				'comment' => 'A page, from its copy, unless its directory holds an index file of its own.',
+				'conds' => array_merge( $serve, array(
+					array( '%{REQUEST_FILENAME}/index.php', '!-f' ),
+					array( '%{REQUEST_FILENAME}/' . $file, '-f' ),
+					) ),
+				'pattern' => '^(.+/)$',
+				'target' => '$1' . $file,
+				'flags' => '[L]',
+				);
+
+			//the other names a copy carries while "Cache XML and plain text responses" is on
+			//(index.xml, index.txt): the same rule, after the HTML one. No home rule: a copy of
+			//another type is never written for the home page [decided by user, Q9]
+			foreach( $this->scanNames() as $typed ){
+				if( $typed === $name ) continue;
+				$rules[] = array(
+					'comment' => 'A page, from its ' . $typed . ' copy, unless its directory holds an index file of its own.',
+					'conds' => array_merge( $serve, array(
+						array( '%{REQUEST_FILENAME}/index.php', '!-f' ),
+						array( '%{REQUEST_FILENAME}/' . $this->escape($typed), '-f' ),
+						) ),
+					'pattern' => '^(.+/)$',
+					'target' => '$1' . $this->escape($typed),
+					'flags' => '[L]',
+					);
+			}
 		}
 
 		//the stock rules answer an existing dir from disk: DirectoryIndex would serve the copy
@@ -292,8 +308,20 @@ class StaticPagesHtaccess extends Wire {
 
 		//"Replace these root files with pages": a request for the name that is no existing file
 		//goes to ProcessWire as the line's page; once the copy exists the stock rules serve it.
-		//The line rootRouteLines() suggests, in the form isRootFileRoute() reads
+		//The line rootRouteLines() suggests, in the form isRootFileRoute() reads.
+		//With "Cache only these hosts" a host it does not list goes to the page whatever the web
+		//root holds, as in baseRules(): the stock rules would serve it the copy [decided by user,
+		//Q67 C (a)]
 		foreach( $this->rootFiles() as $root => $path ){
+			if( $hosts !== null ) $rules[] = array(
+				'comment' => 'The root file ' . $root . ', for a host Cache only these hosts does not list, from the page ' . $path . '.',
+				'conds' => $hostsPattern === '' ? array() : array(
+					array( '%{HTTP_HOST}', '!' . $hostsPattern, '[NC]' ),
+					),
+				'pattern' => '^' . $this->escape($root) . '$',
+				'target' => 'index.php?it=' . $path,
+				'flags' => '[L,QSA]',
+				);
 			$rules[] = array(
 				'comment' => 'The root file ' . $root . ', from the page ' . $path . ' while it is no existing file.',
 				'conds' => array(
@@ -432,6 +460,30 @@ class StaticPagesHtaccess extends Wire {
 		}
 		if( $why !== '' ) $notes[] = 'The Static base directory setting is not used (' . $why . '): the rules serve copies from the web root.';
 		return $dir;
+	}
+
+	/**
+	 * "Cache only these hosts" as the rules use it: null while the list is empty (every host);
+	 * else its lines that are a plain host name with an optional port, lower-cased, once. Any
+	 * other line is left out with a note [decided by user, Q67 E (a)]
+	 *
+	 * #pw-internal
+	 *
+	 * @param array $notes
+	 * @return array|null
+	 *
+	 */
+	public function cacheHosts(array &$notes = array()) {
+		$list = $this->sp->cacheHostsList( $this->settings );
+		if( !count($list) ) return null;
+		$hosts = array();
+		foreach( $list as $host ){
+			if( preg_match( '/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$/D', $host ) ) $hosts[] = $host;
+		}
+		$refused = count($list) - count($hosts);
+		if( $refused ) $notes[] = sprintf( '%d line(s) of Cache only these hosts are no plain host name: no copy is served to them.', $refused );
+		if( !count($hosts) ) $notes[] = 'Cache only these hosts names no plain host name: no copy is served.';
+		return $hosts;
 	}
 
 	protected function hostDirs(array &$notes) {

@@ -116,6 +116,16 @@ $config = array(
 						'columnWidth'			=> 100,
 					),
 
+					array(
+						'name'					=> 'cacheHosts',
+						'type'					=> 'textarea',
+						'label'					=> $this->_('Cache only these hosts'),
+						'description'			=> $this->_('one host per line, e.g. "example.com" or "example.com:8080"; empty: every host'),
+						'notes'					=> $this->_('A page is cached only when $config->httpHost is listed here, letter case aside; any other render is not cached (with "Log skipped pages", logged). Asked before "Static files per host". The root .htaccess block serves a copy only to a request whose Host header is listed, letter case aside, a port only as listed; any other host goes to ProcessWire, also for a root file listed above. Only lines that are a plain host name, letters, digits, "-" and dots with an optional ":port", go into the block; a list holding no such line has no copy served at all. Changing this setting deletes every static copy first.'),
+						'columnWidth'			=> 100,
+						'value'					=> '',
+					),
+
 				),
 			),
 
@@ -168,6 +178,14 @@ $config = array(
 						'notes'					=> $this->_('A guest request carrying one of these cookies is rendered but not cached: output that depends on a cookie (a currency, a region, a consent banner) would be frozen into the file everybody gets. Responses that set a cookie (ProcessWire\'s own session cookie aside) or send a Vary header on anything but Accept-Encoding are never cached either. Output that depends on Accept-Language without saying so can not be told apart: exclude its template.'),
 						'columnWidth'			=> 50,
 						'value'					=> '',
+					),
+
+					array(
+						'name'					=> 'trackOnFrontend',
+						'type'					=> 'checkbox',
+						'label'					=> $this->_('Track changes on front-end requests'),
+						'notes'					=> $this->_('Also checks the paths of "Track changes in these paths" after the response of a front-end request PHP handles, at most once a minute, so a deployed template or asset wipes the static files without anybody opening the admin. A change is written to the static-pages log, no notice is shown. Requests answered from a static copy run no PHP and check nothing. A deploy script calling $modules->get(\'StaticPages\')->checkTrackedPaths(true) stays the exact way.'),
+						'columnWidth'			=> 100,
 					),
 
 				),

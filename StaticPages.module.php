@@ -115,6 +115,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	//stat every tracked file again. 0 checks on every admin request
 	const trackingInterval = 10;
 
+	//the same for the check after a front-end request, "Track changes on front-end requests",
+	//with a stamp of its own: a visitor's request pays one stat() inside it
+	const trackingIntervalFront = 60;
+
 	//RecursiveDirectoryIterator will not descend into a symlinked dir unless
 	//FOLLOW_SYMLINKS is passed, this cap catches what a platform fails to report as a link
 	const trackingMaxDepth = 20;
@@ -626,7 +630,13 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//changes nothing and wipes nothing [decided by user, Q38 E (a)]
 		$oldKey = $this->hostKeyOn($storedConfig);
 		$newKey = $this->hostKeyOn($data);
-		if( $stored === $new && $oldBase === $newBase && $oldKey === $newKey ) return;
+		//"Cache only these hosts" as used, a lower-cased set: copies an unlisted host wrote would be
+		//served to the listed ones [decided by user, Q67 D (a)]
+		$oldHosts = $this->cacheHostsList($storedConfig);
+		$newHosts = $this->cacheHostsList($data);
+		sort($oldHosts);
+		sort($newHosts);
+		if( $stored === $new && $oldBase === $newBase && $oldKey === $newKey && $oldHosts === $newHosts ) return;
 		$what = array();
 		if( $stored !== $new ){
 			$this->logDrain( 'Cache XML and plain text responses turned ' . ( $new ? 'on' : 'off' ) . ': every static copy is wiped' );
@@ -639,6 +649,11 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		if( $oldKey !== $newKey ){
 			$this->logDrain( 'Static files per host turned ' . ( $newKey ? 'on' : 'off' ) . ': every static copy under the old layout is wiped' );
 			$what[] = 'Static files per host';
+		}
+		if( $oldHosts !== $newHosts ){
+			$list = fn(array $hosts) => count($hosts) ? preg_replace( '/[\x00-\x1f\x7f]/', ' ', implode(' ', $hosts) ) : 'every host';
+			$this->logDrain( 'Cache only these hosts changed from ' . $list($oldHosts) . ' to ' . $list($newHosts) . ': every static copy is wiped' );
+			$what[] = 'Cache only these hosts';
 		}
 		try {
 			$this->withBaseDir( isset($storedConfig['staticBaseDir']) ? $storedConfig['staticBaseDir'] : '', fn() => $this->withHostKey( !empty($storedConfig['staticHostKey']), fn() => $this->wipeCaches() ) );
@@ -906,6 +921,14 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		//$base: what $path is made relative to and pruned up to, the static root, which also
 		//holds a root file's copy: the site root, or the base directory
 		$base = $this->staticRoot();
+
+		//"Cache only these hosts", asked before the host key: an unlisted host writes nothing and
+		//gets no dir
+		$reason = $this->cacheHostSkip();
+		if( $reason !== '' ){
+			$this->logSkip( $page, $reason );
+			return;
+		}
 
 		//"Static files per host": the copies of each host in a dir of their own below the base
 		//directory, <base>/<host>/; $base stays the static root, the relative paths carry the host
@@ -1270,6 +1293,18 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 	}
 
 	public function shutdownDrain(){
+		//"Track changes on front-end requests": the tracked paths after a visitor's response, as
+		//an admin request checks them in ready(). First, so the drain below takes the modeAll row
+		//it queues [decided by user, Q67 A (a)]. Never on an admin request or a CLI run
+		if( !$this->cli && !$this->adminRequest && $this->configValue('trackOnFrontend', 0) ){
+			try {
+				$this->tracker()->checkFrontend();
+			}
+			catch( \Throwable $e ){
+				$this->logDrain( 'tracked path check after a front-end request failed: ' . $e->getMessage() );
+			}
+		}
+
 		//an install switched from an older version is brought up to date after the response of
 		//its first admin request, CLI script, or request that queued a save, before that drain
 		if( $this->migration()->pending() && ( $this->adminRequest || PHP_SAPI === 'cli' || $this->queue()->drainRequested() ) ){
@@ -1483,6 +1518,7 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$input = $this->wire()->input;
 		if( count($input->get) > 0 || count($input->post) > 0 ) return false;
 		if( $this->publisher()->cookieSkip() !== '' ) return false;
+		if( $this->cacheHostSkip() !== '' ) return false;
 		return true;
 	}
 
@@ -1720,6 +1756,28 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$dir = str_replace( ':', '_', $host );
 		if( !$this->isHostDir($dir) ) return array('', 'the host "' . $clean($host) . '" is no plain host name');
 		return array($dir, '');
+	}
+
+	/** #pw-internal */
+	public function cacheHostsList(?array $data = null){
+		//"Cache only these hosts" as the write side reads it: every line, trimmed and lower-cased,
+		//once [decided by user, Q67 E (a)]; empty: every host. $data: a settings array to read it
+		//from, as in staticBaseDir(). The block takes only the plain ones, see
+		//StaticPagesHtaccess::cacheHosts()
+		if( $data !== null ) $raw = isset($data['cacheHosts']) ? $data['cacheHosts'] : '';
+		else $raw = $this->configValue('cacheHosts', '');
+		return array_values( array_unique( array_map( 'strtolower', $this->linesToArray( is_string($raw) ? $raw : '' ) ) ) );
+	}
+
+	/** #pw-internal */
+	public function cacheHostSkip(){
+		//why "Cache only these hosts" keeps this request from being cached, '' when it does not:
+		//$config->httpHost, lower-cased, has to be one of its lines
+		$list = $this->cacheHostsList();
+		if( !count($list) ) return '';
+		$host = strtolower( (string) $this->wire()->config->httpHost );
+		if( in_array( $host, $list, true ) ) return '';
+		return 'the host "' . preg_replace( '/[\x00-\x1f\x7f]/', ' ', $host ) . '" ($config->httpHost) is not listed in Cache only these hosts';
 	}
 
 	/** #pw-internal */
