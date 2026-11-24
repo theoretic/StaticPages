@@ -481,8 +481,10 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 
 	private function addIndexCounts(InputfieldWrapper $form){
 		//how many indexed files nearly any page save removes: read here, the one request that
-		//queries for it, never from StaticPages.config.php. Left out without index tables. No
-		//quote in the text: with LanguageSupport $this->_() hands it back entity encoded already
+		//queries for it, never from StaticPages.config.php. Left out without index tables. The
+		//text of $this->_() is decoded before the one encoding: core's __() hands it back entity
+		//encoded already on a LanguageSupport install with a language set, raw on others, so a
+		//translation holding a quote is encoded exactly once either way [audit 1, N1.2]
 		if( !$this->index()->tablesKnownReady() ) return;
 		$counts = $this->index()->fileCounts();
 		if( !$counts ) return;
@@ -490,8 +492,9 @@ class StaticPages extends WireData implements Module, ConfigurableModule {
 		$f = $this->wire()->modules->get('InputfieldMarkup');
 		$f->attr( 'name', '_indexCounts' );
 		$f->label = $this->_('Indexed static files');
+		$tr = function($text) { return html_entity_decode( (string) $text, ENT_QUOTES | ENT_HTML5, 'UTF-8' ); };
 		$f->value = '<p>' . $sanitizer->entities( sprintf(
-			$this->_('%1$d static files are indexed. %2$d of them carry the tag any, a find this module does not understand, and %3$d the tag *, no dependencies recorded: a save of nearly any page removes them, whatever it changed. With the setting Log skipped pages on, the static-pages log names the selector of each find not understood when its file is written.'),
+			$tr( $this->_('%1$d static files are indexed. %2$d of them carry the tag any, a find this module does not understand, and %3$d the tag *, no dependencies recorded: a save of nearly any page removes them, whatever it changed. With the setting Log skipped pages on, the static-pages log names the selector of each find not understood when its file is written.') ),
 			$counts['total'], $counts['any'], $counts['*']
 			) ) . '</p>';
 		$wipe = $form->getChildByName('_wipe');

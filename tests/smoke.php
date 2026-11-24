@@ -4882,6 +4882,25 @@ if($form && $f) foreach($form->children() as $child) {
 	if($child === $f) break;
 	$adAfter = (string) $child->attr('name') === '_wipe';
 }
+//N1.2b: its text holds no quote; a stubbed translation does (core's fallback translations,
+//wireLangTranslations(), used where no real translation is), encoded once whether core's __()
+//encodes it (this install, LanguageSupport) or hands it back raw (encoding off) [audit 1, N1.2]
+$acSource = '%1$d static files are indexed. %2$d of them carry the tag any, a find this module does not understand, and %3$d the tag *, no dependencies recorded: a save of nearly any page removes them, whatever it changed. With the setting Log skipped pages on, the static-pages log names the selector of each find not understood when its file is written.';
+wireLangTranslations(array($acSource => '%1$d "static" files, it\'s %2$d any & %3$d *.'));
+$acEncodeWas = wireLangEntityEncode();
+$acSeen = array();
+foreach(array('core' => '', 'raw' => false) as $acMode => $acSet) {
+	if($acSet !== '') wireLangEntityEncode($acSet);
+	$acCore = $sp->_($acSource);
+	$form = $modules->getModuleConfigInputfields('StaticPages');
+	$acF = $form ? $form->getChildByName('_indexCounts') : null;
+	$acSeen[$acMode] = array('stub' => strpos(html_entity_decode($acCore, ENT_QUOTES), '"static"') !== false, 'core encodes' => strpos($acCore, '"') === false, 'value' => $acF ? (string) $acF->value : '');
+}
+wireLangEntityEncode($acEncodeWas);
+wireLangTranslations(array($acSource => $acSource));
+$acOnce = '<p>2 &quot;static&quot; files, it&#039;s 1 any &amp; 0 *.</p>';
+echo '     N1.2b core __() encodes the stub here: ' . json_encode($acSeen['core']['core encodes']) . ', with encoding off: ' . json_encode($acSeen['raw']['core encodes']) . "\n";
+check('the indexed files note encodes a stubbed translation holding quotes and an ampersand once, with core\'s translation encoding as this install has it and with it off', $acSeen['core']['stub'] && $acSeen['raw']['stub'] && $acSeen['raw']['core encodes'] === false && $acSeen['core']['value'] === $acOnce && $acSeen['raw']['value'] === $acOnce, json_encode($acSeen));
 $tablesAtStart = $tablesReady->getValue($sp->index());
 $tablesReady->setValue($sp->index(), false);
 $form = $modules->getModuleConfigInputfields('StaticPages');

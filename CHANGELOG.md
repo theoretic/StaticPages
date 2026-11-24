@@ -90,7 +90,7 @@ With the new settings at their defaults:
   page. Both are left out now; a hand-made file the index does not record still counts.
 - **The *Root .htaccess* texts were entity encoded twice on multi-language installs**: a quote
   showed as `&#039;` (`ProcessWire&#039;s`). Each text is now encoded once, with or without
-  LanguageSupport.
+  LanguageSupport; so is the *Indexed static files* note, for a translation holding a quote.
 
 ### Tests
 - `tests/smoke.php` checks the tags a save queues (the `Pages::added` path, repeater items, a
